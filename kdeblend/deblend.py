@@ -200,10 +200,10 @@ def deblend(
             epochs.append(ep)
 
     epochs_per_obj = [epochs] * len(objects)
-    return _deblend_core(
+    return _Deblender(
         epochs_per_obj, nband, objects, fwhm_smooth, Tsmooth,
         maxiter, tol, fixed_models=fixed_models,
-    )
+    ).go()
 
 
 def deblend_stamps(
@@ -288,82 +288,13 @@ def deblend_stamps(
                 eps.append(ep)
         epochs_per_obj.append(eps)
 
-    return _deblend_core(
+    return _Deblender(
         epochs_per_obj, nband, objects, fwhm_smooth, Tsmooth,
         maxiter, tol, fixed_models=fixed_models,
-    )
+    ).go()
 
 
-def _pack_state(models, Sw, scales):
-    """
-    the global deblend state as a normalized vector, for the sweep
-    map extrapolation.  Star weights and covariances are frozen and
-    only their fluxes enter.  The scales are fixed on the first call
-    """
-    x = []
-    for m, sw in zip(models, Sw):
-        x.extend(m['F'])
-        if m['type'] == 'gauss':
-            x.extend([
-                m['cov_sm'][0, 0], m['cov_sm'][0, 1],
-                m['cov_sm'][1, 1],
-            ])
-        elif m['type'] in ('exp', 'dev'):
-            x.extend([
-                m['cov'][0, 0], m['cov'][0, 1], m['cov'][1, 1],
-            ])
-        if m['type'] != 'star':
-            x.extend([sw[0, 0], sw[0, 1], sw[1, 1]])
-    x = np.array(x)
-    if scales is None:
-        scales = np.maximum(np.abs(x), 1.0e-10)
-    return x / scales, scales
-
-
-def _unpack_state(x, scales, models, Sw):
-    """write a packed state vector back into the models and weights"""
-    x = x * scales
-    k = 0
-    for i, m in enumerate(models):
-        nband = m['F'].size
-        m['F'] = x[k:k + nband].copy()
-        k += nband
-        if m['type'] == 'gauss':
-            m['cov_sm'] = np.array([
-                [x[k], x[k + 1]], [x[k + 1], x[k + 2]],
-            ])
-            k += 3
-        elif m['type'] in ('exp', 'dev'):
-            m['cov'] = np.array([
-                [x[k], x[k + 1]], [x[k + 1], x[k + 2]],
-            ])
-            k += 3
-        if m['type'] != 'star':
-            Sw[i] = np.array([
-                [x[k], x[k + 1]], [x[k + 1], x[k + 2]],
-            ])
-            k += 3
-
-
-def _state_valid(models, Sw, Tsmooth):
-    """every weight and model in the state gives well defined sums"""
-    for m, sw in zip(models, Sw):
-        if sw[0, 0] <= 0 or sw[1, 1] <= 0 or det2(sw) <= 0:
-            return False
-        if m['type'] in ('exp', 'dev'):
-            if not mixture_model_valid(
-                    m['type'], m['cov'], ZERO_WEIGHT, Tsmooth):
-                return False
-        elif m['type'] == 'gauss':
-            if det2(m['cov_sm']) <= 0:
-                return False
-    return True
-
-
-def _deblend_core(
-    epochs_per_obj, nband, objects, fwhm_smooth, Tsmooth, maxiter, tol,
-    fixed_models=None,
-):
+class _Deblender(object):
     """
     the Gauss-Seidel iteration over objects, with a per-object list
     of prepared epochs; in shared-image mode all objects have the
@@ -373,63 +304,366 @@ def _deblend_core(
     most blended objects, with their fluxes and structures locked in
     a single slowly decaying direction, so it is accelerated with a
     guarded Steffensen boost on the packed global state of all
-    objects: three consecutive plain sweeps give the contraction
-    ratio of the dominant mode and the remaining geometric series is
-    applied in one step, rolled back if it leaves the valid region.
-    Convergence is always decided by a subsequent plain sweep.  See
-    ngmix.prepsfadmom PAdmomFitter._run_admom_mixture for the
-    Aitken/Steffensen/Sidi references
+    objects (see _extrapolate).  The packed state is a single
+    normalized vector holding, for every object, its per-band fluxes
+    and the entries of its model and weight covariance matrices;
+    star structures are frozen so only their fluxes enter (see
+    _pack_state)
+
+    Parameters
+    ----------
+    epochs_per_obj: list of lists of dicts
+        For each object, the prepared epochs it is measured from
+        (see ngmix.prepsfadmom.prep.prep_epoch), with the phase
+        center entries vcen, ucen set
+    nband: int
+        The number of bands; the epoch band entries index this range
+    objects: list of dicts
+        As for deblend
+    fwhm_smooth: float
+        The common smoothing fwhm
+    Tsmooth: float
+        The T of the smoothing gaussian
+    maxiter: int
+        Maximum number of Gauss-Seidel sweeps
+    tol: float
+        Convergence tolerance on the maximum relative parameter
+        change per sweep
+    fixed_models: list of dicts, optional
+        As for deblend
     """
-    nobj = len(objects)
-    if nobj == 0:
-        raise ValueError('no objects sent')
+    def __init__(
+        self, epochs_per_obj, nband, objects, fwhm_smooth, Tsmooth,
+        maxiter, tol, fixed_models=None,
+    ):
+        if len(objects) == 0:
+            raise ValueError('no objects sent')
 
-    positions = []
-    models = []
-    Sw = []
-    for o in objects:
-        positions.append((o['v'], o['u']))
-        otype = o.get('type', 'gauss')
-        Tguess = o.get('Tguess', DEFAULT_TGUESS)
-        m = {'type': otype, 'F': np.zeros(nband)}
-        if otype == 'star':
-            # pre-psf delta function: in the smoothed plane the model
-            # and the matched weight are both the smoothing gaussian
-            Sw.append(np.diag([Tsmooth / 2, Tsmooth / 2]))
-            m['cov_sm'] = np.diag([Tsmooth / 2, Tsmooth / 2])
-        elif otype == 'gauss':
-            Sw.append(np.diag([(Tguess + Tsmooth) / 2] * 2))
-            m['cov_sm'] = Sw[-1].copy()
-        elif otype in ('exp', 'dev'):
-            Sw.append(np.diag([(Tguess + Tsmooth) / 2] * 2))
-            m['cov'] = cov_from_e(0.0, 0.0, Tguess)
+        self.epochs_per_obj = epochs_per_obj
+        self.nband = nband
+        self.nobj = len(objects)
+        self.fwhm_smooth = fwhm_smooth
+        self.Tsmooth = Tsmooth
+        self.maxiter = maxiter
+        self.tol = tol
+        self.smooth_cov = np.diag([Tsmooth / 2, Tsmooth / 2])
+
+        self._init_models(objects)
+        self.fpositions, self.fmodels = _convert_fixed_models(
+            fixed_models, nband, Tsmooth,
+        )
+
+        self.nskip = 0
+        self.cen_pull = [np.zeros(2) for _ in range(self.nobj)]
+        # scratch for the k-space sum kernels, overwritten per call
+        self.esums = np.zeros(6)
+
+        # sweep-map extrapolation history of normalized global states
+        self.scales = None
+        self.hist = []
+
+        # per-object failure containment state
+        self.nfail = np.zeros(self.nobj, dtype='i4')
+        self.nrestart = np.zeros(self.nobj, dtype='i4')
+        self.dbflags = np.zeros(self.nobj, dtype='i4')
+
+        self._init_fluxes()
+
+    def _init_models(self, objects):
+        """
+        the positions, models and weights at the guess structures
+        """
+        self.positions = []
+        self.models = []
+        self.Sw = []
+        for o in objects:
+            self.positions.append((o['v'], o['u']))
+            otype = o.get('type', 'gauss')
+            Tguess = o.get('Tguess', DEFAULT_TGUESS)
+            m = {'type': otype, 'F': np.zeros(self.nband)}
+            if otype == 'star':
+                # pre-psf delta function: in the smoothed plane the
+                # model and the matched weight are both the smoothing
+                # gaussian
+                self.Sw.append(self.smooth_cov.copy())
+                m['cov_sm'] = self.smooth_cov.copy()
+            elif otype == 'gauss':
+                self.Sw.append(
+                    np.diag([(Tguess + self.Tsmooth) / 2] * 2),
+                )
+                m['cov_sm'] = self.Sw[-1].copy()
+            elif otype in ('exp', 'dev'):
+                self.Sw.append(
+                    np.diag([(Tguess + self.Tsmooth) / 2] * 2),
+                )
+                m['cov'] = cov_from_e(0.0, 0.0, Tguess)
+            else:
+                raise ValueError(f"bad object type: '{otype}'")
+            self.models.append(m)
+
+    def _init_fluxes(self):
+        """
+        initialize the fluxes by solving the per-band linear system
+        at the guess structures: the measured flux sums for each
+        object are linear in all object fluxes with closed-form
+        overlap coefficients.  The fixed external models are
+        subtracted from the measured side
+        """
+        nobj = self.nobj
+        for band in range(self.nband):
+            A = np.zeros((nobj, nobj))
+            bvec = np.zeros(nobj)
+            for i in range(nobj):
+                vi, ui = self.positions[i]
+                Sw = self.Sw[i]
+                for ep in self.epochs_per_obj[i]:
+                    if ep['band'] != band:
+                        continue
+                    fac = ep['weight'] * ep['detAtinv']
+                    alpha, beta = get_phase_angles(
+                        ep, vi - ep['vcen'], ui - ep['ucen'],
+                    )
+                    admom_ksums(
+                        ep['kim'], ep['iy'], ep['ix'], ep['dim'],
+                        alpha, beta, ep['kv'], ep['ku'],
+                        Sw[0, 0], Sw[0, 1], Sw[1, 1], ep['df2'],
+                        self.esums,
+                    )
+                    bvec[i] += fac * self.esums[5]
+                    for p, fm in zip(self.fpositions, self.fmodels):
+                        bvec[i] -= fac * model_ksums(
+                            fm, band, p[0] - vi, p[1] - ui,
+                            Sw, ep['detAtinv'], self.Tsmooth,
+                        )[5]
+                    for j in range(nobj):
+                        munit = dict(self.models[j])
+                        munit['F'] = np.ones(self.nband)
+                        A[i, j] += fac * model_ksums(
+                            munit, band,
+                            self.positions[j][0] - vi,
+                            self.positions[j][1] - ui,
+                            Sw, ep['detAtinv'], self.Tsmooth,
+                        )[5]
+            fsol = np.linalg.solve(A, bvec)
+            for i in range(nobj):
+                self.models[i]['F'][band] = fsol[i]
+
+    def go(self):
+        """
+        run the sweeps to convergence and package the results
+
+        Returns
+        -------
+        dict as for deblend
+        """
+        for it in range(self.maxiter):
+            maxchange = self._sweep()
+            if maxchange < self.tol:
+                break
+            self._extrapolate()
+
+        return {
+            'objects': [
+                self._get_object_result(i) for i in range(self.nobj)
+            ],
+            'fwhm_smooth': self.fwhm_smooth,
+            'Tsmooth': self.Tsmooth,
+            'numiter': it + 1,
+            'nskip': self.nskip,
+        }
+
+    def _sweep(self):
+        """
+        one Gauss-Seidel sweep over the objects, returning the
+        maximum relative parameter change
+        """
+        maxchange = 0.0
+        for i in range(self.nobj):
+            maxchange = max(maxchange, self._update_object(i))
+        return maxchange
+
+    def _update_object(self, i):
+        """
+        update object i from its neighbor-corrected sums, returning
+        its maximum relative parameter change.  On a failed structure
+        update the previous structure is kept but the flux, which is
+        linear and always well defined, is still updated, so a bad
+        early structure state cannot deadlock the blend
+        """
+        sums, fs, ws, pred, fs_pred = self._get_object_sums(i)
+        m = self.models[i]
+
+        if sums[5] > 0:
+            self.cen_pull[i] = sums[0:2] / sums[5]
+
+        if m['type'] == 'star':
+            # structure frozen at the delta-function model; only
+            # the linear flux is updated
+            newF = _matched_flux(fs, ws, self.Sw[i], m['cov_sm'])
+            change = _fchange(newF, m['F'])
+            m['F'] = newF
+            return change
+
+        newSw = self._deweight_measured(i, sums)
+        if newSw is None:
+            return self._skip_structure_update(i, fs, ws, fs_pred)
+
+        if m['type'] == 'gauss':
+            return self._update_gauss(i, newSw, fs, ws)
         else:
-            raise ValueError(f"bad object type: '{otype}'")
-        models.append(m)
+            return self._update_mixture(
+                i, newSw, sums, pred, fs, fs_pred,
+            )
 
-    fpositions, fmodels = _convert_fixed_models(
-        fixed_models, nband, Tsmooth,
-    )
+    def _deweight_measured(self, i, sums):
+        """
+        the deweight update of object i's weight from the measured
+        moment sums (single gaussian, all object types), or None if
+        the sums do not admit one
+        """
+        if sums[5] > 0 and sums[4] > 0:
+            newSw, flags = deweight(_moment_matrix(sums), self.Sw[i])
+            if flags == 0:
+                return newSw
+        return None
 
-    _init_fluxes(
-        epochs_per_obj, nband, positions, models, Sw, Tsmooth,
-        fpositions=fpositions, fmodels=fmodels,
-    )
+    def _skip_structure_update(self, i, fs, ws, fs_pred):
+        """
+        a failed structure update: keep the previous structure but
+        still update the linear flux, and count the failure toward
+        containment.  Returns the relative change, always 1
+        """
+        m = self.models[i]
+        self._count_skip(i)
+        if m['type'] == 'gauss':
+            m['F'] = _matched_flux(fs, ws, self.Sw[i], m['cov_sm'])
+        elif np.all(fs_pred != 0):
+            m['F'] = m['F'] * fs / fs_pred
+        self._contain_failure(i)
+        return 1.0
 
-    nskip = 0
-    cen_pull = [np.zeros(2) for _ in range(nobj)]
-    esums = np.zeros(6)
+    def _update_gauss(self, i, newSw, fs, ws):
+        """
+        accept the weight update for a gauss object, whose smoothed
+        model covariance is the weight, and update the matched flux.
+        Returns the relative change
+        """
+        m = self.models[i]
+        newF = _matched_flux(fs, ws, self.Sw[i], newSw)
+        Twt = self.Sw[i][0, 0] + self.Sw[i][1, 1]
+        change = max(
+            np.abs(newSw - self.Sw[i]).max() / Twt,
+            _fchange(newF, m['F']),
+        )
+        m['cov_sm'] = newSw
+        m['F'] = newF
+        self.nfail[i] = 0
+        self.Sw[i] = newSw
+        return change
 
-    # sweep-map extrapolation history of normalized global states
-    scales = None
-    hist = []
+    def _update_mixture(self, i, newSw, sums, pred, fs, fs_pred):
+        """
+        exp/dev: deweight-style update on the family covariance
+        matrix, as in ngmix PAdmomFitter._run_admom_mixture.  Map
+        both the measured and the model-predicted moments through
+        the deweight transform and shift the family covariance by
+        the difference.  For a single-gaussian family this is
+        exactly the standard deweight update; for the mixture it has
+        near-unit gain, unlike a plain Picard update on the weighted
+        moments which converges at rate ~1/2.  The smoothing
+        covariance cancels in the difference.  newSw is the deweight
+        of the measured moments.  Returns the relative change
+        """
+        m = self.models[i]
 
-    # per-object failure containment state
-    nfail = np.zeros(nobj, dtype='i4')
-    nrestart = np.zeros(nobj, dtype='i4')
-    dbflags = np.zeros(nobj, dtype='i4')
+        shift = self._mixture_shift(i, newSw, sums, pred)
+        prop, shift, accepted, idamp = self._damped_step(i, shift)
 
-    def contain_failure(i):
+        newF = m['F'] * fs / fs_pred
+        change = _fchange(newF, m['F'])
+        m['F'] = newF
+
+        if not accepted:
+            # no valid step: keep the previous structure and count a
+            # failed update; the flux update above keeps the blend
+            # from deadlocking
+            self._count_skip(i)
+            change = max(change, 1.0)
+            if self._contain_failure(i):
+                # the weight was reset by the intervention
+                return change
+        elif idamp > 0:
+            # a damped step can be small only because it was
+            # shortened at the validity boundary, not because the
+            # fit has settled
+            change = max(change, 1.0)
+            m['cov'] = prop
+            self.nfail[i] = 0
+        else:
+            Twt = self.Sw[i][0, 0] + self.Sw[i][1, 1]
+            change = max(change, np.abs(shift).max() / Twt)
+            m['cov'] = prop
+            self.nfail[i] = 0
+
+        self.Sw[i] = newSw
+        return change
+
+    def _mixture_shift(self, i, newSw, sums, pred):
+        """
+        the proposed shift of the family covariance: the difference
+        of the deweighted measured and predicted moments.  When the
+        predicted moments do not admit a deweight, fall back to a
+        gain-1 update on the weighted moment ratios, composed in
+        matrix form: scale by the T ratio and shift the anisotropy
+        by the ratio differences
+        """
+        Sp, pflags = deweight(_moment_matrix(pred), self.Sw[i])
+        if pflags == 0:
+            return newSw - Sp
+
+        Sfam = self.models[i]['cov']
+        Tp = pred[4] * (1.0 / pred[5])
+        Tf = Sfam[0, 0] + Sfam[1, 1]
+        fac = sums[4] / sums[5] / Tp
+        de1 = sums[2] / sums[4] - pred[2] / pred[4]
+        de2 = sums[3] / sums[4] - pred[3] / pred[4]
+        return (fac - 1) * Sfam \
+            + 0.5 * fac * Tf * np.array([
+                [-de1, de2],
+                [de2, de1],
+            ])
+
+    def _damped_step(self, i, shift):
+        """
+        the largest step from the family covariance, damping if
+        needed, for which the smoothed components stay valid under
+        the zero weight.  Returns (proposed, shift, accepted, idamp)
+        """
+        m = self.models[i]
+        accepted = False
+        for idamp in range(10):
+            prop = m['cov'] + shift
+            valid = mixture_model_valid(
+                m['type'], prop, ZERO_WEIGHT, self.Tsmooth,
+            )
+            if valid:
+                accepted = True
+                break
+            shift = 0.5 * shift
+        return prop, shift, accepted, idamp
+
+    def _count_skip(self, i):
+        """
+        count a skipped structure update against the group-level
+        backstop limit
+        """
+        self.nskip += 1
+        if self.nskip > 100 * self.nobj:
+            raise RuntimeError(
+                f'too many failed structure updates, object {i}'
+            )
+
+    def _contain_failure(self, i):
         """
         count a consecutive failed structure update for object i.
         At NFAIL_LIMIT failures, restart the object from the compact
@@ -441,254 +675,314 @@ def _deblend_core(
         under-subtracting wings rather than mis-subtracting a
         nonsense extended model.  Returns True when it intervened
         """
-        nonlocal hist, scales
-        nfail[i] += 1
-        if nfail[i] < NFAIL_LIMIT:
+        self.nfail[i] += 1
+        if self.nfail[i] < NFAIL_LIMIT:
             return False
-        nfail[i] = 0
-        m = models[i]
-        smooth_cov = np.diag([Tsmooth / 2, Tsmooth / 2])
-        Sw[i] = smooth_cov.copy()
-        if nrestart[i] == 0:
-            nrestart[i] = 1
-            dbflags[i] |= RESTARTED
+        self.nfail[i] = 0
+        m = self.models[i]
+        self.Sw[i] = self.smooth_cov.copy()
+        if self.nrestart[i] == 0:
+            self.nrestart[i] = 1
+            self.dbflags[i] |= RESTARTED
             if m['type'] in ('exp', 'dev'):
                 m['cov'] = np.zeros((2, 2))
             else:
-                m['cov_sm'] = smooth_cov.copy()
+                m['cov_sm'] = self.smooth_cov.copy()
             # the restart is a discontinuity in the sweep map
-            hist = []
+            self.hist = []
         else:
-            dbflags[i] |= DEBLENDED_AS_PSF
+            self.dbflags[i] |= DEBLENDED_AS_PSF
             m['type'] = 'star'
             m.pop('cov', None)
-            m['cov_sm'] = smooth_cov.copy()
+            m['cov_sm'] = self.smooth_cov.copy()
             # the packed state layout changed
-            hist = []
-            scales = None
+            self.hist = []
+            self.scales = None
         return True
 
-    for it in range(maxiter):
-        maxchange = 0.0
-        for i in range(nobj):
-            sums, fs, ws, pred, fs_pred = _object_sums(
-                epochs_per_obj[i], nband, positions, models, Sw,
-                Tsmooth, i, esums,
-                fpositions=fpositions, fmodels=fmodels,
-            )
-            m = models[i]
+    def _extrapolate(self):
+        """
+        guarded Steffensen boost on the packed global state: three
+        consecutive plain sweeps give the contraction ratio of the
+        dominant mode and the remaining geometric series is applied
+        in one step, rolled back if it leaves the valid region.
+        Convergence is always decided by a subsequent plain sweep.
+        See ngmix.prepsfadmom PAdmomFitter._run_admom_mixture for
+        the Aitken/Steffensen/Sidi references
+        """
+        self.hist.append(self._pack_state())
+        if len(self.hist) < 3:
+            return
 
-            if sums[5] > 0:
-                cen_pull[i] = sums[0:2] / sums[5]
-
-            if m['type'] == 'star':
-                # structure frozen at the delta-function model; only
-                # the linear flux is updated
-                newF = fs / ws * 2 * np.pi * np.sqrt(
-                    det2(Sw[i] + m['cov_sm'])
-                )
-                maxchange = max(maxchange, _fchange(newF, m['F']))
-                m['F'] = newF
-                continue
-
-            # weight update (single gaussian, all object types); on
-            # failure keep the previous structure but still update the
-            # flux, which is linear and always well defined, so a bad
-            # early structure state cannot deadlock the blend
-            newSw = None
-            if sums[5] > 0 and sums[4] > 0:
-                finv = 1.0 / sums[5]
-                M1 = sums[2] * finv
-                M2 = sums[3] * finv
-                T = sums[4] * finv
-                M = np.array([
-                    [0.5 * (T - M1), 0.5 * M2],
-                    [0.5 * M2, 0.5 * (T + M1)],
-                ])
-                newSw, flags = deweight(M, Sw[i])
-                if flags != 0:
-                    newSw = None
-
-            if newSw is None:
-                nskip += 1
-                if nskip > 100 * nobj:
-                    raise RuntimeError(
-                        f'too many failed structure updates, object {i}'
-                    )
-                maxchange = max(maxchange, 1.0)
-                if m['type'] == 'gauss':
-                    m['F'] = fs / ws * 2 * np.pi * np.sqrt(
-                        det2(Sw[i] + m['cov_sm'])
-                    )
-                elif np.all(fs_pred != 0):
-                    m['F'] = m['F'] * fs / fs_pred
-                contain_failure(i)
-                continue
-
-            if m['type'] == 'gauss':
-                newF = fs / ws * 2 * np.pi * np.sqrt(det2(Sw[i] + newSw))
-                Twt = Sw[i][0, 0] + Sw[i][1, 1]
-                maxchange = max(
-                    maxchange,
-                    np.abs(newSw - Sw[i]).max() / Twt,
-                    _fchange(newF, m['F']),
-                )
-                m['cov_sm'] = newSw
-                m['F'] = newF
-                nfail[i] = 0
+        d1 = self.hist[-2] - self.hist[-3]
+        d2 = self.hist[-1] - self.hist[-2]
+        denom = d1 @ d1
+        rho = (d2 @ d1) / denom if denom > 0 else 0.0
+        if 0.2 < rho < 0.98:
+            saved_models = [dict(m) for m in self.models]
+            saved_Sw = [sw.copy() for sw in self.Sw]
+            self._unpack_state(self.hist[-1] + d2 * rho / (1 - rho))
+            if self._state_valid():
+                # a fresh trio of plain sweeps is needed for the
+                # next ratio estimate
+                self.hist = []
             else:
-                # exp/dev: deweight-style update on the family
-                # covariance matrix, as in ngmix
-                # PAdmomFitter._run_admom_mixture.  Map both the measured
-                # and the model-predicted moments through the deweight
-                # transform and shift the family covariance by the
-                # difference.  For a single-gaussian family this is
-                # exactly the standard deweight update; for the
-                # mixture it has near-unit gain, unlike a plain Picard
-                # update on the weighted moments which converges at
-                # rate ~1/2.  The smoothing covariance cancels in the
-                # difference.  newSw is the deweight of the measured
-                # moments, computed above.
-                pinv = 1.0 / pred[5]
-                Mp1 = pred[2] * pinv
-                Mp2 = pred[3] * pinv
-                Tp = pred[4] * pinv
-                Mpred = np.array([
-                    [0.5 * (Tp - Mp1), 0.5 * Mp2],
-                    [0.5 * Mp2, 0.5 * (Tp + Mp1)],
+                for m, sm in zip(self.models, saved_models):
+                    m.update(sm)
+                for k in range(self.nobj):
+                    self.Sw[k] = saved_Sw[k]
+        if len(self.hist) > 3:
+            self.hist = self.hist[-3:]
+
+    def _pack_state(self):
+        """
+        the global deblend state as a normalized vector, for the
+        sweep map extrapolation.  The layout is the concatenation
+        over objects, in order, of
+
+            F[0], ..., F[nband-1]         per-band fluxes
+            C[0, 0], C[0, 1], C[1, 1]     model covariance
+            Sw[0, 0], Sw[0, 1], Sw[1, 1]  weight covariance
+
+        where C is cov_sm for a gauss object and the family cov for
+        exp/dev.  Star weights and covariances are frozen and only
+        their fluxes enter, so the vector length depends on the
+        current type of every object; a demotion changes the layout
+        and resets the scales and history.  Each component is
+        divided by a per-component scale fixed on the first call, so
+        the sweep map differences are comparable across fluxes and
+        covariances
+        """
+        x = []
+        for m, sw in zip(self.models, self.Sw):
+            x.extend(m['F'])
+            if m['type'] == 'gauss':
+                x.extend([
+                    m['cov_sm'][0, 0], m['cov_sm'][0, 1],
+                    m['cov_sm'][1, 1],
                 ])
-                Sp, pflags = deweight(Mpred, Sw[i])
+            elif m['type'] in ('exp', 'dev'):
+                x.extend([
+                    m['cov'][0, 0], m['cov'][0, 1], m['cov'][1, 1],
+                ])
+            if m['type'] != 'star':
+                x.extend([sw[0, 0], sw[0, 1], sw[1, 1]])
+        x = np.array(x)
+        if self.scales is None:
+            self.scales = np.maximum(np.abs(x), 1.0e-10)
+        return x / self.scales
 
-                Sfam = m['cov']
-                if pflags == 0:
-                    shift = newSw - Sp
-                else:
-                    # gain-1 fallback on the weighted moment ratios,
-                    # composed in matrix form: scale by the T ratio
-                    # and shift the anisotropy by the ratio
-                    # differences
-                    Tf = Sfam[0, 0] + Sfam[1, 1]
-                    fac = sums[4] / sums[5] / Tp
-                    de1 = sums[2] / sums[4] - pred[2] / pred[4]
-                    de2 = sums[3] / sums[4] - pred[3] / pred[4]
-                    shift = (fac - 1) * Sfam \
-                        + 0.5 * fac * Tf * np.array([
-                            [-de1, de2],
-                            [de2, de1],
-                        ])
+    def _unpack_state(self, x):
+        """
+        write a packed state vector back into the models and
+        weights, inverting the layout described in _pack_state
+        """
+        x = x * self.scales
+        k = 0
+        for i, m in enumerate(self.models):
+            nband = m['F'].size
+            m['F'] = x[k:k + nband].copy()
+            k += nband
+            if m['type'] == 'gauss':
+                m['cov_sm'] = np.array([
+                    [x[k], x[k + 1]], [x[k + 1], x[k + 2]],
+                ])
+                k += 3
+            elif m['type'] in ('exp', 'dev'):
+                m['cov'] = np.array([
+                    [x[k], x[k + 1]], [x[k + 1], x[k + 2]],
+                ])
+                k += 3
+            if m['type'] != 'star':
+                self.Sw[i] = np.array([
+                    [x[k], x[k + 1]], [x[k + 1], x[k + 2]],
+                ])
+                k += 3
 
-                # accept the largest step, damping if needed, for
-                # which the smoothed components stay valid under the
-                # zero weight
-                accepted = False
-                for idamp in range(10):
-                    prop = Sfam + shift
-                    valid = mixture_model_valid(
-                        m['type'], prop, ZERO_WEIGHT, Tsmooth,
-                    )
-                    if valid:
-                        accepted = True
-                        break
-                    shift = 0.5 * shift
+    def _state_valid(self):
+        """
+        every weight and model in the state gives well defined sums
+        """
+        for m, sw in zip(self.models, self.Sw):
+            if sw[0, 0] <= 0 or sw[1, 1] <= 0 or det2(sw) <= 0:
+                return False
+            if m['type'] in ('exp', 'dev'):
+                if not mixture_model_valid(
+                        m['type'], m['cov'], ZERO_WEIGHT,
+                        self.Tsmooth):
+                    return False
+            elif m['type'] == 'gauss':
+                if det2(m['cov_sm']) <= 0:
+                    return False
+        return True
 
-                newF = m['F'] * fs / fs_pred
-                maxchange = max(maxchange, _fchange(newF, m['F']))
-                m['F'] = newF
+    def _get_object_sums(self, i):
+        """
+        neighbor-corrected weighted moment sums for object i,
+        accumulated over the object's epochs, plus the model's own
+        predicted sums for exp/dev objects.  Returns
+        (sums, fs, ws, pred, fs_pred) with fs, ws, fs_pred per band
+        """
+        vi, ui = self.positions[i]
+        is_mix = self.models[i]['type'] in ('exp', 'dev')
+        Sw = self.Sw[i]
 
-                if not accepted:
-                    # no valid step: keep the previous structure and
-                    # count a failed update; the flux update above
-                    # keeps the blend from deadlocking
-                    nskip += 1
-                    if nskip > 100 * nobj:
-                        raise RuntimeError(
-                            'too many failed structure updates, '
-                            f'object {i}'
-                        )
-                    maxchange = max(maxchange, 1.0)
-                    if contain_failure(i):
-                        # the weight was reset by the intervention
-                        continue
-                elif idamp > 0:
-                    # a damped step can be small only because it was
-                    # shortened at the validity boundary, not because
-                    # the fit has settled
-                    maxchange = max(maxchange, 1.0)
-                    m['cov'] = prop
-                    nfail[i] = 0
-                else:
-                    Twt = Sw[i][0, 0] + Sw[i][1, 1]
-                    maxchange = max(
-                        maxchange, np.abs(shift).max() / Twt,
-                    )
-                    m['cov'] = prop
-                    nfail[i] = 0
+        base_nsums = self._get_neighbor_sums(i)
+        if is_mix:
+            base_psums = self._get_predicted_sums(i)
 
-            Sw[i] = newSw
+        sums = np.zeros(6)
+        fs = np.zeros(self.nband)
+        ws = np.zeros(self.nband)
+        pred = np.zeros(6)
+        fs_pred = np.zeros(self.nband)
 
-        if maxchange < tol:
-            break
+        for ep in self.epochs_per_obj[i]:
+            alpha, beta = get_phase_angles(
+                ep, vi - ep['vcen'], ui - ep['ucen'],
+            )
+            admom_ksums(
+                ep['kim'], ep['iy'], ep['ix'], ep['dim'],
+                alpha, beta, ep['kv'], ep['ku'],
+                Sw[0, 0], Sw[0, 1], Sw[1, 1], ep['df2'],
+                self.esums,
+            )
+            csums = (
+                self.esums - base_nsums[ep['band']] / ep['detAtinv']
+            )
+            fac = ep['weight'] * ep['detAtinv']
+            sums += fac * csums
+            fs[ep['band']] += fac * csums[5]
+            ws[ep['band']] += ep['weight']
 
-        x, scales = _pack_state(models, Sw, scales)
-        hist.append(x)
-        if len(hist) >= 3:
-            d1 = hist[-2] - hist[-3]
-            d2 = hist[-1] - hist[-2]
-            denom = d1 @ d1
-            rho = (d2 @ d1) / denom if denom > 0 else 0.0
-            if 0.2 < rho < 0.98:
-                saved_models = [dict(m) for m in models]
-                saved_Sw = [sw.copy() for sw in Sw]
-                _unpack_state(
-                    hist[-1] + d2 * rho / (1 - rho), scales,
-                    models, Sw,
+            if is_mix:
+                psums = base_psums[ep['band']] / ep['detAtinv']
+                pred += fac * psums
+                fs_pred[ep['band']] += fac * psums[5]
+
+        return sums, fs, ws, pred, fs_pred
+
+    def _get_neighbor_sums(self, i):
+        """
+        per-band weighted sums of the neighbor and fixed external
+        models under object i's weight, at detAtinv=1.  The model
+        sums scale exactly as 1/detAtinv, so expand the components
+        once, run the kernel once per band, and rescale per epoch;
+        the fixed externals are subtracted exactly like in-group
+        neighbors and join the same kernel call
+        """
+        vi, ui = self.positions[i]
+        Sw = self.Sw[i]
+
+        ncomps = []
+        for j in range(self.nobj):
+            if j == i:
+                continue
+            fracs, So00, So01, So11 = model_comps(
+                self.models[j], self.Tsmooth,
+            )
+            ncomps.append((
+                self.positions[j], self.models[j]['F'],
+                fracs, So00, So01, So11,
+            ))
+        for p, fm in zip(self.fpositions, self.fmodels):
+            fracs, So00, So01, So11 = model_comps(fm, self.Tsmooth)
+            ncomps.append((p, fm['F'], fracs, So00, So01, So11))
+
+        base_nsums = np.zeros((self.nband, 6))
+        if ncomps:
+            nSo00 = np.concatenate([c[3] for c in ncomps])
+            nSo01 = np.concatenate([c[4] for c in ncomps])
+            nSo11 = np.concatenate([c[5] for c in ncomps])
+            ndv = np.concatenate([
+                np.full(c[2].size, c[0][0] - vi) for c in ncomps
+            ])
+            ndu = np.concatenate([
+                np.full(c[2].size, c[0][1] - ui) for c in ncomps
+            ])
+            for band in range(self.nband):
+                nF = np.concatenate([
+                    c[1][band] * c[2] for c in ncomps
+                ])
+                gauss_comps_ksums(
+                    nF, nSo00, nSo01, nSo11, ndv, ndu,
+                    Sw[0, 0], Sw[0, 1], Sw[1, 1], 1.0,
+                    base_nsums[band],
                 )
-                if _state_valid(models, Sw, Tsmooth):
-                    # a fresh trio of plain sweeps is needed for the
-                    # next ratio estimate
-                    hist = []
-                else:
-                    for m, sm in zip(models, saved_models):
-                        m.update(sm)
-                    for k in range(nobj):
-                        Sw[k] = saved_Sw[k]
-            if len(hist) > 3:
-                hist = hist[-3:]
+        return base_nsums
 
-    out_objects = []
-    for i in range(nobj):
-        m = models[i]
+    def _get_predicted_sums(self, i):
+        """
+        per-band weighted sums predicted by object i's own model
+        under its weight, at detAtinv=1
+        """
+        m = self.models[i]
+        Sw = self.Sw[i]
 
-        # noise propagation at the converged weight; the neighbor
-        # corrections are deterministic, so the raw kernel cross sums
-        # give the covariances of the corrected sums.  For the
-        # weight-adaptive types the sandwich over the moment matching
-        # conditions (ngmix model_sandwich) gives the flux variances
-        # including the weight and family responses, plus the family
-        # covariance for the structure errors; for a gauss object it
-        # reduces exactly to the analytic delta method.  Star weights
-        # are frozen, so the fixed weight flux variance is exact and
-        # there are no structure errors
-        sums_i, fs, _, _, _ = _object_sums(
-            epochs_per_obj[i], nband, positions, models, Sw,
-            Tsmooth, i, esums,
-            fpositions=fpositions, fmodels=fmodels,
+        base_psums = np.zeros((self.nband, 6))
+        fracs, So00, So01, So11 = model_comps(m, self.Tsmooth)
+        zeros = np.zeros(fracs.size)
+        for band in range(self.nband):
+            gauss_comps_ksums(
+                m['F'][band] * fracs, So00, So01, So11,
+                zeros, zeros,
+                Sw[0, 0], Sw[0, 1], Sw[1, 1], 1.0,
+                base_psums[band],
+            )
+        return base_psums
+
+    def _get_object_result(self, i):
+        """
+        the result dict for object i at the converged state; see
+        deblend for the entries
+        """
+        m = self.models[i]
+
+        sums_i, fs, ws, _, _ = self._get_object_sums(i)
+        fvar_raw, fmcov, covj = self._accumulate_error_sums(i)
+        fvar, fam_cov, gfvar, gfam_cov = self._run_sandwiches(
+            i, sums_i, covj, fs, fvar_raw, fmcov,
         )
-        vi, ui = positions[i]
-        fvar = np.zeros(nband)
-        fmcov = np.zeros((nband, 3))
+        flux_err, s2n = _flux_errors(m['F'], fs, fvar)
+
+        res = {
+            'type': m['type'],
+            'deblend_flags': int(self.dbflags[i]),
+            'flux': m['F'].copy(),
+            'flux_err': flux_err,
+            's2n': s2n,
+            'cen': np.array(self.positions[i]),
+            'cen_pull': self.cen_pull[i],
+        }
+        self._set_shape(res, i, fam_cov)
+        self._set_gauss_entries(res, i, fs, ws, gfvar, gfam_cov)
+        return res
+
+    def _accumulate_error_sums(self, i):
+        """
+        noise propagation at the converged weight: the neighbor
+        corrections are deterministic, so the raw kernel cross sums
+        give the covariances of the corrected sums.  Returns the
+        per-band flux variances, the per-band flux-structure
+        covariances and the covariance of the combined sums
+        """
+        vi, ui = self.positions[i]
+        Sw = self.Sw[i]
+
+        fvar = np.zeros(self.nband)
+        fmcov = np.zeros((self.nband, 3))
         covj = np.zeros((6, 6))
         fcov = np.zeros((6, 6))
-        for ep in epochs_per_obj[i]:
+        for ep in self.epochs_per_obj[i]:
             alpha, beta = get_phase_angles(
                 ep, vi - ep['vcen'], ui - ep['ucen'],
             )
             admom_finalize(
                 ep['kim'], ep['iy'], ep['ix'], ep['dim'],
                 alpha, beta, ep['kv'], ep['ku'],
-                Sw[i][0, 0], Sw[i][0, 1], Sw[i][1, 1], ep['df2'],
+                Sw[0, 0], Sw[0, 1], Sw[1, 1], ep['df2'],
                 ep['err_fac2'],
-                esums, fcov,
+                self.esums, fcov,
             )
             fac = ep['weight'] * ep['detAtinv']
             nfac = ep['df2'] ** 2
@@ -696,22 +990,39 @@ def _deblend_core(
             fvar[band] += fac ** 2 * nfac * fcov[5, 5]
             fmcov[band] += fac ** 2 * nfac * fcov[2:5, 5]
             covj += fac ** 2 * nfac * fcov
+        return fvar, fmcov, covj
 
+    def _run_sandwiches(self, i, sums_i, covj, fs, fvar_raw, fmcov):
+        """
+        for the weight-adaptive types the sandwich over the moment
+        matching conditions (ngmix model_sandwich) gives the flux
+        variances including the weight and family responses, plus
+        the family covariance for the structure errors; for a gauss
+        object it reduces exactly to the analytic delta method.
+        Star weights are frozen, so the fixed weight flux variance
+        is exact and there are no structure errors.  Also returns
+        the gauss-estimator analogs under the same weight, for the
+        gauss entries; for a gauss object the sandwiches coincide
+
+        Returns
+        -------
+        fvar, fam_cov, gfvar, gfam_cov
+        """
+        m = self.models[i]
+
+        fvar = fvar_raw
         fam_cov = None
-        gfam_cov = None
         gfvar = None
-        smooth_cov = np.diag([Tsmooth / 2, Tsmooth / 2])
-        Sgal_w = Sw[i] - smooth_cov
+        gfam_cov = None
         if m['type'] != 'star' and sums_i[5] > 0:
             if m['type'] == 'gauss':
                 mtype = 'gauss'
-                Sfam = m['cov_sm'] - smooth_cov
+                Sfam = m['cov_sm'] - self.smooth_cov
             else:
                 mtype = m['type']
                 Sfam = m['cov']
-            fvar_raw = fvar
             fvar, fam_cov = model_sandwich(
-                mtype, Sfam, Sw[i], Tsmooth,
+                mtype, Sfam, self.Sw[i], self.Tsmooth,
                 sums_i, covj, fs, fvar_raw, fmcov,
             )
             if mtype == 'gauss':
@@ -721,67 +1032,42 @@ def _deblend_core(
                 gfam_cov = fam_cov
             else:
                 # gauss-estimator errors under the same weight, for
-                # the low-noise shape entries below
+                # the low-noise shape entries
                 gfvar, gfam_cov = model_sandwich(
-                    'gauss', Sgal_w, Sw[i], Tsmooth,
+                    'gauss', self.Sw[i] - self.smooth_cov,
+                    self.Sw[i], self.Tsmooth,
                     sums_i, covj, fs, fvar_raw, fmcov,
                 )
+        return fvar, fam_cov, gfvar, gfam_cov
 
-        flux_err = np.full(nband, np.nan)
-        wgood = (fvar > 0) & (fs != 0)
-        flux_err[wgood] = np.abs(
-            m['F'][wgood] / fs[wgood],
-        ) * np.sqrt(fvar[wgood])
-        if np.any(wgood):
-            s2n = np.sqrt(
-                np.sum(fs[wgood] ** 2 / fvar[wgood]),
-            )
-        else:
-            s2n = np.nan
+    def _set_shape(self, res, i, fam_cov):
+        """
+        the family structure entries T, e1, e2 and their errors from
+        the family covariance sandwich.  e_flags == 0 iff the
+        ellipticities and their errors are usable, following the
+        ngmix prepsfadmom convention
+        """
+        m = self.models[i]
 
-        res = {
-            'type': m['type'],
-            'deblend_flags': int(dbflags[i]),
-            'flux': m['F'].copy(),
-            'flux_err': flux_err,
-            's2n': s2n,
-            'cen': np.array(positions[i]),
-            'cen_pull': cen_pull[i],
-        }
-        # e_flags == 0 iff the ellipticities and their errors are
-        # usable, following the ngmix prepsfadmom convention
         res['e_flags'] = 0
         res['e1'] = np.nan
         res['e2'] = np.nan
-        if m['type'] == 'gauss':
-            Sgal = m['cov_sm'] - np.diag([Tsmooth / 2, Tsmooth / 2])
-            Tgal = Sgal[0, 0] + Sgal[1, 1]
-            res['T'] = Tgal
-            # det > 0 with positive trace is |e| < 1: a positive-size
-            # gaussian with a degenerate covariance has no defined
-            # shape, same rule as the exp family
-            shape_ok = Tgal > 0 and det2(Sgal) > 0
-            if shape_ok:
-                res['e1'] = (Sgal[1, 1] - Sgal[0, 0]) / Tgal
-                res['e2'] = 2 * Sgal[0, 1] / Tgal
-        elif m['type'] == 'star':
+        if m['type'] == 'star':
             # a delta function has no shape by construction
             res['T'] = 0.0
             shape_ok = False
         else:
-            Sfam = m['cov']
-            Tgal = Sfam[0, 0] + Sfam[1, 1]
-            res['T'] = Tgal
-            # the family covariance can scatter out of positive
-            # definite, where the shape is undefined
-            shape_ok = Tgal > 0 and det2(Sfam) > 0
-            if shape_ok:
-                res['e1'] = (Sfam[1, 1] - Sfam[0, 0]) / Tgal
-                res['e2'] = 2 * Sfam[0, 1] / Tgal
+            if m['type'] == 'gauss':
+                S = m['cov_sm'] - self.smooth_cov
+            else:
+                # the family covariance can scatter out of positive
+                # definite, where the shape is undefined
+                S = m['cov']
+            res['T'], res['e1'], res['e2'], shape_ok = \
+                _shape_from_cov(S)
         if not shape_ok:
             res['e_flags'] |= ngmix.flags.NONPOS_SIZE
 
-        # structure errors from the family covariance sandwich
         res['T_err'] = np.nan
         res['e1_err'] = np.nan
         res['e2_err'] = np.nan
@@ -789,37 +1075,33 @@ def _deblend_core(
             if fam_cov[2, 2] > 0:
                 res['T_err'] = np.sqrt(fam_cov[2, 2])
             if shape_ok:
-                e1 = res['e1']
-                e2 = res['e2']
-                ev1 = (
-                    fam_cov[0, 0]
-                    - 2 * e1 * fam_cov[0, 2]
-                    + e1 ** 2 * fam_cov[2, 2]
-                ) / Tgal ** 2
-                ev2 = (
-                    fam_cov[1, 1]
-                    - 2 * e2 * fam_cov[1, 2]
-                    + e2 ** 2 * fam_cov[2, 2]
-                ) / Tgal ** 2
-                if ev1 > 0 and ev2 > 0:
-                    res['e1_err'] = np.sqrt(ev1)
-                    res['e2_err'] = np.sqrt(ev2)
-                else:
-                    res['e_flags'] |= ngmix.flags.NONPOS_SHAPE_VAR
+                res['e1_err'], res['e2_err'], eflags = _shape_errors(
+                    res['e1'], res['e2'], res['T'], fam_cov,
+                )
+                res['e_flags'] |= eflags
         elif shape_ok:
             # no error propagation was possible for a shape that is
             # otherwise defined
             res['e_flags'] |= ngmix.flags.NONPOS_SHAPE_VAR
 
-        # gauss-estimator shapes from the converged weight.  The
-        # weight iteration is exactly the adaptive-moments gauss
-        # fixed point on the neighbor-corrected data (the family
-        # state only enters through the matching conditions), so the
-        # lowest-noise gauss shape estimator is available for every
-        # model type at no extra fitting cost: the family models do
-        # the subtraction, the gauss weight does the measurement,
-        # and the metacal response calibrates the estimator.  Fluxes
-        # should still come from the family models
+    def _set_gauss_entries(self, res, i, fs, ws, gfvar, gfam_cov):
+        """
+        gauss-estimator entries from the converged weight.  The
+        weight iteration is exactly the adaptive-moments gauss fixed
+        point on the neighbor-corrected data (the family state only
+        enters through the matching conditions), so the lowest-noise
+        gauss shape estimator is available for every model type at
+        no extra fitting cost: the family models do the subtraction,
+        the gauss weight does the measurement, and the metacal
+        response calibrates the estimator.  The gauss-aperture
+        fluxes and flux s/n are the analogs of the gauss-model
+        deblender's outputs, for selection studies against the
+        family quantities.  The primary fluxes should come from the
+        family models; for a gauss object these equal the primary
+        entries
+        """
+        m = self.models[i]
+
         res['gauss_T'] = np.nan
         res['gauss_e1'] = np.nan
         res['gauss_e2'] = np.nan
@@ -830,67 +1112,33 @@ def _deblend_core(
         if m['type'] == 'star':
             res['gauss_e_flags'] |= ngmix.flags.NONPOS_SIZE
         else:
-            Tgw = Sgal_w[0, 0] + Sgal_w[1, 1]
-            res['gauss_T'] = Tgw
-            gok = Tgw > 0 and det2(Sgal_w) > 0
-            if gok:
-                res['gauss_e1'] = (Sgal_w[1, 1] - Sgal_w[0, 0]) / Tgw
-                res['gauss_e2'] = 2 * Sgal_w[0, 1] / Tgw
-            else:
+            Sgal_w = self.Sw[i] - self.smooth_cov
+            res['gauss_T'], res['gauss_e1'], res['gauss_e2'], gok = \
+                _shape_from_cov(Sgal_w)
+            if not gok:
                 res['gauss_e_flags'] |= ngmix.flags.NONPOS_SIZE
             if gfam_cov is not None:
                 if gfam_cov[2, 2] > 0:
                     res['gauss_T_err'] = np.sqrt(gfam_cov[2, 2])
                 if gok:
-                    ge1 = res['gauss_e1']
-                    ge2 = res['gauss_e2']
-                    gv1 = (
-                        gfam_cov[0, 0]
-                        - 2 * ge1 * gfam_cov[0, 2]
-                        + ge1 ** 2 * gfam_cov[2, 2]
-                    ) / Tgw ** 2
-                    gv2 = (
-                        gfam_cov[1, 1]
-                        - 2 * ge2 * gfam_cov[1, 2]
-                        + ge2 ** 2 * gfam_cov[2, 2]
-                    ) / Tgw ** 2
-                    if gv1 > 0 and gv2 > 0:
-                        res['gauss_e1_err'] = np.sqrt(gv1)
-                        res['gauss_e2_err'] = np.sqrt(gv2)
-                    else:
-                        res['gauss_e_flags'] |= (
-                            ngmix.flags.NONPOS_SHAPE_VAR
+                    res['gauss_e1_err'], res['gauss_e2_err'], \
+                        geflags = _shape_errors(
+                            res['gauss_e1'], res['gauss_e2'],
+                            res['gauss_T'], gfam_cov,
                         )
+                    res['gauss_e_flags'] |= geflags
             elif gok:
                 res['gauss_e_flags'] |= ngmix.flags.NONPOS_SHAPE_VAR
 
-        # gauss-aperture fluxes and flux s/n, the analogs of the
-        # gauss-model deblender's outputs, for selection studies
-        # against the family quantities.  For a gauss object these
-        # equal the primary entries
-        res['gauss_flux'] = np.full(nband, np.nan)
-        res['gauss_flux_err'] = np.full(nband, np.nan)
+        res['gauss_flux'] = np.full(self.nband, np.nan)
+        res['gauss_flux_err'] = np.full(self.nband, np.nan)
         res['gauss_s2n'] = np.nan
         if m['type'] != 'star' and gfvar is not None:
-            Fg = fs / ws * 4 * np.pi * np.sqrt(det2(Sw[i]))
+            Fg = fs / ws * 4 * np.pi * np.sqrt(det2(self.Sw[i]))
             res['gauss_flux'] = Fg
-            wg = (gfvar > 0) & (fs != 0)
-            res['gauss_flux_err'][wg] = np.abs(
-                Fg[wg] / fs[wg],
-            ) * np.sqrt(gfvar[wg])
-            if np.any(wg):
-                res['gauss_s2n'] = np.sqrt(
-                    np.sum(fs[wg] ** 2 / gfvar[wg]),
-                )
-        out_objects.append(res)
-
-    return {
-        'objects': out_objects,
-        'fwhm_smooth': fwhm_smooth,
-        'Tsmooth': Tsmooth,
-        'numiter': it + 1,
-        'nskip': nskip,
-    }
+            res['gauss_flux_err'], res['gauss_s2n'] = _flux_errors(
+                Fg, fs, gfvar,
+            )
 
 
 def _convert_fixed_models(fixed_models, nband, Tsmooth):
@@ -937,141 +1185,86 @@ def _convert_fixed_models(fixed_models, nband, Tsmooth):
     return positions, models
 
 
-def _object_sums(epochs, nband, positions, models, Sw, Tsmooth, i,
-                 esums, fpositions=(), fmodels=()):
+def _moment_matrix(sums):
     """
-    neighbor-corrected weighted moment sums for object i, accumulated
-    over the object's epochs, plus the model's own predicted sums for
-    'exp' objects.  The fixed external models in fpositions/fmodels
-    are subtracted exactly like in-group neighbors
+    the 2x2 second moment matrix from the weighted moment sums
     """
-    vi, ui = positions[i]
-    is_mix = models[i]['type'] in ('exp', 'dev')
+    finv = 1.0 / sums[5]
+    M1 = sums[2] * finv
+    M2 = sums[3] * finv
+    T = sums[4] * finv
+    return np.array([
+        [0.5 * (T - M1), 0.5 * M2],
+        [0.5 * M2, 0.5 * (T + M1)],
+    ])
 
-    # the model sums scale exactly as 1/detAtinv, so expand the
-    # components once, run the kernel once per band at detAtinv=1,
-    # and rescale per epoch; the fixed externals join the same
-    # kernel call
-    ncomps = []
-    for j in range(len(positions)):
-        if j == i:
-            continue
-        fracs, So00, So01, So11 = model_comps(models[j], Tsmooth)
-        ncomps.append(
-            (positions[j], models[j]['F'], fracs, So00, So01, So11)
+
+def _matched_flux(fs, ws, Sigma, cov):
+    """
+    the matched-aperture flux from the per-band flux sums and weight
+    normalizations, for a gaussian model covariance under a gaussian
+    weight
+    """
+    return fs / ws * 2 * np.pi * np.sqrt(det2(Sigma + cov))
+
+
+def _flux_errors(F, fs, fvar):
+    """
+    per-band flux errors and the combined flux s/n from the flux
+    sums and their variances.  Bands with no positive variance or a
+    zero flux sum are nan, and the s/n is nan when no band is usable
+    """
+    flux_err = np.full(F.size, np.nan)
+    wgood = (fvar > 0) & (fs != 0)
+    flux_err[wgood] = np.abs(
+        F[wgood] / fs[wgood],
+    ) * np.sqrt(fvar[wgood])
+    if np.any(wgood):
+        s2n = np.sqrt(
+            np.sum(fs[wgood] ** 2 / fvar[wgood]),
         )
-    for p, fm in zip(fpositions, fmodels):
-        fracs, So00, So01, So11 = model_comps(fm, Tsmooth)
-        ncomps.append((p, fm['F'], fracs, So00, So01, So11))
-
-    base_nsums = np.zeros((nband, 6))
-    if ncomps:
-        nSo00 = np.concatenate([c[3] for c in ncomps])
-        nSo01 = np.concatenate([c[4] for c in ncomps])
-        nSo11 = np.concatenate([c[5] for c in ncomps])
-        ndv = np.concatenate([
-            np.full(c[2].size, c[0][0] - vi) for c in ncomps
-        ])
-        ndu = np.concatenate([
-            np.full(c[2].size, c[0][1] - ui) for c in ncomps
-        ])
-        for band in range(nband):
-            nF = np.concatenate([
-                c[1][band] * c[2] for c in ncomps
-            ])
-            gauss_comps_ksums(
-                nF, nSo00, nSo01, nSo11, ndv, ndu,
-                Sw[i][0, 0], Sw[i][0, 1], Sw[i][1, 1], 1.0,
-                base_nsums[band],
-            )
-
-    if is_mix:
-        base_psums = np.zeros((nband, 6))
-        fracs, So00, So01, So11 = model_comps(models[i], Tsmooth)
-        zeros = np.zeros(fracs.size)
-        for band in range(nband):
-            gauss_comps_ksums(
-                models[i]['F'][band] * fracs, So00, So01, So11,
-                zeros, zeros,
-                Sw[i][0, 0], Sw[i][0, 1], Sw[i][1, 1], 1.0,
-                base_psums[band],
-            )
-
-    sums = np.zeros(6)
-    fs = np.zeros(nband)
-    ws = np.zeros(nband)
-    pred = np.zeros(6)
-    fs_pred = np.zeros(nband)
-
-    for ep in epochs:
-        alpha, beta = get_phase_angles(
-            ep, vi - ep['vcen'], ui - ep['ucen'],
-        )
-        admom_ksums(
-            ep['kim'], ep['iy'], ep['ix'], ep['dim'],
-            alpha, beta, ep['kv'], ep['ku'],
-            Sw[i][0, 0], Sw[i][0, 1], Sw[i][1, 1], ep['df2'],
-            esums,
-        )
-        csums = esums - base_nsums[ep['band']] / ep['detAtinv']
-        fac = ep['weight'] * ep['detAtinv']
-        sums += fac * csums
-        fs[ep['band']] += fac * csums[5]
-        ws[ep['band']] += ep['weight']
-
-        if is_mix:
-            psums = base_psums[ep['band']] / ep['detAtinv']
-            pred += fac * psums
-            fs_pred[ep['band']] += fac * psums[5]
-
-    return sums, fs, ws, pred, fs_pred
+    else:
+        s2n = np.nan
+    return flux_err, s2n
 
 
-def _init_fluxes(epochs_per_obj, nband, positions, models, Sw, Tsmooth,
-                 fpositions=(), fmodels=()):
+def _shape_from_cov(S):
     """
-    initialize the fluxes by solving the per-band linear system at the
-    guess structures: the measured flux sums for each object are linear
-    in all object fluxes with closed-form overlap coefficients.  The
-    fixed external models are subtracted from the measured side
+    T, e1, e2 and shape definedness from a covariance matrix.  The
+    shape is defined for det > 0 with positive trace, which is
+    |e| < 1: a positive-size object with a degenerate covariance has
+    no defined shape.  e1 and e2 are nan when undefined
     """
-    nobj = len(positions)
-    esums = np.zeros(6)
-    for band in range(nband):
-        A = np.zeros((nobj, nobj))
-        bvec = np.zeros(nobj)
-        for i in range(nobj):
-            vi, ui = positions[i]
-            for ep in epochs_per_obj[i]:
-                if ep['band'] != band:
-                    continue
-                fac = ep['weight'] * ep['detAtinv']
-                alpha, beta = get_phase_angles(
-                    ep, vi - ep['vcen'], ui - ep['ucen'],
-                )
-                admom_ksums(
-                    ep['kim'], ep['iy'], ep['ix'], ep['dim'],
-                    alpha, beta, ep['kv'], ep['ku'],
-                    Sw[i][0, 0], Sw[i][0, 1], Sw[i][1, 1], ep['df2'],
-                    esums,
-                )
-                bvec[i] += fac * esums[5]
-                for p, fm in zip(fpositions, fmodels):
-                    bvec[i] -= fac * model_ksums(
-                        fm, band, p[0] - vi, p[1] - ui,
-                        Sw[i], ep['detAtinv'], Tsmooth,
-                    )[5]
-                for j in range(nobj):
-                    munit = dict(models[j])
-                    munit['F'] = np.ones(nband)
-                    A[i, j] += fac * model_ksums(
-                        munit, band,
-                        positions[j][0] - vi, positions[j][1] - ui,
-                        Sw[i], ep['detAtinv'], Tsmooth,
-                    )[5]
-        fsol = np.linalg.solve(A, bvec)
-        for i in range(nobj):
-            models[i]['F'][band] = fsol[i]
+    T = S[0, 0] + S[1, 1]
+    ok = T > 0 and det2(S) > 0
+    if ok:
+        e1 = (S[1, 1] - S[0, 0]) / T
+        e2 = 2 * S[0, 1] / T
+    else:
+        e1 = np.nan
+        e2 = np.nan
+    return T, e1, e2, ok
+
+
+def _shape_errors(e1, e2, T, fam_cov):
+    """
+    delta-method errors of e1, e2 from the family covariance
+    sandwich.  When either implied variance is not positive the
+    errors are nan and NONPOS_SHAPE_VAR is returned in the flags
+    """
+    ev1 = (
+        fam_cov[0, 0]
+        - 2 * e1 * fam_cov[0, 2]
+        + e1 ** 2 * fam_cov[2, 2]
+    ) / T ** 2
+    ev2 = (
+        fam_cov[1, 1]
+        - 2 * e2 * fam_cov[1, 2]
+        + e2 ** 2 * fam_cov[2, 2]
+    ) / T ** 2
+    if ev1 > 0 and ev2 > 0:
+        return np.sqrt(ev1), np.sqrt(ev2), 0
+    return np.nan, np.nan, ngmix.flags.NONPOS_SHAPE_VAR
 
 
 def _fchange(newF, oldF):

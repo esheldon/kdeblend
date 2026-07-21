@@ -308,6 +308,48 @@ def test_deblend_stamps_errors():
         pass
 
 
+def test_gauss_flux_per_object_weights():
+    """
+    the gauss-aperture fluxes use each object's own stamp weights:
+    changing only a neighbor's stamp weights leaves an object's
+    gauss_flux unchanged
+    """
+    comps = [
+        dict(kind='gauss', e1=0.05, e2=0.0, T=0.6, flux=120.0,
+             v=0.0, u=-1.0),
+        dict(kind='gauss', e1=-0.05, e2=0.0, T=0.8, flux=150.0,
+             v=0.0, u=1.0),
+    ]
+    objects = [
+        dict(v=0.0, u=-1.0, Tguess=0.6),
+        dict(v=0.0, u=1.0, Tguess=0.8),
+    ]
+
+    def run(nbr_noise):
+        # noiseless images; only the weight maps differ
+        noises = [1.0e-9, nbr_noise]
+        mbobs_list = []
+        for o, nz in zip(objects, noises):
+            cpb = [[
+                dict(c, v=c['v'] - o['v'], u=c['u'] - o['u'])
+                for c in comps
+            ]]
+            mbobs_list.append(
+                make_blend_mbobs(cpb, [0.9], noise=nz, dim=STAMP_DIM),
+            )
+        return deblend_stamps(
+            mbobs_list, objects, fwhm_smooth=FWHM_SMOOTH, tol=TOL,
+        )
+
+    resa = run(1.0e-9)
+    resb = run(2.0e-9)
+    for oa, ob in zip(resa['objects'], resb['objects']):
+        assert np.allclose(
+            oa['gauss_flux'], ob['gauss_flux'], rtol=1.0e-6,
+        )
+        assert np.allclose(oa['flux'], ob['flux'], rtol=1.0e-6)
+
+
 def test_stamp_vs_full():
     """
     the stamp-based approach matches the full-image approach and the
