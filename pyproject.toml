@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "kdeblend"
+description = "multi-band deblender using pre-PSF adaptive moments in k-space with closed-form neighbor corrections"
+authors = [{name = "Erin Sheldon", email = "erin.sheldon@gmail.com"}]
+readme = "README.md"
+license = {text = "GPL-2.0-or-later"}
+requires-python = ">=3.8"
+dependencies = ["numpy", "ngmix"]
+dynamic = ["version"]
+
+[project.urls]
+Homepage = "https://github.com/esheldon/kdeblend"
+
+[tool.setuptools.packages.find]
+include = ["kdeblend*"]
+
+[tool.setuptools.dynamic]
+version = {attr = "kdeblend._version.__version__"}
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff.lint.per-file-ignores]
+"kdeblend/__init__.py" = ["F401"]
