@@ -183,21 +183,14 @@ def deblend(
     mbobs = get_mb_obs(obs)
     nband = len(mbobs)
 
-    fwhm_smooth = choose_fwhm_smooth(
-        mbobs, fwhm_smooth=fwhm_smooth, smooth_fac=smooth_fac, rng=rng,
+    fwhm_smooth, Tsmooth = _get_smoothing(
+        mbobs, fwhm_smooth, smooth_fac, rng,
     )
-    Tsmooth = fwhm_to_T(fwhm_smooth) if fwhm_smooth > 0 else 0.0
 
-    epochs = []
-    for band, obslist in enumerate(mbobs):
-        for tobs in obslist:
-            ep = prep_epoch(
-                tobs, band=band, fwhm_smooth=fwhm_smooth,
-                ap_rad=ap_rad, use_noise_image=use_noise_image,
-            )
-            ep['vcen'] = 0.0
-            ep['ucen'] = 0.0
-            epochs.append(ep)
+    epochs = _prep_epochs(
+        mbobs, fwhm_smooth=fwhm_smooth, ap_rad=ap_rad,
+        use_noise_image=use_noise_image, vcen=0.0, ucen=0.0,
+    )
 
     epochs_per_obj = [epochs] * len(objects)
     return _Deblender(
@@ -269,29 +262,58 @@ def deblend_stamps(
             for tobs in m[band]:
                 obslist.append(tobs)
         union.append(obslist)
-    fwhm_smooth = choose_fwhm_smooth(
-        union, fwhm_smooth=fwhm_smooth, smooth_fac=smooth_fac, rng=rng,
+    fwhm_smooth, Tsmooth = _get_smoothing(
+        union, fwhm_smooth, smooth_fac, rng,
     )
-    Tsmooth = fwhm_to_T(fwhm_smooth) if fwhm_smooth > 0 else 0.0
 
-    epochs_per_obj = []
-    for m, o in zip(mbobs_list, objects):
-        eps = []
-        for band, obslist in enumerate(m):
-            for tobs in obslist:
-                ep = prep_epoch(
-                    tobs, band=band, fwhm_smooth=fwhm_smooth,
-                    ap_rad=ap_rad, use_noise_image=use_noise_image,
-                )
-                ep['vcen'] = o['v']
-                ep['ucen'] = o['u']
-                eps.append(ep)
-        epochs_per_obj.append(eps)
+    epochs_per_obj = [
+        _prep_epochs(
+            m, fwhm_smooth=fwhm_smooth, ap_rad=ap_rad,
+            use_noise_image=use_noise_image, vcen=o['v'], ucen=o['u'],
+        )
+        for m, o in zip(mbobs_list, objects)
+    ]
 
     return _Deblender(
         epochs_per_obj, nband, objects, fwhm_smooth, Tsmooth,
         maxiter, tol, fixed_models=fixed_models,
     ).go()
+
+
+def _get_smoothing(mbobs, fwhm_smooth, smooth_fac, rng):
+    """
+    the common smoothing fwhm, chosen from the largest psf when not
+    sent (see ngmix.prepsfadmom), and its T
+    """
+    fwhm_smooth = choose_fwhm_smooth(
+        mbobs, fwhm_smooth=fwhm_smooth, smooth_fac=smooth_fac, rng=rng,
+    )
+    Tsmooth = fwhm_to_T(fwhm_smooth) if fwhm_smooth > 0 else 0.0
+    return fwhm_smooth, Tsmooth
+
+
+def _prep_epochs(
+    mbobs, fwhm_smooth, ap_rad, use_noise_image, vcen, ucen,
+):
+    """
+    the prepared epochs for all bands (see
+    ngmix.prepsfadmom.prep.prep_epoch), with the phase center
+    entries stamped in.  In shared-image mode the phase origin is
+    the jacobian center (vcen = ucen = 0); in stamp mode it is the
+    object position, since each stamp jacobian is centered on its
+    object
+    """
+    epochs = []
+    for band, obslist in enumerate(mbobs):
+        for tobs in obslist:
+            ep = prep_epoch(
+                tobs, band=band, fwhm_smooth=fwhm_smooth,
+                ap_rad=ap_rad, use_noise_image=use_noise_image,
+            )
+            ep['vcen'] = vcen
+            ep['ucen'] = ucen
+            epochs.append(ep)
+    return epochs
 
 
 class _Deblender(object):
@@ -308,7 +330,8 @@ class _Deblender(object):
     normalized vector holding, for every object, its per-band fluxes
     and the entries of its model and weight covariance matrices;
     star structures are frozen so only their fluxes enter (see
-    _pack_state)
+    _pack_state). This single state vector, while unfortunately
+    opaque, is needed for the Steffenson boost.
 
     Parameters
     ----------
@@ -410,6 +433,15 @@ class _Deblender(object):
         subtracted from the measured side
         """
         nobj = self.nobj
+
+        # unit-flux copies of the guess models, for the closed-form
+        # overlap coefficients
+        unit_models = []
+        for m in self.models:
+            munit = dict(m)
+            munit['F'] = np.ones(self.nband)
+            unit_models.append(munit)
+
         for band in range(self.nband):
             A = np.zeros((nobj, nobj))
             bvec = np.zeros(nobj)
@@ -436,10 +468,8 @@ class _Deblender(object):
                             Sw, ep['detAtinv'], self.Tsmooth,
                         )[5]
                     for j in range(nobj):
-                        munit = dict(self.models[j])
-                        munit['F'] = np.ones(self.nband)
                         A[i, j] += fac * model_ksums(
-                            munit, band,
+                            unit_models[j], band,
                             self.positions[j][0] - vi,
                             self.positions[j][1] - ui,
                             Sw, ep['detAtinv'], self.Tsmooth,
