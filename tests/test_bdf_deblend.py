@@ -114,6 +114,7 @@ def test_bdf_pair():
         ) < 0.05
         assert r['TdByTe'] == 1.0
         assert np.isfinite(r['fracdev_gls'])
+        assert np.isfinite(r['fracdev_err'])
         # gauss entries come for free as for every type
         assert np.isfinite(r['gauss_e1'])
 
@@ -167,6 +168,56 @@ def test_bdf_shrinkage_freeze():
     assert abs(rb['flux'][0] / re['flux'][0] - 1) < 1.0e-6
     assert abs(rb['T'] / re['T'] - 1) < 1.0e-6
     assert abs(rb['e1'] - re['e1']) < 1.0e-8
+
+
+def test_bdf_error_calibration():
+    """
+    the joint-sandwich errors (coupled structure and split, with
+    the split-noise cross covariance) match the robust MC scatter
+    for a noisy isolated composite.  The MAD width is used since
+    the free split has a small nonlinear tail
+    """
+    import ngmix
+
+    comp = dict(v=0.0, u=0.0, e1=0.08, e2=-0.04, T=0.5,
+                flux=150.0, fracdev=0.3, TdByTe=1.0)
+    obs0 = make_bdf_blend_obs([comp], 0.9)
+    im0 = obs0.image.copy()
+    noise = 0.25
+
+    rng = np.random.RandomState(19)
+    vals = []
+    perr = []
+    for i in range(50):
+        im = im0 + rng.normal(scale=noise, size=im0.shape)
+        obs = ngmix.Observation(
+            im, weight=np.ones(im0.shape) / noise ** 2,
+            jacobian=obs0.jacobian, psf=obs0.psf,
+        )
+        res = deblend(
+            obs,
+            [dict(v=0.0, u=0.0, type='bdf', Tguess=0.4,
+                  TdByTe=1.0)],
+            fwhm_smooth=FWHM_SMOOTH, tol=1.0e-6,
+        )
+        r = res['objects'][0]
+        if r['deblend_flags'] != 0 or r['e_flags'] != 0:
+            continue
+        vals.append((r['e1'], r['flux'][0], r['fracdev']))
+        perr.append((r['e1_err'], r['flux_err'][0],
+                     r['fracdev_err']))
+
+    assert len(vals) >= 45
+    vals = np.array(vals)
+    perr = np.array(perr)
+    assert np.all(np.isfinite(perr))
+
+    def mad_sigma(x):
+        return 1.4826 * np.median(np.abs(x - np.median(x)))
+
+    for col in range(3):
+        ratio = mad_sigma(vals[:, col]) / np.median(perr[:, col])
+        assert 0.6 < ratio < 1.5
 
 
 def test_bdf_validation():

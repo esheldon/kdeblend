@@ -55,8 +55,11 @@ from ngmix.observation import get_mb_obs, ObsList, MultiBandObsList
 from ngmix.moments import fwhm_to_T
 from ngmix.prepsfadmom.prep import choose_fwhm_smooth, prep_epoch
 from ngmix.prepsfadmom import get_phase_angles, deweight
-from ngmix.prepsfadmom.errors import model_sandwich
+from ngmix.prepsfadmom.errors import (
+    model_sandwich, bdf_joint_sandwich, _mbasis_cov,
+)
 from ngmix.prepsfadmom.prepsfadmom_nb import admom_ksums, admom_finalize
+from ngmix.fastexp_nb import FASTEXP_MAX_CHI2
 
 from ngmix.prepsfadmom.models import (
     det2, cov_from_e, model_ksums, model_comps, mixture_model_valid,
@@ -861,6 +864,207 @@ class _Deblender(object):
             self._bdf_noise_cache[i] = var2
         return self._bdf_noise_cache[i]
 
+    def _bdf_split_response(self, i):
+        """
+        d fd_gls / d (M1, M2, T) of the family covariance at the
+        model consistent point: the two-aperture solve of the
+        converged model itself (closed form template sums on both
+        sides), re-solved with the template matrix at perturbed
+        structure.  Central differences over the mbasis.  The band
+        weight sums cancel between the two sides, so they are
+        omitted
+        """
+        m = self.models[i]
+        info = self.bdf_info.get(i)
+        Sfam = m['cov']
+        Td = m['TdByTe']
+
+        fam0 = np.array([
+            Sfam[1, 1] - Sfam[0, 0], 2 * Sfam[0, 1],
+            Sfam[0, 0] + Sfam[1, 1],
+        ])
+        h = 1.0e-6 * max((1.0 + Td) * fam0[2], 1.0e-3)
+
+        def base_at(S):
+            parts = [
+                {'type': 'exp', 'cov': S,
+                 'F': np.ones(self.nband)},
+                {'type': 'dev', 'cov': Td * S,
+                 'F': np.ones(self.nband)},
+            ]
+            base = np.zeros((2, 2))
+            for a, Sw in enumerate((self.Sw[i], self.smooth_cov)):
+                for c, part in enumerate(parts):
+                    base[a, c] = model_ksums(
+                        part, 0, 0.0, 0.0, Sw, 1.0, self.Tsmooth,
+                    )[5]
+            return base
+
+        base0 = base_at(Sfam)
+        # model-consistent measured side: the converged raw
+        # components through the unperturbed template sums
+        bmod = info['F2'] @ base0.T
+
+        def split_at(famvec):
+            bp = base_at(_mbasis_cov(*famvec))
+            det = bp[0, 0] * bp[1, 1] - bp[0, 1] * bp[1, 0]
+            if abs(det) < 1.0e-10 * abs(bp[0, 0] * bp[1, 1]):
+                return None
+            E = 0.0
+            D = 0.0
+            for band in range(self.nband):
+                Fp = np.linalg.solve(bp, bmod[band])
+                E += Fp[0]
+                D += Fp[1]
+            S = E + D
+            return D / S if S != 0 else None
+
+        G = np.zeros(3)
+        for j in range(3):
+            famp = fam0.copy()
+            famm = fam0.copy()
+            famp[j] += h
+            famm[j] -= h
+            fp = split_at(famp)
+            fm = split_at(famm)
+            if fp is None or fm is None:
+                return None
+            G[j] = (fp - fm) / (2 * h)
+        return G
+
+    def _bdf_error_terms(self, i, fvar_raw, fmcov):
+        """
+        the joint-sandwich inputs for a bdf object at the converged
+        state: the split response G, the shrinkage factor k, the
+        full noise variance of the raw split and its cross
+        covariance with the object's moment and flux sums.
+
+        The split noise is a linear functional of the same modes
+        as the moment sums: eta = sum_band w_band . (dfs1, dfs2)
+        with w_band the solve-gradient row and dfs1/dfs2 the flux
+        sums under the adaptive and smoothing apertures.  The
+        adaptive-aperture crosses are the fvar_raw/fmcov entries
+        already accumulated; the smoothing aperture needs one
+        cross-aperture kernel overlap pass (its kernel times the
+        adaptive-weight moment kernels times the noise power).
+        The same pass gives the aperture cross covariance, so the
+        returned split variance is the full one, not the diagonal
+        approximation used for the regularization strength.
+
+        Returns (G, k, fd_var, eta_scov, eta_fcovs) or None when
+        the terms cannot be evaluated
+        """
+        info = self.bdf_info.get(i)
+        if info is None:
+            return None
+
+        F2 = info['F2']
+        E = F2[:, 0].sum()
+        D = F2[:, 1].sum()
+        S = E + D
+        if S == 0:
+            return None
+        grad = np.array([-D, E]) / S ** 2
+
+        G = self._bdf_split_response(i)
+        if G is None:
+            return None
+
+        Sw = self.Sw[i]
+        Sm = self.smooth_cov
+
+        # cross-aperture kernel overlaps: the smoothing-aperture
+        # flux kernel against the adaptive-weight (M1, M2, T, flux)
+        # kernels, and its own square, times the noise power
+        X2 = np.zeros((self.nband, 4))
+        var22 = np.zeros(self.nband)
+        for ep in self.epochs_per_obj[i]:
+            kv = ep['kv']
+            ku = ep['ku']
+            Sv = Sw[0, 0] * kv + Sw[0, 1] * ku
+            Su = Sw[0, 1] * kv + Sw[1, 1] * ku
+            chi2 = kv * Sv + ku * Su
+            wk1 = np.exp(-0.5 * np.clip(chi2, 0, FASTEXP_MAX_CHI2))
+            wk1[(chi2 > FASTEXP_MAX_CHI2) | (chi2 < 0)] = 0.0
+            vvk = (Sw[0, 0] - Sv * Sv) * wk1
+            vuk = (Sw[0, 1] - Sv * Su) * wk1
+            uuk = (Sw[1, 1] - Su * Su) * wk1
+            kern = (uuk - vvk, 2 * vuk, uuk + vvk, wk1)
+
+            Sv2 = Sm[0, 0] * kv + Sm[0, 1] * ku
+            Su2 = Sm[0, 1] * kv + Sm[1, 1] * ku
+            chi22 = kv * Sv2 + ku * Su2
+            wk2 = np.exp(
+                -0.5 * np.clip(chi22, 0, FASTEXP_MAX_CHI2)
+            )
+            wk2[(chi22 > FASTEXP_MAX_CHI2) | (chi22 < 0)] = 0.0
+            w2ef = wk2 * ep['err_fac2']
+
+            fac2 = (
+                (ep['weight'] * ep['detAtinv']) ** 2
+                * ep['df2'] ** 2
+            )
+            band = ep['band']
+            for c in range(4):
+                X2[band, c] += fac2 * np.sum(w2ef * kern[c])
+            var22[band] += fac2 * np.sum(w2ef * wk2)
+
+        # the converged template matrix per band
+        m = self.models[i]
+        base = np.zeros((2, 2))
+        parts = [
+            {'type': 'exp', 'cov': m['cov'],
+             'F': np.ones(self.nband)},
+            {'type': 'dev', 'cov': m['TdByTe'] * m['cov'],
+             'F': np.ones(self.nband)},
+        ]
+        for a, Swa in enumerate((Sw, Sm)):
+            for c, part in enumerate(parts):
+                base[a, c] = model_ksums(
+                    part, 0, 0.0, 0.0, Swa, 1.0, self.Tsmooth,
+                )[5]
+
+        ws = np.zeros(self.nband)
+        for ep in self.epochs_per_obj[i]:
+            ws[ep['band']] += ep['weight']
+
+        eta_scov = np.zeros(3)
+        eta_fcovs = np.zeros(self.nband)
+        fd_var = 0.0
+        for band in range(self.nband):
+            Mb = base * ws[band]
+            try:
+                wb = np.linalg.inv(Mb).T @ grad
+            except np.linalg.LinAlgError:
+                return None
+            C2 = np.array([
+                [fvar_raw[band], X2[band, 3]],
+                [X2[band, 3], var22[band]],
+            ])
+            fd_var += wb @ C2 @ wb
+            eta_scov += wb[0] * fmcov[band] + wb[1] * X2[band, :3]
+            eta_fcovs[band] = (
+                wb[0] * fvar_raw[band] + wb[1] * X2[band, 3]
+            )
+        if not fd_var > 0:
+            return None
+        info['fd_var_full'] = fd_var
+
+        # the shrinkage factor the estimator actually applied,
+        # from the same variance the update used
+        shrink = self.fd_shrink[i]
+        if shrink is None:
+            k = 1.0
+        else:
+            _, sigma0 = shrink
+            if sigma0 == 0:
+                k = 0.0
+            elif info['fd_var'] > 0:
+                k = sigma0 ** 2 / (sigma0 ** 2 + info['fd_var'])
+            else:
+                k = 1.0
+        return G, k, fd_var, eta_scov, eta_fcovs
+
     def _mixture_shift(self, i, newSw, sums, pred):
         """
         the proposed shift of the family covariance: the difference
@@ -1211,8 +1415,10 @@ class _Deblender(object):
 
         sums_i, fs, ws, _, _ = self._get_object_sums(i)
         fvar_raw, fmcov, covj = self._accumulate_error_sums(i)
-        fvar, fam_cov, gfvar, gfam_cov = self._run_sandwiches(
-            i, sums_i, covj, fs, fvar_raw, fmcov,
+        fvar, fam_cov, gfvar, gfam_cov, fd_var_tot = (
+            self._run_sandwiches(
+                i, sums_i, covj, fs, fvar_raw, fmcov,
+            )
         )
         flux_err, s2n = _flux_errors(m['F'], fs, fvar)
 
@@ -1231,12 +1437,20 @@ class _Deblender(object):
         if m['type'] == 'bdf':
             res['fracdev'] = m['fracdev']
             res['TdByTe'] = m['TdByTe']
+            res['fracdev_err'] = (
+                np.sqrt(fd_var_tot)
+                if fd_var_tot is not None and fd_var_tot > 0
+                else np.nan
+            )
             info = self.bdf_info.get(i)
             if info is not None:
+                # the full split noise variance from the error
+                # pass when available, else the diagonal
+                # approximation used for the regularization
+                fdv = info.get('fd_var_full', info['fd_var'])
                 res['fracdev_gls'] = info['fd_gls']
                 res['fracdev_gls_err'] = (
-                    np.sqrt(info['fd_var'])
-                    if info['fd_var'] > 0 else np.nan
+                    np.sqrt(fdv) if fdv > 0 else np.nan
                 )
                 res['flux_exp'] = info['F2'][:, 0].copy()
                 res['flux_dev'] = info['F2'][:, 1].copy()
@@ -1291,11 +1505,18 @@ class _Deblender(object):
         Star weights are frozen, so the fixed weight flux variance
         is exact and there are no structure errors.  Also returns
         the gauss-estimator analogs under the same weight, for the
-        gauss entries; for a gauss object the sandwiches coincide
+        gauss entries; for a gauss object the sandwiches coincide.
+
+        For a bdf object the joint sandwich over the coupled
+        (structure, split) estimating equations is used, including
+        the cross covariance of the split noise with the moment
+        sums; it also yields the total split variance.  The
+        conditional model sandwich is the fallback when the joint
+        terms cannot be evaluated
 
         Returns
         -------
-        fvar, fam_cov, gfvar, gfam_cov
+        fvar, fam_cov, gfvar, gfam_cov, fd_var_tot
         """
         m = self.models[i]
 
@@ -1303,22 +1524,36 @@ class _Deblender(object):
         fam_cov = None
         gfvar = None
         gfam_cov = None
+        fd_var_tot = None
         if m['type'] != 'star' and sums_i[5] > 0:
             if m['type'] == 'gauss':
                 mtype = 'gauss'
                 Sfam = m['cov_sm'] - self.smooth_cov
             elif m['type'] == 'bdf':
-                # the spec dict carries the split state; the
-                # sandwich is conditional on it
+                # the spec dict carries the split state
                 mtype = m
                 Sfam = m['cov']
             else:
                 mtype = m['type']
                 Sfam = m['cov']
-            fvar, fam_cov = model_sandwich(
-                mtype, Sfam, self.Sw[i], self.Tsmooth,
-                sums_i, covj, fs, fvar_raw, fmcov,
-            )
+            fvar = None
+            if m['type'] == 'bdf':
+                terms = self._bdf_error_terms(i, fvar_raw, fmcov)
+                if terms is not None:
+                    G, k, fdv, eta_scov, eta_fcovs = terms
+                    fvar, fam_cov, fd_var_tot = bdf_joint_sandwich(
+                        m, self.Sw[i], self.Tsmooth,
+                        sums_i, covj, fs, fvar_raw, fmcov,
+                        split_grad=G, shrink_k=k,
+                        fd_var_data=fdv,
+                        eta_scov=eta_scov, eta_fcovs=eta_fcovs,
+                    )
+            if fvar is None:
+                fd_var_tot = None
+                fvar, fam_cov = model_sandwich(
+                    mtype, Sfam, self.Sw[i], self.Tsmooth,
+                    sums_i, covj, fs, fvar_raw, fmcov,
+                )
             if fvar is None:
                 # the sandwich could not be evaluated; fall back
                 # to the fixed weight variances, with the
@@ -1341,7 +1576,7 @@ class _Deblender(object):
                 if gfvar is None:
                     gfvar = fvar_raw
                     gfam_cov = None
-        return fvar, fam_cov, gfvar, gfam_cov
+        return fvar, fam_cov, gfvar, gfam_cov, fd_var_tot
 
     def _set_shape(self, res, i, fam_cov):
         """
