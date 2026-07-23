@@ -1295,6 +1295,12 @@ class _Deblender(object):
                 mtype, Sfam, self.Sw[i], self.Tsmooth,
                 sums_i, covj, fs, fvar_raw, fmcov,
             )
+            if fvar is None:
+                # the sandwich could not be evaluated; fall back
+                # to the fixed weight variances, with the
+                # structure errors flagged downstream
+                fvar = fvar_raw
+                fam_cov = None
             if mtype == 'gauss':
                 # the weight equals the gauss family covariance, so
                 # the sandwiches coincide
@@ -1308,6 +1314,9 @@ class _Deblender(object):
                     self.Sw[i], self.Tsmooth,
                     sums_i, covj, fs, fvar_raw, fmcov,
                 )
+                if gfvar is None:
+                    gfvar = fvar_raw
+                    gfam_cov = None
         return fvar, fam_cov, gfvar, gfam_cov
 
     def _set_shape(self, res, i, fam_cov):
