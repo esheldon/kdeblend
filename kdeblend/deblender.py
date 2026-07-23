@@ -86,6 +86,14 @@ EXTERNALS_SUBTRACTED = 2**2
 # intervening
 NFAIL_LIMIT = 10
 
+# update the bdf flux split every this many sweeps: the split
+# varies slowly compared to the structure, so intermediate sweeps
+# can reuse it, saving the smoothing-aperture data pass.  The last
+# update's change is carried in the convergence metric on the
+# sweeps between updates, so a fit cannot converge with a stale
+# split.  1 updates every sweep
+BDF_SPLIT_EVERY = 2
+
 
 def deblend(
     obs, objects,
@@ -390,6 +398,8 @@ class _Deblender(object):
         self._bdf_noise_cache = {}
         self.fd_shrink = [None] * len(objects)
         self.fd_init = [0.5] * len(objects)
+        self.bdf_last_dfd = np.zeros(len(objects))
+        self.isweep = 0
 
         self.epochs_per_obj = epochs_per_obj
         self.nband = nband
@@ -543,6 +553,7 @@ class _Deblender(object):
         dict as for deblend
         """
         for it in range(self.maxiter):
+            self.isweep = it
             maxchange = self._sweep()
             if maxchange < self.tol:
                 break
@@ -691,14 +702,21 @@ class _Deblender(object):
             m['cov'] = prop
             self.nfail[i] = 0
 
-        self.Sw[i] = newSw
-
         if m['type'] == 'bdf':
-            change = max(change, self._update_bdf_split(i))
+            # the split update runs under the pre-update weight so
+            # the flux sums measured for the structure step can be
+            # reused as its first aperture row; the one-sweep lag
+            # vanishes at the fixed point like the other lags in
+            # the iteration.  Between updates the last change is
+            # carried so convergence waits for a settled split
+            if self.isweep % BDF_SPLIT_EVERY == 0:
+                self.bdf_last_dfd[i] = self._update_bdf_split(i, fs)
+            change = max(change, self.bdf_last_dfd[i])
 
+        self.Sw[i] = newSw
         return change
 
-    def _update_bdf_split(self, i):
+    def _update_bdf_split(self, i, fs1):
         """
         the per-sweep flux split update for a bdf object: a
         two-aperture linear solve for the component fluxes.  The
@@ -706,11 +724,13 @@ class _Deblender(object):
         smoothing weight, whose different scales separate the exp
         and dev templates; the measured side is the
         neighbor-corrected flux sum under each aperture and the
-        template side is closed form.  The band-combined split is
-        then optionally shrunk toward the prior (see the deblend
-        docstring) before it updates the model; the component
-        fluxes and the raw split are kept for the result.  Returns
-        the absolute split change
+        template side is closed form.  The first aperture's sums
+        are reused from the structure step's measurement (fs1),
+        so only the smoothing aperture needs a data pass.  The
+        band-combined split is then optionally shrunk toward the
+        prior (see the deblend docstring) before it updates the
+        model; the component fluxes and the raw split are kept
+        for the result.  Returns the absolute split change
 
         The shrinkage weight uses one-time per-aperture noise
         variances computed at the first call (the weight evolves
@@ -744,25 +764,28 @@ class _Deblender(object):
         if abs(det) < 1.0e-10 * abs(base[0, 0] * base[1, 1]):
             return 0.0
 
-        # measured neighbor-corrected flux sums per aperture
+        # measured neighbor-corrected flux sums: the adaptive
+        # aperture row is the reused structure-step measurement,
+        # the smoothing aperture needs its own pass
         fs2 = np.zeros((2, self.nband))
-        for a, Sw in enumerate(weights):
-            nsums = self._get_neighbor_sums(i, Sw=Sw)
-            for ep in self.epochs_per_obj[i]:
-                alpha, beta = get_phase_angles(
-                    ep, vi - ep['vcen'], ui - ep['ucen'],
-                )
-                admom_ksums(
-                    ep['kim'], ep['iy'], ep['ix'], ep['dim'],
-                    alpha, beta, ep['kv'], ep['ku'],
-                    Sw[0, 0], Sw[0, 1], Sw[1, 1], ep['df2'],
-                    self.esums,
-                )
-                csums = (
-                    self.esums - nsums[ep['band']] / ep['detAtinv']
-                )
-                fac = ep['weight'] * ep['detAtinv']
-                fs2[a, ep['band']] += fac * csums[5]
+        fs2[0] = fs1
+        Sw = self.smooth_cov
+        nsums = self._get_neighbor_sums(i, Sw=Sw)
+        for ep in self.epochs_per_obj[i]:
+            alpha, beta = get_phase_angles(
+                ep, vi - ep['vcen'], ui - ep['ucen'],
+            )
+            admom_ksums(
+                ep['kim'], ep['iy'], ep['ix'], ep['dim'],
+                alpha, beta, ep['kv'], ep['ku'],
+                Sw[0, 0], Sw[0, 1], Sw[1, 1], ep['df2'],
+                self.esums,
+            )
+            csums = (
+                self.esums - nsums[ep['band']] / ep['detAtinv']
+            )
+            fac = ep['weight'] * ep['detAtinv']
+            fs2[1, ep['band']] += fac * csums[5]
 
         var2 = self._get_bdf_noise_vars(i, weights)
 
@@ -918,6 +941,7 @@ class _Deblender(object):
                 m['cov'] = np.zeros((2, 2))
                 if m['type'] == 'bdf':
                     m['fracdev'] = self.fd_init[i]
+                    self.bdf_last_dfd[i] = 1.0
             else:
                 m['cov_sm'] = self.smooth_cov.copy()
             # the restart is a discontinuity in the sweep map
