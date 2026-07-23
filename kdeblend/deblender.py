@@ -97,6 +97,17 @@ NFAIL_LIMIT = 10
 # split.  1 updates every sweep
 BDF_SPLIT_EVERY = 2
 
+# recentering: the maximum displacement of a center from its
+# detection position, scaled by sqrt(Tsmooth), and the prior
+# width in arcsec of the center regularization toward the
+# detection position.  The per-sweep update is
+# pos += k pull + (1 - k)(pos_det - pos) with
+# k = sigma0^2/(sigma0^2 + sigma_pull^2): a free adaptive center
+# for bright objects, frozen at the detection position when the
+# pull is pure noise
+RECENTER_CLIP_FAC = 0.5
+DEFAULT_CEN_SIGMA0 = 0.1
+
 
 def deblend(
     obs, objects,
@@ -108,6 +119,8 @@ def deblend(
     use_noise_image=False,
     rng=None,
     fixed_models=None,
+    recenter=False,
+    cen_sigma0=DEFAULT_CEN_SIGMA0,
 ):
     """
     Deblend a set of objects with fixed centers.
@@ -180,6 +193,31 @@ def deblend(
         e1, e2, T, as reported in the objects entries of a previous
         deblend result; 'bdf' entries additionally carry fracdev
         and TdByTe.  Nonfinite parameters raise.
+    recenter: bool, optional
+        If True, the centers join the per-sweep updates, moving by
+        the measured pull (the weighted centroid of the object's
+        neighbor-corrected data, the same step the single-object
+        adaptive-moments center update takes) regularized toward
+        the detection position:
+
+            pos += k pull + (1 - k)(pos_det - pos)
+
+        with k = cen_sigma0^2/(cen_sigma0^2 + sigma_pull^2), where
+        sigma_pull is the object's centroid noise.  Bright objects
+        get a free adaptive center, faint ones stay at the
+        detection position.  This removes the systematic sub-pixel
+        errors of detection centroids (neighbor-pulled), which
+        otherwise distort the fits of blend members.  The centers
+        join the convergence metric and the sweep-map
+        extrapolation, containment restarts reset them to the
+        detection positions, and the displacement from the
+        detection position is clipped to RECENTER_CLIP_FAC times
+        sqrt(Tsmooth).  Default False (fixed centers).
+    cen_sigma0: float, optional
+        The prior width in arcsec of the center regularization,
+        default DEFAULT_CEN_SIGMA0 = 0.1 (the scale of detection
+        centroid errors).  Zero freezes the centers at the
+        detection positions.  Unused with recenter=False.
 
     Returns
     -------
@@ -226,6 +264,7 @@ def deblend(
     return _Deblender(
         epochs_per_obj, nband, objects, fwhm_smooth, Tsmooth,
         maxiter, tol, fixed_models=fixed_models,
+        recenter=recenter, cen_sigma0=cen_sigma0,
     ).go()
 
 
@@ -239,6 +278,8 @@ def deblend_stamps(
     use_noise_image=False,
     rng=None,
     fixed_models=None,
+    recenter=False,
+    cen_sigma0=DEFAULT_CEN_SIGMA0,
 ):
     """
     Deblend a set of objects with fixed centers, with a postage stamp
@@ -261,11 +302,13 @@ def deblend_stamps(
         the phase center of each object in its own stamps is its
         jacobian center.
     fwhm_smooth, smooth_fac, ap_rad, maxiter, tol, use_noise_image,
-    rng, fixed_models: optional
+    rng, fixed_models, recenter, cen_sigma0: optional
         As for deblend.  The automatic smoothing choice uses the psfs
         of all stamps; with use_noise_image=True every stamp must
         carry its noise realization.  The fixed model centers v, u
         are in the same common frame as the object centers.
+        Recentering shifts each object's position relative to its
+        stamp centers.
 
     Returns
     -------
@@ -307,6 +350,7 @@ def deblend_stamps(
     return _Deblender(
         epochs_per_obj, nband, objects, fwhm_smooth, Tsmooth,
         maxiter, tol, fixed_models=fixed_models,
+        recenter=recenter, cen_sigma0=cen_sigma0,
     ).go()
 
 
@@ -387,10 +431,14 @@ class _Deblender(object):
     """
     def __init__(
         self, epochs_per_obj, nband, objects, fwhm_smooth, Tsmooth,
-        maxiter, tol, fixed_models=None,
+        maxiter, tol, fixed_models=None, recenter=False,
+        cen_sigma0=DEFAULT_CEN_SIGMA0,
     ):
         if len(objects) == 0:
             raise ValueError('no objects sent')
+
+        self.recenter = bool(recenter)
+        self.cen_sigma0 = cen_sigma0
 
         # per bdf object: the latest two-aperture component fluxes
         # (nband, 2), the raw split and its variance, and the
@@ -420,6 +468,12 @@ class _Deblender(object):
 
         self.nskip = 0
         self.cen_pull = [np.zeros(2) for _ in range(self.nobj)]
+        # the detection positions: the recentering displacement
+        # clip and regularization anchor to these
+        self.det_positions = list(self.positions)
+        # per-object pull noise for the recentering, computed
+        # lazily at the first center update (negative marks unset)
+        self._cen_sigma_sweep = np.full(self.nobj, -1.0)
         # scratch for the k-space sum kernels, overwritten per call
         self.esums = np.zeros(6)
 
@@ -588,7 +642,12 @@ class _Deblender(object):
         its maximum relative parameter change.  On a failed structure
         update the previous structure is kept but the flux, which is
         linear and always well defined, is still updated, so a bad
-        early structure state cannot deadlock the blend
+        early structure state cannot deadlock the blend.
+
+        With recentering the center update runs after the
+        other updates, so within the sweep they all see the center
+        the sums were measured at; the center lag vanishes at the
+        fixed point like the other Gauss-Seidel lags
         """
         sums, fs, ws, pred, fs_pred = self._get_object_sums(i)
         m = self.models[i]
@@ -602,18 +661,74 @@ class _Deblender(object):
             newF = _matched_flux(fs, ws, self.Sw[i], m['cov_sm'])
             change = _fchange(newF, m['F'])
             m['F'] = newF
-            return change
-
-        newSw = self._deweight_measured(i, sums)
-        if newSw is None:
-            return self._skip_structure_update(i, fs, ws, fs_pred)
-
-        if m['type'] == 'gauss':
-            return self._update_gauss(i, newSw, fs, ws)
         else:
-            return self._update_mixture(
-                i, newSw, sums, pred, fs, fs_pred,
+            newSw = self._deweight_measured(i, sums)
+            if newSw is None:
+                change = self._skip_structure_update(
+                    i, fs, ws, fs_pred,
+                )
+            elif m['type'] == 'gauss':
+                change = self._update_gauss(i, newSw, fs, ws)
+            else:
+                change = self._update_mixture(
+                    i, newSw, sums, pred, fs, fs_pred,
+                )
+
+        if self.recenter and sums[5] > 0:
+            change = max(change, self._update_center(i, sums))
+        return change
+
+    def _update_center(self, i, sums):
+        """
+        the regularized center update: move by the
+        measured pull blended with a spring back to the detection
+        position,
+
+            pos += k pull + (1 - k)(pos_det - pos)
+
+        with k = sigma0^2/(sigma0^2 + sigma_pull^2).  A bright
+        object converges to its adaptive centroid, a faint one
+        stays at the detection position; the pull noise is
+        computed once per object at the first update (the weight
+        evolves, so like the split shrinkage weight this is
+        approximate and only sets the regularization strength).
+        The displacement from the detection position is clipped.
+        Returns the center change relative to sqrt(Twt)
+        """
+        if self._cen_sigma_sweep[i] < 0:
+            covj = self._accumulate_error_sums(i)[2]
+            var = (covj[0, 0] + covj[1, 1]) / sums[5] ** 2
+            self._cen_sigma_sweep[i] = (
+                np.sqrt(var) if var > 0 else 0.0
             )
+
+        s0 = self.cen_sigma0
+        sig = self._cen_sigma_sweep[i]
+        if not np.isfinite(sig):
+            return 0.0
+        denom = s0 ** 2 + sig ** 2
+        if denom == 0:
+            return 0.0
+        k = s0 ** 2 / denom
+
+        p = self.cen_pull[i]
+        v, u = self.positions[i]
+        v0, u0 = self.det_positions[i]
+        newv = v + k * p[0] + (1.0 - k) * (v0 - v)
+        newu = u + k * p[1] + (1.0 - k) * (u0 - u)
+
+        clip = RECENTER_CLIP_FAC * np.sqrt(self.Tsmooth)
+        dvec = np.array([newv - v0, newu - u0])
+        n = np.sqrt(dvec @ dvec)
+        if n > clip:
+            dvec *= clip / n
+            newv = v0 + dvec[0]
+            newu = u0 + dvec[1]
+
+        dmax = max(abs(newv - v), abs(newu - u))
+        self.positions[i] = (newv, newu)
+        Twt = self.Sw[i][0, 0] + self.Sw[i][1, 1]
+        return dmax / np.sqrt(Twt)
 
     def _deweight_measured(self, i, sums):
         """
@@ -1138,6 +1253,9 @@ class _Deblender(object):
         self.nfail[i] = 0
         m = self.models[i]
         self.Sw[i] = self.smooth_cov.copy()
+        if self.recenter:
+            # the wandering center may be part of the runaway
+            self.positions[i] = self.det_positions[i]
         if self.nrestart[i] == 0:
             self.nrestart[i] = 1
             self.dbflags[i] |= RESTARTED
@@ -1181,6 +1299,7 @@ class _Deblender(object):
         if 0.2 < rho < 0.98:
             saved_models = [dict(m) for m in self.models]
             saved_Sw = [sw.copy() for sw in self.Sw]
+            saved_pos = list(self.positions)
             self._unpack_state(self.hist[-1] + d2 * rho / (1 - rho))
             if self._state_valid():
                 # a fresh trio of plain sweeps is needed for the
@@ -1191,6 +1310,7 @@ class _Deblender(object):
                     m.update(sm)
                 for k in range(self.nobj):
                     self.Sw[k] = saved_Sw[k]
+                self.positions = saved_pos
         if len(self.hist) > 3:
             self.hist = self.hist[-3:]
 
@@ -1208,14 +1328,23 @@ class _Deblender(object):
         exp/dev.  Star weights and covariances are frozen and only
         their fluxes enter, so the vector length depends on the
         current type of every object; a demotion changes the layout
-        and resets the scales and history.  Each component is
-        divided by a per-component scale fixed on the first call, so
-        the sweep map differences are comparable across fluxes and
+        and resets the scales and history.  With recentering
+        the center offsets from the detection positions follow
+        the fluxes for every type, packed with a +1 offset so their
+        scale is O(1) near zero.  Each component is divided by a
+        per-component scale fixed on the first call, so the sweep
+        map differences are comparable across fluxes and
         covariances
         """
         x = []
-        for m, sw in zip(self.models, self.Sw):
+        for i, (m, sw) in enumerate(zip(self.models, self.Sw)):
             x.extend(m['F'])
+            if self.recenter:
+                v0, u0 = self.det_positions[i]
+                x.extend([
+                    self.positions[i][0] - v0 + 1.0,
+                    self.positions[i][1] - u0 + 1.0,
+                ])
             if m['type'] == 'gauss':
                 x.extend([
                     m['cov_sm'][0, 0], m['cov_sm'][0, 1],
@@ -1250,6 +1379,12 @@ class _Deblender(object):
             nband = m['F'].size
             m['F'] = x[k:k + nband].copy()
             k += nband
+            if self.recenter:
+                v0, u0 = self.det_positions[i]
+                self.positions[i] = (
+                    v0 + x[k] - 1.0, u0 + x[k + 1] - 1.0,
+                )
+                k += 2
             if m['type'] == 'gauss':
                 m['cov_sm'] = np.array([
                     [x[k], x[k + 1]], [x[k + 1], x[k + 2]],
@@ -1274,9 +1409,11 @@ class _Deblender(object):
 
     def _state_valid(self):
         """
-        every weight and model in the state gives well defined sums
+        every weight and model in the state gives well defined
+        sums, and with recentering every center is inside
+        its displacement clip box
         """
-        for m, sw in zip(self.models, self.Sw):
+        for i, (m, sw) in enumerate(zip(self.models, self.Sw)):
             if sw[0, 0] <= 0 or sw[1, 1] <= 0 or det2(sw) <= 0:
                 return False
             if m['type'] in ('exp', 'dev', 'bdf'):
@@ -1286,6 +1423,14 @@ class _Deblender(object):
                     return False
             elif m['type'] == 'gauss':
                 if det2(m['cov_sm']) <= 0:
+                    return False
+            if self.recenter:
+                v0, u0 = self.det_positions[i]
+                d2 = (
+                    (self.positions[i][0] - v0) ** 2
+                    + (self.positions[i][1] - u0) ** 2
+                )
+                if d2 > (RECENTER_CLIP_FAC ** 2) * self.Tsmooth:
                     return False
         return True
 

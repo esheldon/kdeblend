@@ -1,8 +1,8 @@
 """
-tests for the one-shot recentering passes: input positions with
-sub-pixel errors (as from detection centroids) are corrected by
-shifting each object by its cen_pull and re-running the sweeps
-warm, keeping fixed-center stability within each pass
+tests for recentering: with recenter=True the centers join the
+per-sweep updates, moving by the measured pull regularized toward
+the detection position, correcting the sub-pixel errors of
+detection centroids that otherwise distort blend-member fits
 """
 import numpy as np
 
@@ -17,9 +17,9 @@ def test_recenter_single():
     """
     a single object with the input position off by ~0.1": without
     recentering the fit is conditioned on the wrong center and
-    cen_pull reports the pull; with recentering the position
-    converges to the truth and the fit matches the exact-position
-    fit
+    cen_pull reports the pull; with recentering the center is
+    effectively free (noiseless data, so k ~ 1) and converges to
+    the truth, matching the exact-position fit
     """
     comp = dict(v=0.0, u=0.0, e1=0.08, e2=-0.04, T=0.5,
                 flux=150.0, fracdev=0.3, TdByTe=1.0)
@@ -32,33 +32,28 @@ def test_recenter_single():
         obs, [spec(0.0, 0.0)], fwhm_smooth=FWHM_SMOOTH, tol=TOL,
     )['objects'][0]
 
-    res0 = deblend(
+    r0 = deblend(
         obs, [spec(0.08, -0.06)], fwhm_smooth=FWHM_SMOOTH, tol=TOL,
-    )
-    assert res0['nrecenter'] == 0
-    r0 = res0['objects'][0]
+    )['objects'][0]
     assert np.allclose(r0['cen'], (0.08, -0.06))
     assert np.sqrt(np.sum(r0['cen_pull'] ** 2)) > 0.02
 
-    res = deblend(
+    r = deblend(
         obs, [spec(0.08, -0.06)], fwhm_smooth=FWHM_SMOOTH, tol=TOL,
         recenter=True,
-    )
-    assert res['nrecenter'] >= 2
-    r = res['objects'][0]
-    assert np.sqrt(np.sum(np.array(r['cen']) ** 2)) < 0.02
-    assert np.sqrt(np.sum(r['cen_pull'] ** 2)) < 0.01
-    assert abs(r['T'] / ref['T'] - 1) < 5.0e-3
-    assert abs(r['e1'] - ref['e1']) < 5.0e-3
-    assert abs(r['flux'][0] / ref['flux'][0] - 1) < 5.0e-3
+    )['objects'][0]
+    assert np.sqrt(np.sum(np.array(r['cen']) ** 2)) < 1.0e-3
+    assert abs(r['T'] / ref['T'] - 1) < 1.0e-3
+    assert abs(r['e1'] - ref['e1']) < 1.0e-3
+    assert abs(r['flux'][0] / ref['flux'][0] - 1) < 1.0e-3
 
 
 def test_recenter_pair():
     """
     a 2" pair with both input positions off by ~0.1 pixel in
     different directions: the miscentering distorts the blend
-    members through the mutual subtraction; recentering recovers
-    the exact-position fits
+    members through the mutual subtraction; the free (noiseless)
+    centers converge jointly and recover the exact-position fits
     """
     comps = [
         dict(v=0.0, u=-1.0, e1=0.05, e2=0.02, T=0.5, flux=250.0,
@@ -80,26 +75,19 @@ def test_recenter_pair():
         fwhm_smooth=FWHM_SMOOTH, tol=TOL,
     )['objects']
 
-    # the maxiter budget is shared across the recentering rounds;
-    # give the tight noiseless tolerance room for all of them
-    offs = [(0.07, -0.02), (-0.05, 0.06)]
     rec = deblend(
-        obs, specs(offs), fwhm_smooth=FWHM_SMOOTH, tol=TOL,
+        obs, specs([(0.07, -0.02), (-0.05, 0.06)]),
+        fwhm_smooth=FWHM_SMOOTH, tol=TOL,
         recenter=True, maxiter=3000,
     )['objects']
 
-    # the residual centers are ~5 mas (the recentering tolerance,
-    # an order of magnitude below typical centroid noise); a blend
-    # member's T responds linearly to its neighbor's offset with a
-    # coefficient of a few per arcsec, so percent-level residual
-    # distortion remains in this noiseless comparison
     for c, e, r in zip(comps, exact, rec):
         assert np.sqrt(
             (r['cen'][0] - c['v']) ** 2 + (r['cen'][1] - c['u']) ** 2
-        ) < 0.01
-        assert abs(r['T'] / e['T'] - 1) < 2.0e-2
-        assert abs(r['e1'] - e['e1']) < 1.0e-2
-        assert abs(r['flux'][0] / e['flux'][0] - 1) < 1.0e-2
+        ) < 2.0e-3
+        assert abs(r['T'] / e['T'] - 1) < 5.0e-3
+        assert abs(r['e1'] - e['e1']) < 5.0e-3
+        assert abs(r['flux'][0] / e['flux'][0] - 1) < 5.0e-3
 
 
 def test_recenter_stamps():
@@ -120,10 +108,33 @@ def test_recenter_stamps():
         fwhm_smooth=FWHM_SMOOTH, tol=TOL, recenter=True,
     )
     r = res['objects'][0]
-    assert res['nrecenter'] >= 2
     assert np.sqrt(
         (r['cen'][0] - comp['v']) ** 2
         + (r['cen'][1] - comp['u']) ** 2
-    ) < 0.01
+    ) < 2.0e-3
     assert abs(r['flux'][0] / comp['flux'] - 1) < 5.0e-3
     assert abs(r['T'] / comp['T'] - 1) < 1.0e-2
+
+
+def test_recenter_freeze():
+    """
+    cen_sigma0 = 0 freezes the centers at the detection positions:
+    identical to recenter=False
+    """
+    comp = dict(v=0.0, u=0.0, e1=0.08, e2=-0.04, T=0.5,
+                flux=150.0, fracdev=0.3, TdByTe=1.0)
+    obs = make_bdf_blend_obs([comp], 0.9)
+    spec = [dict(v=0.05, u=-0.04, type='bdf', Tguess=0.4,
+                 TdByTe=1.0)]
+
+    r0 = deblend(
+        obs, spec, fwhm_smooth=FWHM_SMOOTH, tol=TOL,
+    )['objects'][0]
+    r = deblend(
+        obs, spec, fwhm_smooth=FWHM_SMOOTH, tol=TOL,
+        recenter=True, cen_sigma0=0.0,
+    )['objects'][0]
+    assert np.allclose(r['cen'], (0.05, -0.04))
+    assert abs(r['T'] - r0['T']) < 1.0e-10
+    assert abs(r['e1'] - r0['e1']) < 1.0e-10
+    assert abs(r['flux'][0] - r0['flux'][0]) < 1.0e-8
