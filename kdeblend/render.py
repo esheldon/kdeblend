@@ -13,7 +13,9 @@ it is not imported by the package __init__.  Use
 import numpy as np
 import galsim
 
-from ngmix.prepsfadmom.models import cov_from_e, det2, get_profile_comps
+from ngmix.prepsfadmom.models import (
+    bdf_comps, cov_from_e, det2, get_profile_comps,
+)
 
 
 def render_model(objects, obs, band):
@@ -59,6 +61,17 @@ def _object_profile(obj, band):
         p = galsim.DeltaFunction() * flux
     elif obj['type'] == 'gauss':
         p = _gauss_profile(obj['e1'], obj['e2'], obj['T']) * flux
+    elif obj['type'] == 'bdf':
+        # the composite table from the fitted split; a flagged nan
+        # split renders as pure exp
+        fracdev = obj['fracdev']
+        if not np.isfinite(fracdev):
+            fracdev = 0.0
+        p = galsim.Add([
+            _gauss_profile(obj['e1'], obj['e2'], cT * obj['T'])
+            * (flux * frac)
+            for frac, cT in bdf_comps(fracdev, obj['TdByTe'])
+        ])
     else:
         p = galsim.Add([
             _gauss_profile(obj['e1'], obj['e2'], cT * obj['T'])
