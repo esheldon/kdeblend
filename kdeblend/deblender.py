@@ -106,6 +106,25 @@ BDF_SPLIT_EVERY = 2
 # for bright objects, frozen at the detection position when the
 # pull is pure noise
 RECENTER_CLIP_FAC = 0.5
+
+# projected-residual stopping: the per-class contraction ratio
+# is capped here; a sweep with no ratio estimate yet is treated
+# at the cap, so early sweeps cannot stop spuriously.  The cap
+# must exceed the slowest surviving plain-sweep contraction
+# (the Steffensen boost handles ratios up to 0.998)
+RHO_CAP = 0.999
+
+# windowed non-contraction demotion: every WINDOW sweeps, an
+# object whose windowed max change is above the structure
+# tolerance and has not contracted by at least CONTRACT_FAC
+# versus the previous window is provably not settling (limit
+# cycles thread the per-step nfail counter, which resets on
+# accepted steps); the worst offender goes through the
+# containment escalation (restart, then demote).  One per
+# window: coupled cycles often settle once the worst member
+# is removed
+NONCONTRACT_WINDOW = 50
+NONCONTRACT_FAC = 0.7
 DEFAULT_CEN_SIGMA0 = 0.1
 
 
@@ -121,6 +140,8 @@ def deblend(
     fixed_models=None,
     recenter=False,
     cen_sigma0=DEFAULT_CEN_SIGMA0,
+    flux_tol=None,
+    cen_tol=None,
 ):
     """
     Deblend a set of objects with fixed centers.
@@ -173,7 +194,19 @@ def deblend(
     maxiter: int, optional
         Maximum number of Gauss-Seidel sweeps, default 1000.
     tol: float, optional
-        Convergence tolerance on the maximum relative parameter change
+        Structure (covariance/split) tolerance: the fit stops when
+        the PROJECTED remaining distance to the fixed point,
+        change * rho / (1 - rho) with rho the measured per-class
+        contraction ratio, is below the class tolerance for every
+        class.  This bounds closeness to the answer rather than
+        the step size, uniformly across easy and strongly-coupled
+        groups
+    flux_tol: float, optional
+        Flux-class tolerance, relative to each object's ratcheted
+        historical flux scale; default 10 * tol
+    cen_tol: float, optional
+        Center-class tolerance, relative to the weight size;
+        default 10 * tol
         per sweep, default 1e-8.
     use_noise_image: bool, optional
         If True, the per-mode noise power for the flux errors is
@@ -265,6 +298,7 @@ def deblend(
         epochs_per_obj, nband, objects, fwhm_smooth, Tsmooth,
         maxiter, tol, fixed_models=fixed_models,
         recenter=recenter, cen_sigma0=cen_sigma0,
+        flux_tol=flux_tol, cen_tol=cen_tol,
     ).go()
 
 
@@ -280,6 +314,8 @@ def deblend_stamps(
     fixed_models=None,
     recenter=False,
     cen_sigma0=DEFAULT_CEN_SIGMA0,
+    flux_tol=None,
+    cen_tol=None,
 ):
     """
     Deblend a set of objects with fixed centers, with a postage stamp
@@ -351,6 +387,7 @@ def deblend_stamps(
         epochs_per_obj, nband, objects, fwhm_smooth, Tsmooth,
         maxiter, tol, fixed_models=fixed_models,
         recenter=recenter, cen_sigma0=cen_sigma0,
+        flux_tol=flux_tol, cen_tol=cen_tol,
     ).go()
 
 
@@ -432,7 +469,7 @@ class _Deblender(object):
     def __init__(
         self, epochs_per_obj, nband, objects, fwhm_smooth, Tsmooth,
         maxiter, tol, fixed_models=None, recenter=False,
-        cen_sigma0=DEFAULT_CEN_SIGMA0,
+        cen_sigma0=DEFAULT_CEN_SIGMA0, flux_tol=None, cen_tol=None,
     ):
         if len(objects) == 0:
             raise ValueError('no objects sent')
@@ -459,6 +496,13 @@ class _Deblender(object):
         self.Tsmooth = Tsmooth
         self.maxiter = maxiter
         self.tol = tol
+        # flux and center targets default to 10x the structure
+        # tolerance: sizes/shapes carry the tightest systematic
+        # requirement (weak-shear breakdown at m ~ 4e-4), fluxes
+        # and centers are measured at far lower relative precision
+        self.flux_tol = 10 * tol if flux_tol is None else flux_tol
+        self.cen_tol = 10 * tol if cen_tol is None else cen_tol
+        self._change_hist = {'flux': [], 'struct': [], 'cen': []}
         self.smooth_cov = np.diag([Tsmooth / 2, Tsmooth / 2])
 
         self._init_models(objects)
@@ -467,6 +511,15 @@ class _Deblender(object):
         )
 
         self.nskip = 0
+        # windowed per-object change maxima for the
+        # non-contraction demotion
+        self._win_max = np.zeros(self.nobj)
+        self._prev_win_max = None
+        # ratcheting per-object per-band flux scales for the
+        # convergence metric (see _fchange)
+        self._fscales = np.full(
+            (self.nobj, nband), 1.0e-30,
+        )
         self.cen_pull = [np.zeros(2) for _ in range(self.nobj)]
         # the detection positions: the recentering displacement
         # clip and regularization anchor to these
@@ -609,14 +662,19 @@ class _Deblender(object):
         -------
         dict as for deblend
         """
+        converged = False
         for it in range(self.maxiter):
             self.isweep = it
-            maxchange = self._sweep()
-            if maxchange < self.tol:
+            changes = self._sweep()
+            if self._converged(changes):
+                converged = True
                 break
+            if (it + 1) % NONCONTRACT_WINDOW == 0:
+                self._check_noncontraction()
             self._extrapolate()
 
         return {
+            'converged': converged,
             'objects': [
                 self._get_object_result(i) for i in range(self.nobj)
             ],
@@ -629,12 +687,96 @@ class _Deblender(object):
     def _sweep(self):
         """
         one Gauss-Seidel sweep over the objects, returning the
-        maximum relative parameter change
+        maximum relative parameter change per class (flux,
+        structure, center)
         """
-        maxchange = 0.0
+        self._sweep_changes = {'flux': 0.0, 'struct': 0.0, 'cen': 0.0}
         for i in range(self.nobj):
-            maxchange = max(maxchange, self._update_object(i))
-        return maxchange
+            ch = self._update_object(i)
+            if ch > self._win_max[i]:
+                self._win_max[i] = ch
+        return dict(self._sweep_changes)
+
+    def _converged(self, changes):
+        """
+        projected-residual stopping: from the per-class contraction
+        ratio of consecutive sweeps, the remaining distance to the
+        fixed point is ~ change * rho / (1 - rho); converged when
+        that projection is below the class tolerance for EVERY
+        class.  This bounds the distance to the answer rather than
+        the step size, so the guarantee is uniform across easy and
+        strongly-coupled groups, and stopping cannot freeze in a
+        guess-side systematic.  A sweep without a ratio estimate
+        (or with a growing change) is treated at RHO_CAP and
+        cannot stop unless the change is already tiny; the history
+        is reset wherever the sweep map is discontinuous
+        (extrapolation jumps, restarts, demotions)
+        """
+        conv = True
+        for cls, tol in (
+            ('flux', self.flux_tol),
+            ('struct', self.tol),
+            ('cen', self.cen_tol),
+        ):
+            d = changes[cls]
+            hist = self._change_hist[cls]
+            if d > 0:
+                if hist and hist[-1] > 0 and d < hist[-1]:
+                    rho = min(d / hist[-1], RHO_CAP)
+                else:
+                    rho = RHO_CAP
+                if d * rho / (1 - rho) >= tol:
+                    conv = False
+            hist.append(d)
+            del hist[:-2]
+        return conv
+
+    def _check_noncontraction(self):
+        """
+        demote-or-restart the worst object whose windowed change
+        is above tolerance and failed to contract versus the
+        previous window; see NONCONTRACT_WINDOW
+        """
+        w = self._win_max.copy()
+        prev = self._prev_win_max
+        self._prev_win_max = w
+        self._win_max[:] = 0.0
+        if prev is None:
+            return
+        bad = [
+            i for i in np.flatnonzero(
+                (w > self.tol) & (w > NONCONTRACT_FAC * prev)
+            )
+            if self.models[i]['type'] != 'star'
+        ]
+        if bad:
+            i = max(bad, key=lambda k: w[k])
+            self._contain_failure(i)
+            # the comparison baseline is stale after the
+            # intervention
+            self._prev_win_max = None
+
+    def _reset_change_hist(self):
+        """the sweep map is discontinuous here; contraction ratios
+        across the discontinuity are meaningless"""
+        for hist in self._change_hist.values():
+            del hist[:]
+
+    def _note_change(self, cls, value):
+        """record a parameter change in the per-sweep class maxima
+        and return it, for the per-object bookkeeping"""
+        if value > self._sweep_changes[cls]:
+            self._sweep_changes[cls] = value
+        return value
+
+    def _flux_change(self, i, newF, oldF):
+        """flux change against the ratcheted per-band scale"""
+        self._fscales[i] = np.maximum(
+            self._fscales[i], np.abs(newF),
+        )
+        return self._note_change(
+            'flux', _fchange(newF, oldF, self._fscales[i]),
+        )
 
     def _update_object(self, i):
         """
@@ -659,7 +801,7 @@ class _Deblender(object):
             # structure frozen at the delta-function model; only
             # the linear flux is updated
             newF = _matched_flux(fs, ws, self.Sw[i], m['cov_sm'])
-            change = _fchange(newF, m['F'])
+            change = self._flux_change(i, newF, m['F'])
             m['F'] = newF
         else:
             newSw = self._deweight_measured(i, sums)
@@ -728,7 +870,7 @@ class _Deblender(object):
         dmax = max(abs(newv - v), abs(newu - u))
         self.positions[i] = (newv, newu)
         Twt = self.Sw[i][0, 0] + self.Sw[i][1, 1]
-        return dmax / np.sqrt(Twt)
+        return self._note_change('cen', dmax / np.sqrt(Twt))
 
     def _deweight_measured(self, i, sums):
         """
@@ -751,11 +893,15 @@ class _Deblender(object):
         m = self.models[i]
         self._count_skip(i)
         if m['type'] == 'gauss':
-            m['F'] = _matched_flux(fs, ws, self.Sw[i], m['cov_sm'])
+            newF = _matched_flux(fs, ws, self.Sw[i], m['cov_sm'])
+            self._flux_change(i, newF, m['F'])
+            m['F'] = newF
         elif np.all(fs_pred != 0):
-            m['F'] = m['F'] * fs / fs_pred
+            newF = m['F'] * fs / fs_pred
+            self._flux_change(i, newF, m['F'])
+            m['F'] = newF
         self._contain_failure(i)
-        return 1.0
+        return self._note_change('struct', 1.0)
 
     def _update_gauss(self, i, newSw, fs, ws):
         """
@@ -767,8 +913,10 @@ class _Deblender(object):
         newF = _matched_flux(fs, ws, self.Sw[i], newSw)
         Twt = self.Sw[i][0, 0] + self.Sw[i][1, 1]
         change = max(
-            np.abs(newSw - self.Sw[i]).max() / Twt,
-            _fchange(newF, m['F']),
+            self._note_change(
+                'struct', np.abs(newSw - self.Sw[i]).max() / Twt,
+            ),
+            self._flux_change(i, newF, m['F']),
         )
         m['cov_sm'] = newSw
         m['F'] = newF
@@ -795,7 +943,7 @@ class _Deblender(object):
         prop, shift, accepted, idamp = self._damped_step(i, shift)
 
         newF = m['F'] * fs / fs_pred
-        change = _fchange(newF, m['F'])
+        change = self._flux_change(i, newF, m['F'])
         m['F'] = newF
 
         if not accepted:
@@ -803,7 +951,7 @@ class _Deblender(object):
             # failed update; the flux update above keeps the blend
             # from deadlocking
             self._count_skip(i)
-            change = max(change, 1.0)
+            change = max(change, self._note_change('struct', 1.0))
             if self._contain_failure(i):
                 # the weight was reset by the intervention
                 return change
@@ -811,12 +959,14 @@ class _Deblender(object):
             # a damped step can be small only because it was
             # shortened at the validity boundary, not because the
             # fit has settled
-            change = max(change, 1.0)
+            change = max(change, self._note_change('struct', 1.0))
             m['cov'] = prop
             self.nfail[i] = 0
         else:
             Twt = self.Sw[i][0, 0] + self.Sw[i][1, 1]
-            change = max(change, np.abs(shift).max() / Twt)
+            change = max(change, self._note_change(
+                'struct', np.abs(shift).max() / Twt,
+            ))
             m['cov'] = prop
             self.nfail[i] = 0
 
@@ -829,7 +979,9 @@ class _Deblender(object):
             # carried so convergence waits for a settled split
             if self.isweep % BDF_SPLIT_EVERY == 0:
                 self.bdf_last_dfd[i] = self._update_bdf_split(i, fs)
-            change = max(change, self.bdf_last_dfd[i])
+            change = max(change, self._note_change(
+                'struct', self.bdf_last_dfd[i],
+            ))
 
         self.Sw[i] = newSw
         return change
@@ -1268,6 +1420,7 @@ class _Deblender(object):
                 m['cov_sm'] = self.smooth_cov.copy()
             # the restart is a discontinuity in the sweep map
             self.hist = []
+            self._reset_change_hist()
         else:
             self.dbflags[i] |= DEBLENDED_AS_PSF
             m['type'] = 'star'
@@ -1276,6 +1429,7 @@ class _Deblender(object):
             # the packed state layout changed
             self.hist = []
             self.scales = None
+            self._reset_change_hist()
         return True
 
     def _extrapolate(self):
@@ -1296,21 +1450,39 @@ class _Deblender(object):
         d2 = self.hist[-1] - self.hist[-2]
         denom = d1 @ d1
         rho = (d2 @ d1) / denom if denom > 0 else 0.0
-        if 0.2 < rho < 0.98:
+        # accept ratios up to 0.998: the ultra-slow modes
+        # (near-degenerate component pairs contract at
+        # rho ~ 0.9975) are exactly the ones that need the
+        # boost; the validity rollback guards the large jump
+        if 0.2 < rho < 0.998:
             saved_models = [dict(m) for m in self.models]
             saved_Sw = [sw.copy() for sw in self.Sw]
             saved_pos = list(self.positions)
-            self._unpack_state(self.hist[-1] + d2 * rho / (1 - rho))
-            if self._state_valid():
-                # a fresh trio of plain sweeps is needed for the
-                # next ratio estimate
-                self.hist = []
-            else:
+            # a full jump amplifies every component of the step by
+            # rho/(1-rho); near-unit ratios can push a single
+            # component (a clipped center, a covariance edge) out
+            # of the valid region.  Backing off to a partial boost
+            # still collapses most of the geometric tail, where a
+            # plain rollback would retry the same doomed jump
+            # every trio and crawl at the unboosted rate
+            accepted = False
+            for frac in (1.0, 0.5, 0.25):
+                self._unpack_state(
+                    self.hist[-1] + d2 * frac * rho / (1 - rho)
+                )
+                if self._state_valid():
+                    accepted = True
+                    break
                 for m, sm in zip(self.models, saved_models):
                     m.update(sm)
                 for k in range(self.nobj):
                     self.Sw[k] = saved_Sw[k]
                 self.positions = saved_pos
+            if accepted:
+                # a fresh trio of plain sweeps is needed for the
+                # next ratio estimate
+                self.hist = []
+                self._reset_change_hist()
         if len(self.hist) > 3:
             self.hist = self.hist[-3:]
 
@@ -1958,6 +2130,12 @@ def _shape_errors(e1, e2, T, fam_cov):
     return np.nan, np.nan, ngmix.flags.NONPOS_SHAPE_VAR
 
 
-def _fchange(newF, oldF):
-    """maximum relative flux change"""
-    return (np.abs(newF - oldF) / (np.abs(oldF) + 1.0e-30)).max()
+def _fchange(newF, oldF, scale):
+    """
+    maximum flux change relative to a FIXED per-band scale (the
+    ratcheted historical maximum), not the current flux: a
+    component converging toward or oscillating through zero flux
+    would never satisfy a current-relative tolerance and would
+    run the group to maxiter
+    """
+    return (np.abs(newF - oldF) / scale).max()
