@@ -67,7 +67,10 @@ from ngmix.prepsfadmom.models import (
 from ngmix.prepsfadmom.models_nb import gauss_comps_ksums
 
 DEFAULT_TGUESS = 0.5
-DEFAULT_MAXITER = 1000
+# past ~500 sweeps the surviving groups almost never converge
+# (valid-step limit cycles; measured on 2000 wldb fields), so the
+# default caps the grind and lets the caller cut on converged
+DEFAULT_MAXITER = 500
 DEFAULT_TOL = 1.0e-8
 
 # zero weight for the scene-wide model validity rule: a model valid
@@ -116,13 +119,18 @@ RHO_CAP = 0.999
 
 # windowed non-contraction demotion: every WINDOW sweeps, an
 # object whose windowed max change is above the structure
-# tolerance and has not contracted by at least CONTRACT_FAC
-# versus the previous window is provably not settling (limit
-# cycles thread the per-step nfail counter, which resets on
-# accepted steps); the worst offender goes through the
-# containment escalation (restart, then demote).  One per
-# window: coupled cycles often settle once the worst member
-# is removed
+# tolerance, has not contracted by at least CONTRACT_FAC versus
+# the previous window, and had a constrained structure update
+# (rejected or boundary-damped) within the two windows is
+# sawtoothing (constrained steps recur between free ones,
+# threading the per-step nfail counter, which resets on
+# accepted steps); the worst offender goes through
+# the containment escalation immediately (forced restart, then
+# forced demote -- the counter would just be threaded again).
+# The rejected-step requirement protects legitimately slow
+# contractions (rho^WINDOW > CONTRACT_FAC with every step
+# valid).  One per window: coupled cycles often settle once
+# the worst member is removed
 NONCONTRACT_WINDOW = 50
 NONCONTRACT_FAC = 0.7
 DEFAULT_CEN_SIGMA0 = 0.1
@@ -192,7 +200,10 @@ def deblend(
         stamp edges and the smoothing already suppresses truncation
         leakage, so it is off by default.
     maxiter: int, optional
-        Maximum number of Gauss-Seidel sweeps, default 1000.
+        Maximum number of Gauss-Seidel sweeps, default 500: groups
+        still unconverged there almost never converge later
+        (valid-step limit cycles), and the result carries
+        converged=False for the caller to cut on.
     tol: float, optional
         Structure (covariance/split) tolerance: the fit stops when
         the PROJECTED remaining distance to the fixed point,
@@ -511,10 +522,13 @@ class _Deblender(object):
         )
 
         self.nskip = 0
-        # windowed per-object change maxima for the
+        # windowed per-object change maxima and constrained-step
+        # (rejected or boundary-damped) counts for the
         # non-contraction demotion
         self._win_max = np.zeros(self.nobj)
         self._prev_win_max = None
+        self._win_nfail = np.zeros(self.nobj, dtype='i4')
+        self._prev_win_nfail = None
         # ratcheting per-object per-band flux scales for the
         # convergence metric (see _fchange)
         self._fscales = np.full(
@@ -741,17 +755,29 @@ class _Deblender(object):
         prev = self._prev_win_max
         self._prev_win_max = w
         self._win_max[:] = 0.0
+        wn = self._win_nfail.copy()
+        prevn = self._prev_win_nfail
+        self._prev_win_nfail = wn
+        self._win_nfail[:] = 0
         if prev is None:
             return
+        # a constrained structure update (rejected, or shortened
+        # at the validity boundary) within the last two windows
+        # separates a sawtooth (constrained steps recur; no fixed
+        # point for the extended model; the cycle period can
+        # exceed one window) from a legitimately slow contraction
+        # (rho^WINDOW can exceed CONTRACT_FAC while every step is
+        # free), which must not be touched
         bad = [
             i for i in np.flatnonzero(
                 (w > self.tol) & (w > NONCONTRACT_FAC * prev)
+                & (wn + prevn > 0)
             )
             if self.models[i]['type'] != 'star'
         ]
         if bad:
             i = max(bad, key=lambda k: w[k])
-            self._contain_failure(i)
+            self._contain_failure(i, force=True)
             # the comparison baseline is stale after the
             # intervention
             self._prev_win_max = None
@@ -958,10 +984,14 @@ class _Deblender(object):
         elif idamp > 0:
             # a damped step can be small only because it was
             # shortened at the validity boundary, not because the
-            # fit has settled
+            # fit has settled; it also counts as a constrained
+            # step for the windowed non-contraction check (a
+            # boundary-hugging sawtooth may never take a fully
+            # rejected step)
             change = max(change, self._note_change('struct', 1.0))
             m['cov'] = prop
             self.nfail[i] = 0
+            self._win_nfail[i] += 1
         else:
             Twt = self.Sw[i][0, 0] + self.Sw[i][1, 1]
             change = max(change, self._note_change(
@@ -1387,7 +1417,7 @@ class _Deblender(object):
                 f'too many failed structure updates, object {i}'
             )
 
-    def _contain_failure(self, i):
+    def _contain_failure(self, i, force=False):
         """
         count a consecutive failed structure update for object i.
         At NFAIL_LIMIT failures, restart the object from the compact
@@ -1397,11 +1427,22 @@ class _Deblender(object):
         demote it permanently to a fixed point source, whose linear
         flux update is always well defined and which errs by
         under-subtracting wings rather than mis-subtracting a
-        nonsense extended model.  Returns True when it intervened
+        nonsense extended model.  With force the escalation is
+        immediate, skipping the consecutive-failure count: the
+        windowed non-contraction check uses this because
+        sawtoothing objects take accepted steps between failed
+        ones, resetting the counter, and the window of
+        non-contraction is already the evidence of a cycle.
+        Returns True when it intervened
         """
         self.nfail[i] += 1
-        if self.nfail[i] < NFAIL_LIMIT:
-            return False
+        if not force:
+            # a real rejected step, seen by the windowed
+            # non-contraction check (the forced call is that
+            # check itself, not a step)
+            self._win_nfail[i] += 1
+            if self.nfail[i] < NFAIL_LIMIT:
+                return False
         self.nfail[i] = 0
         m = self.models[i]
         self.Sw[i] = self.smooth_cov.copy()
