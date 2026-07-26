@@ -200,10 +200,13 @@ def deblend(
         stamp edges and the smoothing already suppresses truncation
         leakage, so it is off by default.
     maxiter: int, optional
-        Maximum number of Gauss-Seidel sweeps, default 500: groups
-        still unconverged there almost never converge later
-        (valid-step limit cycles), and the result carries
-        converged=False for the caller to cut on.
+        Maximum number of Gauss-Seidel sweeps, default 500: small
+        groups still unconverged there almost never converge
+        later (valid-step limit cycles), and the result carries
+        converged=False for the caller to cut on.  Sweeps to
+        converge grow roughly linearly with group size, so
+        callers fitting large groups should scale the cap with
+        the member count (simcoadd-mdet does).
     tol: float, optional
         Structure (covariance/split) tolerance: the fit stops when
         the PROJECTED remaining distance to the fixed point,
