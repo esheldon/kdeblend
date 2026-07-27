@@ -55,8 +55,11 @@ from ngmix.observation import get_mb_obs, ObsList, MultiBandObsList
 from ngmix.moments import fwhm_to_T
 from ngmix.prepsfadmom.prep import choose_fwhm_smooth, prep_epoch
 from ngmix.prepsfadmom import get_phase_angles, deweight
-from ngmix.prepsfadmom.errors import model_sandwich
+from ngmix.prepsfadmom.errors import (
+    model_sandwich, bdf_joint_sandwich, _mbasis_cov,
+)
 from ngmix.prepsfadmom.prepsfadmom_nb import admom_ksums, admom_finalize
+from ngmix.fastexp_nb import FASTEXP_MAX_CHI2
 
 from ngmix.prepsfadmom.models import (
     det2, cov_from_e, model_ksums, model_comps, mixture_model_valid,
@@ -64,7 +67,10 @@ from ngmix.prepsfadmom.models import (
 from ngmix.prepsfadmom.models_nb import gauss_comps_ksums
 
 DEFAULT_TGUESS = 0.5
-DEFAULT_MAXITER = 1000
+# past ~500 sweeps the surviving groups almost never converge
+# (valid-step limit cycles; measured on 2000 wldb fields), so the
+# default caps the grind and lets the caller cut on converged
+DEFAULT_MAXITER = 500
 DEFAULT_TOL = 1.0e-8
 
 # zero weight for the scene-wide model validity rule: a model valid
@@ -86,6 +92,49 @@ EXTERNALS_SUBTRACTED = 2**2
 # intervening
 NFAIL_LIMIT = 10
 
+# update the bdf flux split every this many sweeps: the split
+# varies slowly compared to the structure, so intermediate sweeps
+# can reuse it, saving the smoothing-aperture data pass.  The last
+# update's change is carried in the convergence metric on the
+# sweeps between updates, so a fit cannot converge with a stale
+# split.  1 updates every sweep
+BDF_SPLIT_EVERY = 2
+
+# recentering: the maximum displacement of a center from its
+# detection position, scaled by sqrt(Tsmooth), and the prior
+# width in arcsec of the center regularization toward the
+# detection position.  The per-sweep update is
+# pos += k pull + (1 - k)(pos_det - pos) with
+# k = sigma0^2/(sigma0^2 + sigma_pull^2): a free adaptive center
+# for bright objects, frozen at the detection position when the
+# pull is pure noise
+RECENTER_CLIP_FAC = 0.5
+
+# projected-residual stopping: the per-class contraction ratio
+# is capped here; a sweep with no ratio estimate yet is treated
+# at the cap, so early sweeps cannot stop spuriously.  The cap
+# must exceed the slowest surviving plain-sweep contraction
+# (the Steffensen boost handles ratios up to 0.998)
+RHO_CAP = 0.999
+
+# windowed non-contraction demotion: every WINDOW sweeps, an
+# object whose windowed max change is above the structure
+# tolerance, has not contracted by at least CONTRACT_FAC versus
+# the previous window, and had a constrained structure update
+# (rejected or boundary-damped) within the two windows is
+# sawtoothing (constrained steps recur between free ones,
+# threading the per-step nfail counter, which resets on
+# accepted steps); the worst offender goes through
+# the containment escalation immediately (forced restart, then
+# forced demote -- the counter would just be threaded again).
+# The rejected-step requirement protects legitimately slow
+# contractions (rho^WINDOW > CONTRACT_FAC with every step
+# valid).  One per window: coupled cycles often settle once
+# the worst member is removed
+NONCONTRACT_WINDOW = 50
+NONCONTRACT_FAC = 0.7
+DEFAULT_CEN_SIGMA0 = 0.1
+
 
 def deblend(
     obs, objects,
@@ -97,6 +146,10 @@ def deblend(
     use_noise_image=False,
     rng=None,
     fixed_models=None,
+    recenter=False,
+    cen_sigma0=DEFAULT_CEN_SIGMA0,
+    flux_tol=None,
+    cen_tol=None,
 ):
     """
     Deblend a set of objects with fixed centers.
@@ -112,11 +165,34 @@ def deblend(
                 fixed center, as offsets from the image jacobian
                 centers in sky coordinates
             type: str, optional
-                'gauss' (default), 'star', 'exp', or 'dev'.  Stars
-                are pre-psf delta functions with only their fluxes
-                fit.
+                'gauss' (default), 'star', 'exp', 'dev' or 'bdf'.
+                Stars are pre-psf delta functions with only their
+                fluxes fit.  The 'bdf' type is the composite exp
+                plus dev model (shared center and ellipticity, dev
+                size TdByTe times the exp size); the per-band flux
+                split fracdev is fit from a two-aperture solve
+                (the adaptive weight and the smoothing weight)
+                interleaved with the structure updates, optionally
+                regularized.
+            TdByTe: float
+                the dev to exp size ratio; required for 'bdf'
+                objects (per object, mirroring the ngmix model
+                spec dicts)
+            fracdev0, fracdev_sigma0: float, optional
+                sent together (or neither), regularize the bdf
+                object's model flux split: the split that builds
+                the composite is the inverse-variance blend of the
+                measured split with the prior fracdev0 of width
+                fracdev_sigma0.  The reported component fluxes and
+                fracdev_gls stay the raw linear solutions;
+                fracdev_sigma0=0 freezes the model split.
             Tguess: float, optional
                 initial pre-psf T, default 0.5; ignored for stars
+            fixcen: bool, optional
+                keep this object's center fixed at (v, u) even
+                when recenter is on (default False).  Useful for
+                injected positions whose free centers would
+                couple degenerately to nearby members
     fwhm_smooth: float, optional
         The common smoothing fwhm; chosen from the largest PSF if not
         sent (see ngmix.prepsfadmom).
@@ -129,9 +205,27 @@ def deblend(
         stamp edges and the smoothing already suppresses truncation
         leakage, so it is off by default.
     maxiter: int, optional
-        Maximum number of Gauss-Seidel sweeps, default 1000.
+        Maximum number of Gauss-Seidel sweeps, default 500: small
+        groups still unconverged there almost never converge
+        later (valid-step limit cycles), and the result carries
+        converged=False for the caller to cut on.  Sweeps to
+        converge grow roughly linearly with group size, so
+        callers fitting large groups should scale the cap with
+        the member count (simcoadd-mdet does).
     tol: float, optional
-        Convergence tolerance on the maximum relative parameter change
+        Structure (covariance/split) tolerance: the fit stops when
+        the PROJECTED remaining distance to the fixed point,
+        change * rho / (1 - rho) with rho the measured per-class
+        contraction ratio, is below the class tolerance for every
+        class.  This bounds closeness to the answer rather than
+        the step size, uniformly across easy and strongly-coupled
+        groups
+    flux_tol: float, optional
+        Flux-class tolerance, relative to each object's ratcheted
+        historical flux scale; default 10 * tol
+    cen_tol: float, optional
+        Center-class tolerance, relative to the weight size;
+        default 10 * tol
         per sweep, default 1e-8.
     use_noise_image: bool, optional
         If True, the per-mode noise power for the flux errors is
@@ -149,7 +243,33 @@ def deblend(
         objects), flux (array over bands), type ('gauss' default,
         'star', 'exp', or 'dev'), and for non-star types the pre-psf
         e1, e2, T, as reported in the objects entries of a previous
-        deblend result.  Nonfinite parameters raise.
+        deblend result; 'bdf' entries additionally carry fracdev
+        and TdByTe.  Nonfinite parameters raise.
+    recenter: bool, optional
+        If True, the centers join the per-sweep updates, moving by
+        the measured pull (the weighted centroid of the object's
+        neighbor-corrected data, the same step the single-object
+        adaptive-moments center update takes) regularized toward
+        the detection position:
+
+            pos += k pull + (1 - k)(pos_det - pos)
+
+        with k = cen_sigma0^2/(cen_sigma0^2 + sigma_pull^2), where
+        sigma_pull is the object's centroid noise.  Bright objects
+        get a free adaptive center, faint ones stay at the
+        detection position.  This removes the systematic sub-pixel
+        errors of detection centroids (neighbor-pulled), which
+        otherwise distort the fits of blend members.  The centers
+        join the convergence metric and the sweep-map
+        extrapolation, containment restarts reset them to the
+        detection positions, and the displacement from the
+        detection position is clipped to RECENTER_CLIP_FAC times
+        sqrt(Tsmooth).  Default False (fixed centers).
+    cen_sigma0: float, optional
+        The prior width in arcsec of the center regularization,
+        default DEFAULT_CEN_SIGMA0 = 0.1 (the scale of detection
+        centroid errors).  Zero freezes the centers at the
+        detection positions.  Unused with recenter=False.
 
     Returns
     -------
@@ -196,6 +316,8 @@ def deblend(
     return _Deblender(
         epochs_per_obj, nband, objects, fwhm_smooth, Tsmooth,
         maxiter, tol, fixed_models=fixed_models,
+        recenter=recenter, cen_sigma0=cen_sigma0,
+        flux_tol=flux_tol, cen_tol=cen_tol,
     ).go()
 
 
@@ -209,6 +331,10 @@ def deblend_stamps(
     use_noise_image=False,
     rng=None,
     fixed_models=None,
+    recenter=False,
+    cen_sigma0=DEFAULT_CEN_SIGMA0,
+    flux_tol=None,
+    cen_tol=None,
 ):
     """
     Deblend a set of objects with fixed centers, with a postage stamp
@@ -231,11 +357,13 @@ def deblend_stamps(
         the phase center of each object in its own stamps is its
         jacobian center.
     fwhm_smooth, smooth_fac, ap_rad, maxiter, tol, use_noise_image,
-    rng, fixed_models: optional
+    rng, fixed_models, recenter, cen_sigma0: optional
         As for deblend.  The automatic smoothing choice uses the psfs
         of all stamps; with use_noise_image=True every stamp must
         carry its noise realization.  The fixed model centers v, u
         are in the same common frame as the object centers.
+        Recentering shifts each object's position relative to its
+        stamp centers.
 
     Returns
     -------
@@ -277,6 +405,8 @@ def deblend_stamps(
     return _Deblender(
         epochs_per_obj, nband, objects, fwhm_smooth, Tsmooth,
         maxiter, tol, fixed_models=fixed_models,
+        recenter=recenter, cen_sigma0=cen_sigma0,
+        flux_tol=flux_tol, cen_tol=cen_tol,
     ).go()
 
 
@@ -357,18 +487,44 @@ class _Deblender(object):
     """
     def __init__(
         self, epochs_per_obj, nband, objects, fwhm_smooth, Tsmooth,
-        maxiter, tol, fixed_models=None,
+        maxiter, tol, fixed_models=None, recenter=False,
+        cen_sigma0=DEFAULT_CEN_SIGMA0, flux_tol=None, cen_tol=None,
     ):
         if len(objects) == 0:
             raise ValueError('no objects sent')
 
+        self.recenter = bool(recenter)
+        self.cen_sigma0 = cen_sigma0
+
+        # per bdf object: the latest two-aperture component fluxes
+        # (nband, 2), the raw split and its variance, and the
+        # one-time aperture noise variances for the shrinkage;
+        # the shrinkage parameters and the split init are read
+        # from the object entries in _init_models
+        self.bdf_info = {}
+        self._bdf_noise_cache = {}
+        self.fd_shrink = [None] * len(objects)
+        self.fd_init = [0.5] * len(objects)
+        self.bdf_last_dfd = np.zeros(len(objects))
+        self.isweep = 0
+
         self.epochs_per_obj = epochs_per_obj
         self.nband = nband
         self.nobj = len(objects)
+        self.fixcen = np.array(
+            [bool(o.get('fixcen', False)) for o in objects]
+        )
         self.fwhm_smooth = fwhm_smooth
         self.Tsmooth = Tsmooth
         self.maxiter = maxiter
         self.tol = tol
+        # flux and center targets default to 10x the structure
+        # tolerance: sizes/shapes carry the tightest systematic
+        # requirement (weak-shear breakdown at m ~ 4e-4), fluxes
+        # and centers are measured at far lower relative precision
+        self.flux_tol = 10 * tol if flux_tol is None else flux_tol
+        self.cen_tol = 10 * tol if cen_tol is None else cen_tol
+        self._change_hist = {'flux': [], 'struct': [], 'cen': []}
         self.smooth_cov = np.diag([Tsmooth / 2, Tsmooth / 2])
 
         self._init_models(objects)
@@ -377,7 +533,25 @@ class _Deblender(object):
         )
 
         self.nskip = 0
+        # windowed per-object change maxima and constrained-step
+        # (rejected or boundary-damped) counts for the
+        # non-contraction demotion
+        self._win_max = np.zeros(self.nobj)
+        self._prev_win_max = None
+        self._win_nfail = np.zeros(self.nobj, dtype='i4')
+        self._prev_win_nfail = None
+        # ratcheting per-object per-band flux scales for the
+        # convergence metric (see _fchange)
+        self._fscales = np.full(
+            (self.nobj, nband), 1.0e-30,
+        )
         self.cen_pull = [np.zeros(2) for _ in range(self.nobj)]
+        # the detection positions: the recentering displacement
+        # clip and regularization anchor to these
+        self.det_positions = list(self.positions)
+        # per-object pull noise for the recentering, computed
+        # lazily at the first center update (negative marks unset)
+        self._cen_sigma_sweep = np.full(self.nobj, -1.0)
         # scratch for the k-space sum kernels, overwritten per call
         self.esums = np.zeros(6)
 
@@ -420,6 +594,33 @@ class _Deblender(object):
                     np.diag([(Tguess + self.Tsmooth) / 2] * 2),
                 )
                 m['cov'] = cov_from_e(0.0, 0.0, Tguess)
+            elif otype == 'bdf':
+                if 'TdByTe' not in o:
+                    raise ValueError(
+                        "bdf objects require a 'TdByTe' entry"
+                    )
+                fd0 = o.get('fracdev0')
+                sigma0 = o.get('fracdev_sigma0')
+                if (fd0 is None) != (sigma0 is None):
+                    raise ValueError(
+                        'the fracdev shrinkage requires both '
+                        'fracdev0 and fracdev_sigma0 (or neither)'
+                    )
+                if sigma0 is not None and sigma0 < 0:
+                    raise ValueError(
+                        'fracdev_sigma0 must be non-negative, '
+                        f'got {sigma0}'
+                    )
+                i = len(self.models)
+                if fd0 is not None:
+                    self.fd_shrink[i] = (fd0, sigma0)
+                    self.fd_init[i] = fd0
+                self.Sw.append(
+                    np.diag([(Tguess + self.Tsmooth) / 2] * 2),
+                )
+                m['cov'] = cov_from_e(0.0, 0.0, Tguess)
+                m['fracdev'] = self.fd_init[i]
+                m['TdByTe'] = o['TdByTe']
             else:
                 raise ValueError(f"bad object type: '{otype}'")
             self.models.append(m)
@@ -486,13 +687,19 @@ class _Deblender(object):
         -------
         dict as for deblend
         """
+        converged = False
         for it in range(self.maxiter):
-            maxchange = self._sweep()
-            if maxchange < self.tol:
+            self.isweep = it
+            changes = self._sweep()
+            if self._converged(changes):
+                converged = True
                 break
+            if (it + 1) % NONCONTRACT_WINDOW == 0:
+                self._check_noncontraction()
             self._extrapolate()
 
         return {
+            'converged': converged,
             'objects': [
                 self._get_object_result(i) for i in range(self.nobj)
             ],
@@ -505,12 +712,108 @@ class _Deblender(object):
     def _sweep(self):
         """
         one Gauss-Seidel sweep over the objects, returning the
-        maximum relative parameter change
+        maximum relative parameter change per class (flux,
+        structure, center)
         """
-        maxchange = 0.0
+        self._sweep_changes = {'flux': 0.0, 'struct': 0.0, 'cen': 0.0}
         for i in range(self.nobj):
-            maxchange = max(maxchange, self._update_object(i))
-        return maxchange
+            ch = self._update_object(i)
+            if ch > self._win_max[i]:
+                self._win_max[i] = ch
+        return dict(self._sweep_changes)
+
+    def _converged(self, changes):
+        """
+        projected-residual stopping: from the per-class contraction
+        ratio of consecutive sweeps, the remaining distance to the
+        fixed point is ~ change * rho / (1 - rho); converged when
+        that projection is below the class tolerance for EVERY
+        class.  This bounds the distance to the answer rather than
+        the step size, so the guarantee is uniform across easy and
+        strongly-coupled groups, and stopping cannot freeze in a
+        guess-side systematic.  A sweep without a ratio estimate
+        (or with a growing change) is treated at RHO_CAP and
+        cannot stop unless the change is already tiny; the history
+        is reset wherever the sweep map is discontinuous
+        (extrapolation jumps, restarts, demotions)
+        """
+        conv = True
+        for cls, tol in (
+            ('flux', self.flux_tol),
+            ('struct', self.tol),
+            ('cen', self.cen_tol),
+        ):
+            d = changes[cls]
+            hist = self._change_hist[cls]
+            if d > 0:
+                if hist and hist[-1] > 0 and d < hist[-1]:
+                    rho = min(d / hist[-1], RHO_CAP)
+                else:
+                    rho = RHO_CAP
+                if d * rho / (1 - rho) >= tol:
+                    conv = False
+            hist.append(d)
+            del hist[:-2]
+        return conv
+
+    def _check_noncontraction(self):
+        """
+        demote-or-restart the worst object whose windowed change
+        is above tolerance and failed to contract versus the
+        previous window; see NONCONTRACT_WINDOW
+        """
+        w = self._win_max.copy()
+        prev = self._prev_win_max
+        self._prev_win_max = w
+        self._win_max[:] = 0.0
+        wn = self._win_nfail.copy()
+        prevn = self._prev_win_nfail
+        self._prev_win_nfail = wn
+        self._win_nfail[:] = 0
+        if prev is None:
+            return
+        # a constrained structure update (rejected, or shortened
+        # at the validity boundary) within the last two windows
+        # separates a sawtooth (constrained steps recur; no fixed
+        # point for the extended model; the cycle period can
+        # exceed one window) from a legitimately slow contraction
+        # (rho^WINDOW can exceed CONTRACT_FAC while every step is
+        # free), which must not be touched
+        bad = [
+            i for i in np.flatnonzero(
+                (w > self.tol) & (w > NONCONTRACT_FAC * prev)
+                & (wn + prevn > 0)
+            )
+            if self.models[i]['type'] != 'star'
+        ]
+        if bad:
+            i = max(bad, key=lambda k: w[k])
+            self._contain_failure(i, force=True)
+            # the comparison baseline is stale after the
+            # intervention
+            self._prev_win_max = None
+
+    def _reset_change_hist(self):
+        """the sweep map is discontinuous here; contraction ratios
+        across the discontinuity are meaningless"""
+        for hist in self._change_hist.values():
+            del hist[:]
+
+    def _note_change(self, cls, value):
+        """record a parameter change in the per-sweep class maxima
+        and return it, for the per-object bookkeeping"""
+        if value > self._sweep_changes[cls]:
+            self._sweep_changes[cls] = value
+        return value
+
+    def _flux_change(self, i, newF, oldF):
+        """flux change against the ratcheted per-band scale"""
+        self._fscales[i] = np.maximum(
+            self._fscales[i], np.abs(newF),
+        )
+        return self._note_change(
+            'flux', _fchange(newF, oldF, self._fscales[i]),
+        )
 
     def _update_object(self, i):
         """
@@ -518,7 +821,12 @@ class _Deblender(object):
         its maximum relative parameter change.  On a failed structure
         update the previous structure is kept but the flux, which is
         linear and always well defined, is still updated, so a bad
-        early structure state cannot deadlock the blend
+        early structure state cannot deadlock the blend.
+
+        With recentering the center update runs after the
+        other updates, so within the sweep they all see the center
+        the sums were measured at; the center lag vanishes at the
+        fixed point like the other Gauss-Seidel lags
         """
         sums, fs, ws, pred, fs_pred = self._get_object_sums(i)
         m = self.models[i]
@@ -530,20 +838,79 @@ class _Deblender(object):
             # structure frozen at the delta-function model; only
             # the linear flux is updated
             newF = _matched_flux(fs, ws, self.Sw[i], m['cov_sm'])
-            change = _fchange(newF, m['F'])
+            change = self._flux_change(i, newF, m['F'])
             m['F'] = newF
-            return change
-
-        newSw = self._deweight_measured(i, sums)
-        if newSw is None:
-            return self._skip_structure_update(i, fs, ws, fs_pred)
-
-        if m['type'] == 'gauss':
-            return self._update_gauss(i, newSw, fs, ws)
         else:
-            return self._update_mixture(
-                i, newSw, sums, pred, fs, fs_pred,
+            newSw = self._deweight_measured(i, sums)
+            if newSw is None:
+                change = self._skip_structure_update(
+                    i, fs, ws, fs_pred,
+                )
+            elif m['type'] == 'gauss':
+                change = self._update_gauss(i, newSw, fs, ws)
+            else:
+                change = self._update_mixture(
+                    i, newSw, sums, pred, fs, fs_pred,
+                )
+
+        if (
+            self.recenter and sums[5] > 0
+            and not self.fixcen[i]
+        ):
+            change = max(change, self._update_center(i, sums))
+        return change
+
+    def _update_center(self, i, sums):
+        """
+        the regularized center update: move by the
+        measured pull blended with a spring back to the detection
+        position,
+
+            pos += k pull + (1 - k)(pos_det - pos)
+
+        with k = sigma0^2/(sigma0^2 + sigma_pull^2).  A bright
+        object converges to its adaptive centroid, a faint one
+        stays at the detection position; the pull noise is
+        computed once per object at the first update (the weight
+        evolves, so like the split shrinkage weight this is
+        approximate and only sets the regularization strength).
+        The displacement from the detection position is clipped.
+        Returns the center change relative to sqrt(Twt)
+        """
+        if self._cen_sigma_sweep[i] < 0:
+            covj = self._accumulate_error_sums(i)[2]
+            var = (covj[0, 0] + covj[1, 1]) / sums[5] ** 2
+            self._cen_sigma_sweep[i] = (
+                np.sqrt(var) if var > 0 else 0.0
             )
+
+        s0 = self.cen_sigma0
+        sig = self._cen_sigma_sweep[i]
+        if not np.isfinite(sig):
+            return 0.0
+        denom = s0 ** 2 + sig ** 2
+        if denom == 0:
+            return 0.0
+        k = s0 ** 2 / denom
+
+        p = self.cen_pull[i]
+        v, u = self.positions[i]
+        v0, u0 = self.det_positions[i]
+        newv = v + k * p[0] + (1.0 - k) * (v0 - v)
+        newu = u + k * p[1] + (1.0 - k) * (u0 - u)
+
+        clip = RECENTER_CLIP_FAC * np.sqrt(self.Tsmooth)
+        dvec = np.array([newv - v0, newu - u0])
+        n = np.sqrt(dvec @ dvec)
+        if n > clip:
+            dvec *= clip / n
+            newv = v0 + dvec[0]
+            newu = u0 + dvec[1]
+
+        dmax = max(abs(newv - v), abs(newu - u))
+        self.positions[i] = (newv, newu)
+        Twt = self.Sw[i][0, 0] + self.Sw[i][1, 1]
+        return self._note_change('cen', dmax / np.sqrt(Twt))
 
     def _deweight_measured(self, i, sums):
         """
@@ -566,11 +933,15 @@ class _Deblender(object):
         m = self.models[i]
         self._count_skip(i)
         if m['type'] == 'gauss':
-            m['F'] = _matched_flux(fs, ws, self.Sw[i], m['cov_sm'])
+            newF = _matched_flux(fs, ws, self.Sw[i], m['cov_sm'])
+            self._flux_change(i, newF, m['F'])
+            m['F'] = newF
         elif np.all(fs_pred != 0):
-            m['F'] = m['F'] * fs / fs_pred
+            newF = m['F'] * fs / fs_pred
+            self._flux_change(i, newF, m['F'])
+            m['F'] = newF
         self._contain_failure(i)
-        return 1.0
+        return self._note_change('struct', 1.0)
 
     def _update_gauss(self, i, newSw, fs, ws):
         """
@@ -582,8 +953,10 @@ class _Deblender(object):
         newF = _matched_flux(fs, ws, self.Sw[i], newSw)
         Twt = self.Sw[i][0, 0] + self.Sw[i][1, 1]
         change = max(
-            np.abs(newSw - self.Sw[i]).max() / Twt,
-            _fchange(newF, m['F']),
+            self._note_change(
+                'struct', np.abs(newSw - self.Sw[i]).max() / Twt,
+            ),
+            self._flux_change(i, newF, m['F']),
         )
         m['cov_sm'] = newSw
         m['F'] = newF
@@ -610,7 +983,7 @@ class _Deblender(object):
         prop, shift, accepted, idamp = self._damped_step(i, shift)
 
         newF = m['F'] * fs / fs_pred
-        change = _fchange(newF, m['F'])
+        change = self._flux_change(i, newF, m['F'])
         m['F'] = newF
 
         if not accepted:
@@ -618,25 +991,390 @@ class _Deblender(object):
             # failed update; the flux update above keeps the blend
             # from deadlocking
             self._count_skip(i)
-            change = max(change, 1.0)
+            change = max(change, self._note_change('struct', 1.0))
             if self._contain_failure(i):
                 # the weight was reset by the intervention
                 return change
         elif idamp > 0:
             # a damped step can be small only because it was
             # shortened at the validity boundary, not because the
-            # fit has settled
-            change = max(change, 1.0)
+            # fit has settled; it also counts as a constrained
+            # step for the windowed non-contraction check (a
+            # boundary-hugging sawtooth may never take a fully
+            # rejected step)
+            change = max(change, self._note_change('struct', 1.0))
             m['cov'] = prop
             self.nfail[i] = 0
+            self._win_nfail[i] += 1
         else:
             Twt = self.Sw[i][0, 0] + self.Sw[i][1, 1]
-            change = max(change, np.abs(shift).max() / Twt)
+            change = max(change, self._note_change(
+                'struct', np.abs(shift).max() / Twt,
+            ))
             m['cov'] = prop
             self.nfail[i] = 0
 
+        if m['type'] == 'bdf':
+            # the split update runs under the pre-update weight so
+            # the flux sums measured for the structure step can be
+            # reused as its first aperture row; the one-sweep lag
+            # vanishes at the fixed point like the other lags in
+            # the iteration.  Between updates the last change is
+            # carried so convergence waits for a settled split
+            if self.isweep % BDF_SPLIT_EVERY == 0:
+                self.bdf_last_dfd[i] = self._update_bdf_split(i, fs)
+            change = max(change, self._note_change(
+                'struct', self.bdf_last_dfd[i],
+            ))
+
         self.Sw[i] = newSw
         return change
+
+    def _update_bdf_split(self, i, fs1):
+        """
+        the per-sweep flux split update for a bdf object: a
+        two-aperture linear solve for the component fluxes.  The
+        apertures are the object's adaptive weight and the
+        smoothing weight, whose different scales separate the exp
+        and dev templates; the measured side is the
+        neighbor-corrected flux sum under each aperture and the
+        template side is closed form.  The first aperture's sums
+        are reused from the structure step's measurement (fs1),
+        so only the smoothing aperture needs a data pass.  The
+        band-combined split is then optionally shrunk toward the
+        prior (see the deblend docstring) before it updates the
+        model; the component fluxes and the raw split are kept
+        for the result.  Returns the absolute split change
+
+        The shrinkage weight uses one-time per-aperture noise
+        variances computed at the first call (the weight evolves
+        during the fit, so this is approximate; it only sets the
+        regularization strength)
+        """
+        m = self.models[i]
+        Sfam = m['cov']
+        vi, ui = self.positions[i]
+        weights = [self.Sw[i], self.smooth_cov]
+        parts = [
+            {'type': 'exp', 'cov': Sfam,
+             'F': np.ones(self.nband)},
+            {'type': 'dev', 'cov': m['TdByTe'] * Sfam,
+             'F': np.ones(self.nband)},
+        ]
+
+        ws = np.zeros(self.nband)
+        for ep in self.epochs_per_obj[i]:
+            ws[ep['band']] += ep['weight']
+
+        # unit-flux template sums per aperture at detAtinv=1; the
+        # per-band matrix is this times the band weight sum
+        base = np.zeros((2, 2))
+        for a, Sw in enumerate(weights):
+            for c, part in enumerate(parts):
+                base[a, c] = model_ksums(
+                    part, 0, 0.0, 0.0, Sw, 1.0, self.Tsmooth,
+                )[5]
+        det = base[0, 0] * base[1, 1] - base[0, 1] * base[1, 0]
+        if abs(det) < 1.0e-10 * abs(base[0, 0] * base[1, 1]):
+            return 0.0
+
+        # measured neighbor-corrected flux sums: the adaptive
+        # aperture row is the reused structure-step measurement,
+        # the smoothing aperture needs its own pass
+        fs2 = np.zeros((2, self.nband))
+        fs2[0] = fs1
+        Sw = self.smooth_cov
+        nsums = self._get_neighbor_sums(i, Sw=Sw)
+        for ep in self.epochs_per_obj[i]:
+            alpha, beta = get_phase_angles(
+                ep, vi - ep['vcen'], ui - ep['ucen'],
+            )
+            admom_ksums(
+                ep['kim'], ep['iy'], ep['ix'], ep['dim'],
+                alpha, beta, ep['kv'], ep['ku'],
+                Sw[0, 0], Sw[0, 1], Sw[1, 1], ep['df2'],
+                self.esums,
+            )
+            csums = (
+                self.esums - nsums[ep['band']] / ep['detAtinv']
+            )
+            fac = ep['weight'] * ep['detAtinv']
+            fs2[1, ep['band']] += fac * csums[5]
+
+        var2 = self._get_bdf_noise_vars(i, weights)
+
+        F2 = np.zeros((self.nband, 2))
+        fcovs = np.zeros((self.nband, 2, 2))
+        for band in range(self.nband):
+            Mb = base * ws[band]
+            F2[band] = np.linalg.solve(Mb, fs2[:, band])
+            Mbinv = np.linalg.inv(Mb)
+            fcovs[band] = (
+                Mbinv @ np.diag(var2[:, band]) @ Mbinv.T
+            )
+
+        E = F2[:, 0].sum()
+        D = F2[:, 1].sum()
+        S = E + D
+        if S == 0:
+            return 0.0
+        fd_gls = D / S
+        grad = np.array([-D, E]) / S ** 2
+        fd_var = 0.0
+        for band in range(self.nband):
+            fd_var += grad @ fcovs[band] @ grad
+
+        if self.fd_shrink[i] is None:
+            newfd = fd_gls
+        else:
+            fd0, sigma0 = self.fd_shrink[i]
+            if sigma0 == 0 or fd_var <= 0:
+                newfd = fd0 if sigma0 == 0 else fd_gls
+            else:
+                w = 1.0 / fd_var
+                w0 = 1.0 / sigma0 ** 2
+                newfd = (fd_gls * w + fd0 * w0) / (w + w0)
+        newfd = np.clip(newfd, -0.5, 1.5)
+
+        change = abs(newfd - m['fracdev'])
+        m['fracdev'] = newfd
+        self.bdf_info[i] = {
+            'F2': F2, 'fd_gls': fd_gls, 'fd_var': fd_var,
+        }
+        return change
+
+    def _get_bdf_noise_vars(self, i, weights):
+        """
+        one-time per-aperture per-band noise variances of the flux
+        sums, for the shrinkage weight (diagonal approximation:
+        the cross covariance between the apertures is neglected,
+        which underestimates their correlation but only affects
+        the regularization strength)
+        """
+        if i not in self._bdf_noise_cache:
+            vi, ui = self.positions[i]
+            var2 = np.zeros((2, self.nband))
+            fcov = np.zeros((6, 6))
+            for a, Sw in enumerate(weights):
+                for ep in self.epochs_per_obj[i]:
+                    alpha, beta = get_phase_angles(
+                        ep, vi - ep['vcen'], ui - ep['ucen'],
+                    )
+                    admom_finalize(
+                        ep['kim'], ep['iy'], ep['ix'], ep['dim'],
+                        alpha, beta, ep['kv'], ep['ku'],
+                        Sw[0, 0], Sw[0, 1], Sw[1, 1], ep['df2'],
+                        ep['err_fac2'],
+                        self.esums, fcov,
+                    )
+                    fac = ep['weight'] * ep['detAtinv']
+                    nfac = ep['df2'] ** 2
+                    var2[a, ep['band']] += (
+                        fac ** 2 * nfac * fcov[5, 5]
+                    )
+            self._bdf_noise_cache[i] = var2
+        return self._bdf_noise_cache[i]
+
+    def _bdf_split_response(self, i):
+        """
+        d fd_gls / d (M1, M2, T) of the family covariance at the
+        model consistent point: the two-aperture solve of the
+        converged model itself (closed form template sums on both
+        sides), re-solved with the template matrix at perturbed
+        structure.  Central differences over the mbasis.  The band
+        weight sums cancel between the two sides, so they are
+        omitted
+        """
+        m = self.models[i]
+        info = self.bdf_info.get(i)
+        Sfam = m['cov']
+        Td = m['TdByTe']
+
+        fam0 = np.array([
+            Sfam[1, 1] - Sfam[0, 0], 2 * Sfam[0, 1],
+            Sfam[0, 0] + Sfam[1, 1],
+        ])
+        h = 1.0e-6 * max((1.0 + Td) * fam0[2], 1.0e-3)
+
+        def base_at(S):
+            parts = [
+                {'type': 'exp', 'cov': S,
+                 'F': np.ones(self.nband)},
+                {'type': 'dev', 'cov': Td * S,
+                 'F': np.ones(self.nband)},
+            ]
+            base = np.zeros((2, 2))
+            for a, Sw in enumerate((self.Sw[i], self.smooth_cov)):
+                for c, part in enumerate(parts):
+                    base[a, c] = model_ksums(
+                        part, 0, 0.0, 0.0, Sw, 1.0, self.Tsmooth,
+                    )[5]
+            return base
+
+        base0 = base_at(Sfam)
+        # model-consistent measured side: the converged raw
+        # components through the unperturbed template sums
+        bmod = info['F2'] @ base0.T
+
+        def split_at(famvec):
+            bp = base_at(_mbasis_cov(*famvec))
+            det = bp[0, 0] * bp[1, 1] - bp[0, 1] * bp[1, 0]
+            if abs(det) < 1.0e-10 * abs(bp[0, 0] * bp[1, 1]):
+                return None
+            E = 0.0
+            D = 0.0
+            for band in range(self.nband):
+                Fp = np.linalg.solve(bp, bmod[band])
+                E += Fp[0]
+                D += Fp[1]
+            S = E + D
+            return D / S if S != 0 else None
+
+        G = np.zeros(3)
+        for j in range(3):
+            famp = fam0.copy()
+            famm = fam0.copy()
+            famp[j] += h
+            famm[j] -= h
+            fp = split_at(famp)
+            fm = split_at(famm)
+            if fp is None or fm is None:
+                return None
+            G[j] = (fp - fm) / (2 * h)
+        return G
+
+    def _bdf_error_terms(self, i, fvar_raw, fmcov):
+        """
+        the joint-sandwich inputs for a bdf object at the converged
+        state: the split response G, the shrinkage factor k, the
+        full noise variance of the raw split and its cross
+        covariance with the object's moment and flux sums.
+
+        The split noise is a linear functional of the same modes
+        as the moment sums: eta = sum_band w_band . (dfs1, dfs2)
+        with w_band the solve-gradient row and dfs1/dfs2 the flux
+        sums under the adaptive and smoothing apertures.  The
+        adaptive-aperture crosses are the fvar_raw/fmcov entries
+        already accumulated; the smoothing aperture needs one
+        cross-aperture kernel overlap pass (its kernel times the
+        adaptive-weight moment kernels times the noise power).
+        The same pass gives the aperture cross covariance, so the
+        returned split variance is the full one, not the diagonal
+        approximation used for the regularization strength.
+
+        Returns (G, k, fd_var, eta_scov, eta_fcovs) or None when
+        the terms cannot be evaluated
+        """
+        info = self.bdf_info.get(i)
+        if info is None:
+            return None
+
+        F2 = info['F2']
+        E = F2[:, 0].sum()
+        D = F2[:, 1].sum()
+        S = E + D
+        if S == 0:
+            return None
+        grad = np.array([-D, E]) / S ** 2
+
+        G = self._bdf_split_response(i)
+        if G is None:
+            return None
+
+        Sw = self.Sw[i]
+        Sm = self.smooth_cov
+
+        # cross-aperture kernel overlaps: the smoothing-aperture
+        # flux kernel against the adaptive-weight (M1, M2, T, flux)
+        # kernels, and its own square, times the noise power
+        X2 = np.zeros((self.nband, 4))
+        var22 = np.zeros(self.nband)
+        for ep in self.epochs_per_obj[i]:
+            kv = ep['kv']
+            ku = ep['ku']
+            Sv = Sw[0, 0] * kv + Sw[0, 1] * ku
+            Su = Sw[0, 1] * kv + Sw[1, 1] * ku
+            chi2 = kv * Sv + ku * Su
+            wk1 = np.exp(-0.5 * np.clip(chi2, 0, FASTEXP_MAX_CHI2))
+            wk1[(chi2 > FASTEXP_MAX_CHI2) | (chi2 < 0)] = 0.0
+            vvk = (Sw[0, 0] - Sv * Sv) * wk1
+            vuk = (Sw[0, 1] - Sv * Su) * wk1
+            uuk = (Sw[1, 1] - Su * Su) * wk1
+            kern = (uuk - vvk, 2 * vuk, uuk + vvk, wk1)
+
+            Sv2 = Sm[0, 0] * kv + Sm[0, 1] * ku
+            Su2 = Sm[0, 1] * kv + Sm[1, 1] * ku
+            chi22 = kv * Sv2 + ku * Su2
+            wk2 = np.exp(
+                -0.5 * np.clip(chi22, 0, FASTEXP_MAX_CHI2)
+            )
+            wk2[(chi22 > FASTEXP_MAX_CHI2) | (chi22 < 0)] = 0.0
+            w2ef = wk2 * ep['err_fac2']
+
+            fac2 = (
+                (ep['weight'] * ep['detAtinv']) ** 2
+                * ep['df2'] ** 2
+            )
+            band = ep['band']
+            for c in range(4):
+                X2[band, c] += fac2 * np.sum(w2ef * kern[c])
+            var22[band] += fac2 * np.sum(w2ef * wk2)
+
+        # the converged template matrix per band
+        m = self.models[i]
+        base = np.zeros((2, 2))
+        parts = [
+            {'type': 'exp', 'cov': m['cov'],
+             'F': np.ones(self.nband)},
+            {'type': 'dev', 'cov': m['TdByTe'] * m['cov'],
+             'F': np.ones(self.nband)},
+        ]
+        for a, Swa in enumerate((Sw, Sm)):
+            for c, part in enumerate(parts):
+                base[a, c] = model_ksums(
+                    part, 0, 0.0, 0.0, Swa, 1.0, self.Tsmooth,
+                )[5]
+
+        ws = np.zeros(self.nband)
+        for ep in self.epochs_per_obj[i]:
+            ws[ep['band']] += ep['weight']
+
+        eta_scov = np.zeros(3)
+        eta_fcovs = np.zeros(self.nband)
+        fd_var = 0.0
+        for band in range(self.nband):
+            Mb = base * ws[band]
+            try:
+                wb = np.linalg.inv(Mb).T @ grad
+            except np.linalg.LinAlgError:
+                return None
+            C2 = np.array([
+                [fvar_raw[band], X2[band, 3]],
+                [X2[band, 3], var22[band]],
+            ])
+            fd_var += wb @ C2 @ wb
+            eta_scov += wb[0] * fmcov[band] + wb[1] * X2[band, :3]
+            eta_fcovs[band] = (
+                wb[0] * fvar_raw[band] + wb[1] * X2[band, 3]
+            )
+        if not fd_var > 0:
+            return None
+        info['fd_var_full'] = fd_var
+
+        # the shrinkage factor the estimator actually applied,
+        # from the same variance the update used
+        shrink = self.fd_shrink[i]
+        if shrink is None:
+            k = 1.0
+        else:
+            _, sigma0 = shrink
+            if sigma0 == 0:
+                k = 0.0
+            elif info['fd_var'] > 0:
+                k = sigma0 ** 2 / (sigma0 ** 2 + info['fd_var'])
+            else:
+                k = 1.0
+        return G, k, fd_var, eta_scov, eta_fcovs
 
     def _mixture_shift(self, i, newSw, sums, pred):
         """
@@ -674,7 +1412,7 @@ class _Deblender(object):
         for idamp in range(10):
             prop = m['cov'] + shift
             valid = mixture_model_valid(
-                m['type'], prop, ZERO_WEIGHT, self.Tsmooth,
+                m, prop, ZERO_WEIGHT, self.Tsmooth,
             )
             if valid:
                 accepted = True
@@ -693,7 +1431,7 @@ class _Deblender(object):
                 f'too many failed structure updates, object {i}'
             )
 
-    def _contain_failure(self, i):
+    def _contain_failure(self, i, force=False):
         """
         count a consecutive failed structure update for object i.
         At NFAIL_LIMIT failures, restart the object from the compact
@@ -703,23 +1441,41 @@ class _Deblender(object):
         demote it permanently to a fixed point source, whose linear
         flux update is always well defined and which errs by
         under-subtracting wings rather than mis-subtracting a
-        nonsense extended model.  Returns True when it intervened
+        nonsense extended model.  With force the escalation is
+        immediate, skipping the consecutive-failure count: the
+        windowed non-contraction check uses this because
+        sawtoothing objects take accepted steps between failed
+        ones, resetting the counter, and the window of
+        non-contraction is already the evidence of a cycle.
+        Returns True when it intervened
         """
         self.nfail[i] += 1
-        if self.nfail[i] < NFAIL_LIMIT:
-            return False
+        if not force:
+            # a real rejected step, seen by the windowed
+            # non-contraction check (the forced call is that
+            # check itself, not a step)
+            self._win_nfail[i] += 1
+            if self.nfail[i] < NFAIL_LIMIT:
+                return False
         self.nfail[i] = 0
         m = self.models[i]
         self.Sw[i] = self.smooth_cov.copy()
+        if self.recenter:
+            # the wandering center may be part of the runaway
+            self.positions[i] = self.det_positions[i]
         if self.nrestart[i] == 0:
             self.nrestart[i] = 1
             self.dbflags[i] |= RESTARTED
-            if m['type'] in ('exp', 'dev'):
+            if m['type'] in ('exp', 'dev', 'bdf'):
                 m['cov'] = np.zeros((2, 2))
+                if m['type'] == 'bdf':
+                    m['fracdev'] = self.fd_init[i]
+                    self.bdf_last_dfd[i] = 1.0
             else:
                 m['cov_sm'] = self.smooth_cov.copy()
             # the restart is a discontinuity in the sweep map
             self.hist = []
+            self._reset_change_hist()
         else:
             self.dbflags[i] |= DEBLENDED_AS_PSF
             m['type'] = 'star'
@@ -728,6 +1484,7 @@ class _Deblender(object):
             # the packed state layout changed
             self.hist = []
             self.scales = None
+            self._reset_change_hist()
         return True
 
     def _extrapolate(self):
@@ -748,19 +1505,39 @@ class _Deblender(object):
         d2 = self.hist[-1] - self.hist[-2]
         denom = d1 @ d1
         rho = (d2 @ d1) / denom if denom > 0 else 0.0
-        if 0.2 < rho < 0.98:
+        # accept ratios up to 0.998: the ultra-slow modes
+        # (near-degenerate component pairs contract at
+        # rho ~ 0.9975) are exactly the ones that need the
+        # boost; the validity rollback guards the large jump
+        if 0.2 < rho < 0.998:
             saved_models = [dict(m) for m in self.models]
             saved_Sw = [sw.copy() for sw in self.Sw]
-            self._unpack_state(self.hist[-1] + d2 * rho / (1 - rho))
-            if self._state_valid():
-                # a fresh trio of plain sweeps is needed for the
-                # next ratio estimate
-                self.hist = []
-            else:
+            saved_pos = list(self.positions)
+            # a full jump amplifies every component of the step by
+            # rho/(1-rho); near-unit ratios can push a single
+            # component (a clipped center, a covariance edge) out
+            # of the valid region.  Backing off to a partial boost
+            # still collapses most of the geometric tail, where a
+            # plain rollback would retry the same doomed jump
+            # every trio and crawl at the unboosted rate
+            accepted = False
+            for frac in (1.0, 0.5, 0.25):
+                self._unpack_state(
+                    self.hist[-1] + d2 * frac * rho / (1 - rho)
+                )
+                if self._state_valid():
+                    accepted = True
+                    break
                 for m, sm in zip(self.models, saved_models):
                     m.update(sm)
                 for k in range(self.nobj):
                     self.Sw[k] = saved_Sw[k]
+                self.positions = saved_pos
+            if accepted:
+                # a fresh trio of plain sweeps is needed for the
+                # next ratio estimate
+                self.hist = []
+                self._reset_change_hist()
         if len(self.hist) > 3:
             self.hist = self.hist[-3:]
 
@@ -778,14 +1555,23 @@ class _Deblender(object):
         exp/dev.  Star weights and covariances are frozen and only
         their fluxes enter, so the vector length depends on the
         current type of every object; a demotion changes the layout
-        and resets the scales and history.  Each component is
-        divided by a per-component scale fixed on the first call, so
-        the sweep map differences are comparable across fluxes and
+        and resets the scales and history.  With recentering
+        the center offsets from the detection positions follow
+        the fluxes for every type, packed with a +1 offset so their
+        scale is O(1) near zero.  Each component is divided by a
+        per-component scale fixed on the first call, so the sweep
+        map differences are comparable across fluxes and
         covariances
         """
         x = []
-        for m, sw in zip(self.models, self.Sw):
+        for i, (m, sw) in enumerate(zip(self.models, self.Sw)):
             x.extend(m['F'])
+            if self.recenter:
+                v0, u0 = self.det_positions[i]
+                x.extend([
+                    self.positions[i][0] - v0 + 1.0,
+                    self.positions[i][1] - u0 + 1.0,
+                ])
             if m['type'] == 'gauss':
                 x.extend([
                     m['cov_sm'][0, 0], m['cov_sm'][0, 1],
@@ -794,6 +1580,13 @@ class _Deblender(object):
             elif m['type'] in ('exp', 'dev'):
                 x.extend([
                     m['cov'][0, 0], m['cov'][0, 1], m['cov'][1, 1],
+                ])
+            elif m['type'] == 'bdf':
+                # the split is packed with an offset so its scale
+                # is O(1) even when it converges near zero
+                x.extend([
+                    m['cov'][0, 0], m['cov'][0, 1], m['cov'][1, 1],
+                    m['fracdev'] + 2.0,
                 ])
             if m['type'] != 'star':
                 x.extend([sw[0, 0], sw[0, 1], sw[1, 1]])
@@ -813,6 +1606,12 @@ class _Deblender(object):
             nband = m['F'].size
             m['F'] = x[k:k + nband].copy()
             k += nband
+            if self.recenter:
+                v0, u0 = self.det_positions[i]
+                self.positions[i] = (
+                    v0 + x[k] - 1.0, u0 + x[k + 1] - 1.0,
+                )
+                k += 2
             if m['type'] == 'gauss':
                 m['cov_sm'] = np.array([
                     [x[k], x[k + 1]], [x[k + 1], x[k + 2]],
@@ -823,6 +1622,12 @@ class _Deblender(object):
                     [x[k], x[k + 1]], [x[k + 1], x[k + 2]],
                 ])
                 k += 3
+            elif m['type'] == 'bdf':
+                m['cov'] = np.array([
+                    [x[k], x[k + 1]], [x[k + 1], x[k + 2]],
+                ])
+                m['fracdev'] = x[k + 3] - 2.0
+                k += 4
             if m['type'] != 'star':
                 self.Sw[i] = np.array([
                     [x[k], x[k + 1]], [x[k + 1], x[k + 2]],
@@ -831,18 +1636,28 @@ class _Deblender(object):
 
     def _state_valid(self):
         """
-        every weight and model in the state gives well defined sums
+        every weight and model in the state gives well defined
+        sums, and with recentering every center is inside
+        its displacement clip box
         """
-        for m, sw in zip(self.models, self.Sw):
+        for i, (m, sw) in enumerate(zip(self.models, self.Sw)):
             if sw[0, 0] <= 0 or sw[1, 1] <= 0 or det2(sw) <= 0:
                 return False
-            if m['type'] in ('exp', 'dev'):
+            if m['type'] in ('exp', 'dev', 'bdf'):
                 if not mixture_model_valid(
-                        m['type'], m['cov'], ZERO_WEIGHT,
+                        m, m['cov'], ZERO_WEIGHT,
                         self.Tsmooth):
                     return False
             elif m['type'] == 'gauss':
                 if det2(m['cov_sm']) <= 0:
+                    return False
+            if self.recenter:
+                v0, u0 = self.det_positions[i]
+                d2 = (
+                    (self.positions[i][0] - v0) ** 2
+                    + (self.positions[i][1] - u0) ** 2
+                )
+                if d2 > (RECENTER_CLIP_FAC ** 2) * self.Tsmooth:
                     return False
         return True
 
@@ -854,7 +1669,7 @@ class _Deblender(object):
         (sums, fs, ws, pred, fs_pred) with fs, ws, fs_pred per band
         """
         vi, ui = self.positions[i]
-        is_mix = self.models[i]['type'] in ('exp', 'dev')
+        is_mix = self.models[i]['type'] in ('exp', 'dev', 'bdf')
         Sw = self.Sw[i]
 
         base_nsums = self._get_neighbor_sums(i)
@@ -892,17 +1707,19 @@ class _Deblender(object):
 
         return sums, fs, ws, pred, fs_pred
 
-    def _get_neighbor_sums(self, i):
+    def _get_neighbor_sums(self, i, Sw=None):
         """
         per-band weighted sums of the neighbor and fixed external
-        models under object i's weight, at detAtinv=1.  The model
-        sums scale exactly as 1/detAtinv, so expand the components
-        once, run the kernel once per band, and rescale per epoch;
-        the fixed externals are subtracted exactly like in-group
-        neighbors and join the same kernel call
+        models under object i's weight (or the given weight), at
+        detAtinv=1.  The model sums scale exactly as 1/detAtinv,
+        so expand the components once, run the kernel once per
+        band, and rescale per epoch; the fixed externals are
+        subtracted exactly like in-group neighbors and join the
+        same kernel call
         """
         vi, ui = self.positions[i]
-        Sw = self.Sw[i]
+        if Sw is None:
+            Sw = self.Sw[i]
 
         ncomps = []
         for j in range(self.nobj):
@@ -970,8 +1787,10 @@ class _Deblender(object):
 
         sums_i, fs, ws, _, _ = self._get_object_sums(i)
         fvar_raw, fmcov, covj = self._accumulate_error_sums(i)
-        fvar, fam_cov, gfvar, gfam_cov = self._run_sandwiches(
-            i, sums_i, covj, fs, fvar_raw, fmcov,
+        fvar, fam_cov, gfvar, gfam_cov, fd_var_tot = (
+            self._run_sandwiches(
+                i, sums_i, covj, fs, fvar_raw, fmcov,
+            )
         )
         flux_err, s2n = _flux_errors(m['F'], fs, fvar)
 
@@ -986,6 +1805,32 @@ class _Deblender(object):
         }
         self._set_shape(res, i, fam_cov)
         self._set_gauss_entries(res, i, fs, ws, gfvar, gfam_cov)
+
+        if m['type'] == 'bdf':
+            res['fracdev'] = m['fracdev']
+            res['TdByTe'] = m['TdByTe']
+            res['fracdev_err'] = (
+                np.sqrt(fd_var_tot)
+                if fd_var_tot is not None and fd_var_tot > 0
+                else np.nan
+            )
+            info = self.bdf_info.get(i)
+            if info is not None:
+                # the full split noise variance from the error
+                # pass when available, else the diagonal
+                # approximation used for the regularization
+                fdv = info.get('fd_var_full', info['fd_var'])
+                res['fracdev_gls'] = info['fd_gls']
+                res['fracdev_gls_err'] = (
+                    np.sqrt(fdv) if fdv > 0 else np.nan
+                )
+                res['flux_exp'] = info['F2'][:, 0].copy()
+                res['flux_dev'] = info['F2'][:, 1].copy()
+            else:
+                res['fracdev_gls'] = np.nan
+                res['fracdev_gls_err'] = np.nan
+                res['flux_exp'] = np.full(self.nband, np.nan)
+                res['flux_dev'] = np.full(self.nband, np.nan)
         return res
 
     def _accumulate_error_sums(self, i):
@@ -1032,11 +1877,18 @@ class _Deblender(object):
         Star weights are frozen, so the fixed weight flux variance
         is exact and there are no structure errors.  Also returns
         the gauss-estimator analogs under the same weight, for the
-        gauss entries; for a gauss object the sandwiches coincide
+        gauss entries; for a gauss object the sandwiches coincide.
+
+        For a bdf object the joint sandwich over the coupled
+        (structure, split) estimating equations is used, including
+        the cross covariance of the split noise with the moment
+        sums; it also yields the total split variance.  The
+        conditional model sandwich is the fallback when the joint
+        terms cannot be evaluated
 
         Returns
         -------
-        fvar, fam_cov, gfvar, gfam_cov
+        fvar, fam_cov, gfvar, gfam_cov, fd_var_tot
         """
         m = self.models[i]
 
@@ -1044,17 +1896,42 @@ class _Deblender(object):
         fam_cov = None
         gfvar = None
         gfam_cov = None
+        fd_var_tot = None
         if m['type'] != 'star' and sums_i[5] > 0:
             if m['type'] == 'gauss':
                 mtype = 'gauss'
                 Sfam = m['cov_sm'] - self.smooth_cov
+            elif m['type'] == 'bdf':
+                # the spec dict carries the split state
+                mtype = m
+                Sfam = m['cov']
             else:
                 mtype = m['type']
                 Sfam = m['cov']
-            fvar, fam_cov = model_sandwich(
-                mtype, Sfam, self.Sw[i], self.Tsmooth,
-                sums_i, covj, fs, fvar_raw, fmcov,
-            )
+            fvar = None
+            if m['type'] == 'bdf':
+                terms = self._bdf_error_terms(i, fvar_raw, fmcov)
+                if terms is not None:
+                    G, k, fdv, eta_scov, eta_fcovs = terms
+                    fvar, fam_cov, fd_var_tot = bdf_joint_sandwich(
+                        m, self.Sw[i], self.Tsmooth,
+                        sums_i, covj, fs, fvar_raw, fmcov,
+                        split_grad=G, shrink_k=k,
+                        fd_var_data=fdv,
+                        eta_scov=eta_scov, eta_fcovs=eta_fcovs,
+                    )
+            if fvar is None:
+                fd_var_tot = None
+                fvar, fam_cov = model_sandwich(
+                    mtype, Sfam, self.Sw[i], self.Tsmooth,
+                    sums_i, covj, fs, fvar_raw, fmcov,
+                )
+            if fvar is None:
+                # the sandwich could not be evaluated; fall back
+                # to the fixed weight variances, with the
+                # structure errors flagged downstream
+                fvar = fvar_raw
+                fam_cov = None
             if mtype == 'gauss':
                 # the weight equals the gauss family covariance, so
                 # the sandwiches coincide
@@ -1068,7 +1945,10 @@ class _Deblender(object):
                     self.Sw[i], self.Tsmooth,
                     sums_i, covj, fs, fvar_raw, fmcov,
                 )
-        return fvar, fam_cov, gfvar, gfam_cov
+                if gfvar is None:
+                    gfvar = fvar_raw
+                    gfam_cov = None
+        return fvar, fam_cov, gfvar, gfam_cov, fd_var_tot
 
     def _set_shape(self, res, i, fam_cov):
         """
@@ -1193,8 +2073,10 @@ def _convert_fixed_models(fixed_models, nband, Tsmooth):
         ftype = f.get('type', 'gauss')
         if ftype == 'star':
             m = {'type': 'star', 'cov_sm': smooth_cov.copy(), 'F': F}
-        elif ftype in ('gauss', 'exp', 'dev'):
+        elif ftype in ('gauss', 'exp', 'dev', 'bdf'):
             pars = [f['e1'], f['e2'], f['T']]
+            if ftype == 'bdf':
+                pars = pars + [f['fracdev'], f['TdByTe']]
             if not np.all(np.isfinite(pars)):
                 raise ValueError(
                     f'nonfinite fixed model parameters: {f}'
@@ -1205,6 +2087,12 @@ def _convert_fixed_models(fixed_models, nband, Tsmooth):
                     'type': 'gauss',
                     'cov_sm': cov + smooth_cov,
                     'F': F,
+                }
+            elif ftype == 'bdf':
+                m = {
+                    'type': 'bdf', 'cov': cov, 'F': F,
+                    'fracdev': f['fracdev'],
+                    'TdByTe': f['TdByTe'],
                 }
             else:
                 m = {'type': ftype, 'cov': cov, 'F': F}
@@ -1297,6 +2185,12 @@ def _shape_errors(e1, e2, T, fam_cov):
     return np.nan, np.nan, ngmix.flags.NONPOS_SHAPE_VAR
 
 
-def _fchange(newF, oldF):
-    """maximum relative flux change"""
-    return (np.abs(newF - oldF) / (np.abs(oldF) + 1.0e-30)).max()
+def _fchange(newF, oldF, scale):
+    """
+    maximum flux change relative to a FIXED per-band scale (the
+    ratcheted historical maximum), not the current flux: a
+    component converging toward or oscillating through zero flux
+    would never satisfy a current-relative tolerance and would
+    run the group to maxiter
+    """
+    return (np.abs(newF - oldF) / scale).max()
