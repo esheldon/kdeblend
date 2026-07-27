@@ -188,6 +188,11 @@ def deblend(
                 fracdev_sigma0=0 freezes the model split.
             Tguess: float, optional
                 initial pre-psf T, default 0.5; ignored for stars
+            fixcen: bool, optional
+                keep this object's center fixed at (v, u) even
+                when recenter is on (default False).  Useful for
+                injected positions whose free centers would
+                couple degenerately to nearby members
     fwhm_smooth: float, optional
         The common smoothing fwhm; chosen from the largest PSF if not
         sent (see ngmix.prepsfadmom).
@@ -506,6 +511,9 @@ class _Deblender(object):
         self.epochs_per_obj = epochs_per_obj
         self.nband = nband
         self.nobj = len(objects)
+        self.fixcen = np.array(
+            [bool(o.get('fixcen', False)) for o in objects]
+        )
         self.fwhm_smooth = fwhm_smooth
         self.Tsmooth = Tsmooth
         self.maxiter = maxiter
@@ -845,7 +853,10 @@ class _Deblender(object):
                     i, newSw, sums, pred, fs, fs_pred,
                 )
 
-        if self.recenter and sums[5] > 0:
+        if (
+            self.recenter and sums[5] > 0
+            and not self.fixcen[i]
+        ):
             change = max(change, self._update_center(i, sums))
         return change
 
