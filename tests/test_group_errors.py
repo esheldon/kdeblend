@@ -224,3 +224,53 @@ def test_group_errors_star_fallback():
         rng=np.random.RandomState(5), group_errors=True,
     )
     assert res['group_errors'] is False
+
+
+def test_group_errors_anchor_forms():
+    """scalar, per-object-sigma and per-object-covariance
+    anchor_sigma inputs agree when they encode the same noise,
+    and anisotropic covariances change the answer"""
+    rng = np.random.RandomState(21)
+    offsets = [(-0.5, 0.0), (0.5, 0.0)]
+    mbobs = make_mbobs(rng, offsets)
+    kw = {'recenter': True, 'cen_sigma0': 0.1}
+
+    sig = 0.05
+    res_s = run_deblend(
+        mbobs, offsets, group_errors=True, anchor_sigma=sig,
+        **kw,
+    )
+    assert res_s['converged'] and res_s['group_errors']
+    res_v = run_deblend(
+        mbobs, offsets, group_errors=True,
+        anchor_sigma=np.array([sig, sig]), **kw,
+    )
+    covs = np.array([
+        sig ** 2 * np.eye(2), sig ** 2 * np.eye(2),
+    ])
+    res_c = run_deblend(
+        mbobs, offsets, group_errors=True, anchor_sigma=covs,
+        **kw,
+    )
+    e_s = res_s['objects'][0]['flux_err']
+    e_v = res_v['objects'][0]['flux_err']
+    e_c = res_c['objects'][0]['flux_err']
+    assert np.allclose(e_v, e_s, rtol=1e-10)
+    assert np.allclose(e_c, e_s, rtol=1e-10)
+
+    # anchor noise inflates over the conditioned errors, and an
+    # anisotropic covariance differs from the isotropic one
+    res_0 = run_deblend(
+        mbobs, offsets, group_errors=True, **kw,
+    )
+    assert np.all(e_s > res_0['objects'][0]['flux_err'])
+    aniso = np.array([
+        np.diag([sig ** 2, 0.0]), np.diag([sig ** 2, 0.0]),
+    ])
+    res_a = run_deblend(
+        mbobs, offsets, group_errors=True, anchor_sigma=aniso,
+        **kw,
+    )
+    assert not np.allclose(
+        res_a['objects'][0]['flux_err'], e_s, rtol=1e-3,
+    )

@@ -78,11 +78,15 @@ def apply_group_errors(deb, mbobs, res, anchor_sigma=0.0):
     res: dict
         The deblend result, modified in place: each object gains
         flux_cov (nband, nband) and has flux_err and s2n replaced
-    anchor_sigma: float, optional
-        With recentering, the per-coordinate noise of the anchor
-        (detection) positions in arcsec; the linear anchor
-        response is added to the covariance.  0 (default) leaves
-        the errors conditional on the anchors
+    anchor_sigma: float or array, optional
+        With recentering, the noise of the anchor (detection)
+        positions: a scalar sigma in arcsec (isotropic, shared),
+        an (nobj,) array of per-object sigmas, or an
+        (nobj, 2, 2) array of per-object position covariances in
+        arcsec^2 with (v, u) ordering (e.g. from the sep centroid
+        error moments).  The linear anchor response is added to
+        the covariance.  0 (default) leaves the errors
+        conditional on the anchors
 
     Returns
     -------
@@ -193,16 +197,58 @@ def group_covariance(deb, mbobs, anchor_sigma=0.0):
         M, np.linalg.solve(M, covU.T).T,
     )
 
-    if deb.recenter and anchor_sigma > 0:
+    anchor_cov = _anchor_cov(anchor_sigma, nobj)
+    if deb.recenter and anchor_cov is not None:
         dFda = _dF_danchor(
             deb, snap, x0, patched0, slices, pers,
         )
         R = np.linalg.solve(M, dFda)
-        cov_norm = cov_norm + anchor_sigma ** 2 * (R @ R.T)
+        cov_norm = cov_norm + R @ anchor_cov @ R.T
 
     D = np.diag(deb.scales)
     _restore(deb, snap)
     return D @ cov_norm @ D, slices
+
+
+def _anchor_cov(anchor_sigma, nobj):
+    """
+    the (2 nobj, 2 nobj) block-diagonal anchor covariance from
+    the anchor_sigma input: a scalar sigma in arcsec (isotropic,
+    shared), an (nobj,) array of per-object sigmas, or an
+    (nobj, 2, 2) array of per-object position covariances in
+    arcsec^2 with (v, u) ordering.  None when every entry is
+    zero (the errors then condition on the anchors)
+    """
+    a = np.asarray(anchor_sigma, dtype=float)
+    if not np.any(a != 0):
+        return None
+    out = np.zeros((2 * nobj, 2 * nobj))
+    for i in range(nobj):
+        sl = slice(2 * i, 2 * i + 2)
+        if a.ndim == 0:
+            out[sl, sl] = a ** 2 * np.eye(2)
+        elif a.ndim == 1:
+            if a.size != nobj:
+                raise ValueError(
+                    'per-object anchor_sigma must have one '
+                    f'entry per object, got {a.size} for '
+                    f'{nobj}'
+                )
+            out[sl, sl] = a[i] ** 2 * np.eye(2)
+        elif a.ndim == 3:
+            if a.shape != (nobj, 2, 2):
+                raise ValueError(
+                    'anchor covariances must have shape '
+                    f'(nobj, 2, 2), got {a.shape}'
+                )
+            out[sl, sl] = a[i]
+        else:
+            raise ValueError(
+                'anchor_sigma must be a scalar, (nobj,) sigmas '
+                f'or (nobj, 2, 2) covariances, got shape '
+                f'{a.shape}'
+            )
+    return out
 
 
 def _object_layout(deb):

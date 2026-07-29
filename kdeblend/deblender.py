@@ -281,13 +281,17 @@ def deblend(
         10-30 percent at 2 arcsec and up to 2x for tight
         recentered pairs), and fill flux_cov.  See group_errors.
         Requires ap_rad=0.  Default False
-    anchor_sigma: float, optional
-        With group_errors and recentering, the per-coordinate
-        noise in arcsec of the anchor (detection) positions; the
-        linear anchor response is added to the covariance (for
-        tight pairs the anchor noise can double the flux
-        variance).  0 (default) leaves the errors conditional on
-        the anchors
+    anchor_sigma: float or array, optional
+        With group_errors and recentering, the noise of the
+        anchor (detection) positions: a scalar sigma in arcsec,
+        an (nobj,) array of per-object sigmas, or an
+        (nobj, 2, 2) array of per-object position covariances in
+        arcsec^2 with (v, u) ordering (e.g. from the sep
+        centroid error moments erry2/errxy/errx2 scaled to sky).
+        The linear anchor response is added to the covariance
+        (for tight pairs anchor noise at the detection-centroid
+        scale can double the flux variance).  0 (default) leaves
+        the errors conditional on the anchors
 
     Returns
     -------
