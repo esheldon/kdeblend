@@ -82,13 +82,22 @@ def apply_full_errors(deb, mbobs, res, anchor_sigma=0.0):
     res: dict
         The deblend result, modified in place: each object gains
         flux_cov (nband, nband) and has flux_err, s2n, T_err,
-        e1_err and e2_err replaced.  Singles are treated too: the
-        m=1 machinery solves the same estimating equations but
-        differentiates the actual update map at the actual data,
-        with no model-consistency substitution, so unlike the
-        per-object model_sandwich structure errors it stays
-        calibrated under model mismatch (dev truth fit with exp:
-        per-object T_err low by 14 percent, full errors 0.95)
+        e1_err and e2_err replaced.  The gauss-estimator entries
+        are replaced too: gauss_T_err, gauss_e1_err and
+        gauss_e2_err from the weight (Sw) rows of the state
+        covariance, and gauss_flux, gauss_flux_err, gauss_s2n
+        plus the new gauss_flux_cov from the flux response.
+        Singles are treated too: the m=1 machinery solves the
+        same estimating equations but differentiates the actual
+        update map at the actual data, with no model-consistency
+        substitution, so unlike the per-object model_sandwich
+        errors it stays calibrated under model mismatch (dev
+        truth fit with exp: per-object T_err low by 14 percent,
+        full errors 0.95).  For the gauss estimator every
+        non-gaussian profile is mismatched, so the delta-method
+        errors are low on all real galaxies (PAdmomFitter MC:
+        T_err 13 percent low on exp truth, 32 on dev; full
+        errors 1.00-1.02)
     anchor_sigma: float or array, optional
         With recentering, the noise of the anchor (detection)
         positions: a scalar sigma in arcsec (isotropic, shared),
@@ -111,7 +120,7 @@ def apply_full_errors(deb, mbobs, res, anchor_sigma=0.0):
         if m['type'] not in SUPPORTED_TYPES:
             return False
 
-    cov, slices = full_covariance(
+    cov, slices, extras = full_covariance(
         deb, mbobs, anchor_sigma=anchor_sigma,
     )
 
@@ -159,6 +168,41 @@ def apply_full_errors(deb, mbobs, res, anchor_sigma=0.0):
                 if eflags == 0:
                     robj['e1_err'] = e1e
                     robj['e2_err'] = e2e
+
+        # gauss-estimator structure errors from the weight rows:
+        # the gauss family is the weight minus the constant
+        # smoothing, so its covariance is the Sw block
+        isw = ic + 3
+        gblock = cov[np.ix_(
+            [isw, isw + 1, isw + 2], [isw, isw + 1, isw + 2],
+        )]
+        gfam_cov = L @ gblock @ L.T
+        if np.all(np.isfinite(gfam_cov)) and gfam_cov[2, 2] > 0:
+            robj['gauss_T_err'] = np.sqrt(gfam_cov[2, 2])
+            if np.isfinite(robj['gauss_e1']) \
+                    and robj['gauss_T'] > 0:
+                e1e, e2e, eflags = _shape_errors(
+                    robj['gauss_e1'], robj['gauss_e2'],
+                    robj['gauss_T'], gfam_cov,
+                )
+                if eflags == 0:
+                    robj['gauss_e1_err'] = e1e
+                    robj['gauss_e2_err'] = e2e
+
+        gF = extras['gauss_flux'][i]
+        gfc = extras['gauss_flux_cov'][i]
+        if gfc is not None:
+            gvar = np.diag(gfc)
+            robj['gauss_flux'] = gF
+            robj['gauss_flux_cov'] = gfc
+            robj['gauss_flux_err'] = np.where(
+                gvar > 0, np.sqrt(gvar), np.nan,
+            )
+            wg = gvar > 0
+            if np.any(wg):
+                robj['gauss_s2n'] = np.sqrt(np.sum(
+                    gF[wg] ** 2 / gvar[wg],
+                ))
     return True
 
 
@@ -166,8 +210,11 @@ def full_covariance(deb, mbobs, anchor_sigma=0.0,
                     use_chain=None):
     """
     the full covariance of the packed deblend state at the
-    converged fixed point, in physical units, and the per-object
-    state offsets.  See the module docstring.
+    converged fixed point, in physical units, the per-object
+    state offsets, and the derived gauss-estimator flux values
+    and covariances as a dict of per-object lists
+    {'gauss_flux', 'gauss_flux_cov'} (None entries for stars).
+    See the module docstring.
 
     use_chain=True (the default) assembles the Jacobian and
     data response by the chain rule: analytic data-sum
@@ -213,8 +260,9 @@ def full_covariance(deb, mbobs, anchor_sigma=0.0,
 
     covS = _cov_sums(deb, obs_flat, epochs)
 
+    cols = _column_map(deb)
     if use_chain:
-        J, dFdS, dFda = _chain_pieces(
+        J, dFdS, dFda, dNS = _chain_pieces(
             deb, snap, x0, caches, Ds, theta0s, slices, pers,
             covS, epochs,
         )
@@ -228,14 +276,14 @@ def full_covariance(deb, mbobs, anchor_sigma=0.0,
             covS, epochs,
         )
         dFda = None
+        dNS, _ = _model_sum_derivs(deb, cols)
 
-    covU = dFdS @ covS @ dFdS.T
     M = np.eye(npars) - J
-    cov_norm = np.linalg.solve(
-        M, np.linalg.solve(M, covU.T).T,
-    )
+    Tx = np.linalg.solve(M, dFdS)
+    cov_norm = Tx @ covS @ Tx.T
 
     anchor_cov = _anchor_cov(anchor_sigma, nobj)
+    Ra = None
     if deb.recenter and anchor_cov is not None:
         if dFda is None:
             patched0 = _make_patched(
@@ -244,12 +292,17 @@ def full_covariance(deb, mbobs, anchor_sigma=0.0,
             dFda = _dF_danchor(
                 deb, snap, x0, patched0, slices, pers,
             )
-        R = np.linalg.solve(M, dFda)
-        cov_norm = cov_norm + R @ anchor_cov @ R.T
+        Ra = np.linalg.solve(M, dFda)
+        cov_norm = cov_norm + Ra @ anchor_cov @ Ra.T
+
+    extras = _gauss_flux_covs(
+        deb, caches, Ds, dNS, cols, slices, epochs,
+        Tx, covS, Ra, anchor_cov,
+    )
 
     D = np.diag(deb.scales)
     _restore_state(deb, snap)
-    return D @ cov_norm @ D, slices
+    return D @ cov_norm @ D, slices, extras
 
 
 def _fd_jacobian(deb, snap, x0, patched0, slices, pers):
@@ -696,6 +749,94 @@ def _model_sum_derivs(deb, cols):
     return dNS, dPS
 
 
+def _gauss_flux_covs(deb, caches, Ds, dNS, cols, slices,
+                     epochs, Tx, covS, Ra, anchor_cov):
+    """the gauss-estimator fluxes F_b = 4 pi sqrt(det Sw)
+    fs_b / ws_b and their (nband, nband) covariance per object,
+    as {'gauss_flux', 'gauss_flux_cov'} lists with None entries
+    for stars.  fs_b is linear in the data at the converged
+    state, so the response is the direct data channel plus the
+    chain through the state: the own kernel (weight and center)
+    via the analytic data-sum derivatives, the neighbor
+    subtraction via the model-sum derivatives, and the explicit
+    sqrt(det Sw) normalization; the anchor response is added
+    when present.  The per-epoch weights ws_b are fixed at prep,
+    so they carry no state dependence"""
+    nobj = deb.nobj
+    nband = deb.nband
+    nep = len(epochs)
+    npars = Tx.shape[0]
+    scales = deb.scales
+
+    ws = np.zeros(nband)
+    facs = np.zeros(nep)
+    for iep, ep in enumerate(epochs):
+        ws[ep['band']] += ep['weight']
+        facs[iep] = ep['weight'] * ep['detAtinv']
+
+    fluxes = []
+    covs = []
+    for i in range(nobj):
+        Sw = deb.Sw[i]
+        detS = Sw[0, 0] * Sw[1, 1] - Sw[0, 1] ** 2
+        if deb.models[i]['type'] == 'star' or detS <= 0:
+            fluxes.append(None)
+            covs.append(None)
+            continue
+        cnorm = 4.0 * np.pi * np.sqrt(detS)
+
+        # fs_b = sum_ep fac esums_5 - ws_b NS_b5 since the
+        # fac / detAtinv on the neighbor term is the epoch weight
+        nsums = deb._get_neighbor_sums(i)
+        fs = -ws * nsums[:, 5]
+        Rd = np.zeros((nband, Tx.shape[1]))
+        for iep, ep in enumerate(epochs):
+            b = ep['band']
+            fs[b] += facs[iep] * caches[i][iep][5]
+            Rd[b, (i * nep + iep) * 6 + 5] += (
+                cnorm * facs[iep] / ws[b]
+            )
+        F = cnorm * fs / ws
+
+        # d ln cnorm / d(sw3)
+        dlnc = np.array([
+            Sw[1, 1], -2.0 * Sw[0, 1], Sw[0, 0],
+        ]) / (2.0 * detS)
+
+        gx = np.zeros((nband, npars))
+        for ic, (k, kind, sub) in enumerate(cols):
+            row = np.zeros(nband)
+            if k == i and kind in ('sw', 'cen'):
+                tcol = sub if kind == 'sw' else 3 + sub
+                for iep, ep in enumerate(epochs):
+                    b = ep['band']
+                    row[b] += (
+                        cnorm * facs[iep] *
+                        Ds[i][iep][5, tcol] / ws[b]
+                    )
+                if kind == 'sw':
+                    row += F * dlnc[sub]
+            d = dNS.get((i, ic))
+            if d is not None:
+                row -= cnorm * d[:, 5]
+            gx[:, ic] = row * scales[ic]
+
+        Rg = Rd + gx @ Tx
+        fcov = Rg @ covS @ Rg.T
+        if Ra is not None:
+            # the anchor moves the actual position 1:1 at fixed
+            # packed offset, so the direct channel is the
+            # physical center row
+            ga = gx @ Ra
+            for ic, (k, kind, sub) in enumerate(cols):
+                if kind == 'cen':
+                    ga[:, 2 * k + sub] += gx[:, ic] / scales[ic]
+            fcov = fcov + ga @ anchor_cov @ ga.T
+        fluxes.append(F)
+        covs.append(fcov)
+    return {'gauss_flux': fluxes, 'gauss_flux_cov': covs}
+
+
 def _chain_pieces(deb, snap, x0, caches, Ds, theta0s, slices,
                   pers, covS, epochs):
     """the Jacobi Jacobian, data response and anchor response
@@ -923,7 +1064,7 @@ def _chain_pieces(deb, snap, x0, caches, Ds, theta0s, slices,
                             slices[i], slices[i] + pers[i],
                         )
                         dFda[sli, ja] += B[i] @ d.ravel()
-    return J, dFdS, dFda
+    return J, dFdS, dFda, dNS
 
 
 # ---------------------------------------------------------------

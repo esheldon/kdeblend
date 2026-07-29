@@ -197,7 +197,7 @@ def test_full_errors_single_reduction():
     )
     gres = deb.go()
     assert gres['converged']
-    cov, slices = full_covariance(deb, mbobs)
+    cov, slices, extras = full_covariance(deb, mbobs)
 
     for b in range(NBAND):
         grp = np.sqrt(cov[b, b])
@@ -224,6 +224,23 @@ def test_full_errors_single_reduction():
     for key in ('T_err', 'e1_err', 'e2_err'):
         assert np.isfinite(rg[key])
         assert np.abs(rg[key] / r0[key] - 1) < 0.15
+
+    # the gauss-estimator entries are replaced too: the flux
+    # value is unchanged (same converged state and formula), the
+    # covariance is filled consistently, and the errors sit
+    # within the mismatch scale of the delta values (the gauss
+    # estimator sees exp data as mismatched, so exact agreement
+    # is not expected)
+    assert np.allclose(rg['gauss_flux'], r0['gauss_flux'],
+                       rtol=1e-8)
+    gfc = rg['gauss_flux_cov']
+    assert gfc is not None and gfc.shape == (NBAND, NBAND)
+    assert np.allclose(
+        rg['gauss_flux_err'], np.sqrt(np.diag(gfc)), rtol=1e-6,
+    )
+    for key in ('gauss_T_err', 'gauss_e1_err', 'gauss_e2_err'):
+        assert np.isfinite(rg[key])
+        assert 0.7 < rg[key] / r0[key] < 1.5
 
 
 @pytest.mark.parametrize('recenter', [False, True])
@@ -260,6 +277,22 @@ def test_full_errors_pair(recenter):
         assert (
             res['objects'][i]['T_err']
             > res0['objects'][i]['T_err']
+        )
+        # the gauss-estimator entries feel the neighbor term the
+        # same way
+        gfc = res['objects'][i]['gauss_flux_cov']
+        assert gfc is not None and gfc.shape == (2, 2)
+        assert np.allclose(
+            res['objects'][i]['gauss_flux_err'],
+            np.sqrt(np.diag(gfc)), rtol=1e-6,
+        )
+        assert np.all(
+            res['objects'][i]['gauss_flux_err']
+            > res0['objects'][i]['gauss_flux_err']
+        )
+        assert (
+            res['objects'][i]['gauss_T_err']
+            > res0['objects'][i]['gauss_T_err']
         )
 
 
@@ -368,10 +401,10 @@ def test_full_errors_chain_vs_fd(recenter):
     assert res['converged']
 
     asig = 0.05 if recenter else 0.0
-    cov_c, sl = full_covariance(
+    cov_c, sl, ex_c = full_covariance(
         deb, mbobs, anchor_sigma=asig, use_chain=True,
     )
-    cov_f, _ = full_covariance(
+    cov_f, _, ex_f = full_covariance(
         deb, mbobs, anchor_sigma=asig, use_chain=False,
     )
     dd = np.sqrt(np.diag(cov_c) / np.diag(cov_f))
@@ -381,3 +414,54 @@ def test_full_errors_chain_vs_fd(recenter):
         cov_c[:NBAND, :NBAND], cov_f[:NBAND, :NBAND],
         rtol=2e-2, atol=0,
     )
+    # the gauss-estimator flux covariances agree between the
+    # assemblies too (shared model-sum derivatives, different
+    # Jacobian and data response)
+    for i in range(2):
+        gc = ex_c['gauss_flux_cov'][i]
+        gf = ex_f['gauss_flux_cov'][i]
+        assert np.allclose(
+            np.sqrt(np.diag(gc)), np.sqrt(np.diag(gf)),
+            rtol=5e-3,
+        )
+        assert np.allclose(gc, gf, rtol=2e-2, atol=0)
+        assert np.allclose(
+            ex_c['gauss_flux'][i], ex_f['gauss_flux'][i],
+            rtol=1e-10,
+        )
+
+
+def test_full_errors_gauss_mc():
+    """monte carlo calibration of the gauss-estimator entries on
+    a single exp object: for a gaussian-weight estimator every
+    non-gaussian profile is mismatched, so the delta-method
+    gauss errors run low even on exp truth (T 13 percent, flux 6
+    in the PAdmomFitter MC); the full errors must be calibrated"""
+    offsets = [(0.0, 0.0)]
+    ntrial = 150
+    gT = np.zeros(ntrial)
+    gTe = np.zeros(ntrial)
+    gF = np.zeros(ntrial)
+    gFe = np.zeros(ntrial)
+    ngood = 0
+    for k in range(ntrial):
+        rng = np.random.RandomState(7000 + k * 13)
+        mbobs = make_mbobs(rng, offsets)
+        res = run_deblend(mbobs, offsets, full_errors=True)
+        robj = res['objects'][0]
+        if (
+            not res['converged'] or not res['full_errors']
+            or robj['gauss_e_flags'] != 0
+            or not np.isfinite(robj['gauss_T_err'])
+        ):
+            continue
+        gT[ngood] = robj['gauss_T']
+        gTe[ngood] = robj['gauss_T_err']
+        gF[ngood] = robj['gauss_flux'][0]
+        gFe[ngood] = robj['gauss_flux_err'][0]
+        ngood += 1
+    assert ngood > 0.9 * ntrial
+    rT = gT[:ngood].std() / np.sqrt(np.mean(gTe[:ngood] ** 2))
+    rF = gF[:ngood].std() / np.sqrt(np.mean(gFe[:ngood] ** 2))
+    assert 0.8 < rT < 1.2, rT
+    assert 0.85 < rF < 1.15, rF
