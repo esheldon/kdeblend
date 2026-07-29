@@ -150,6 +150,8 @@ def deblend(
     cen_sigma0=DEFAULT_CEN_SIGMA0,
     flux_tol=None,
     cen_tol=None,
+    group_errors=False,
+    anchor_sigma=0.0,
 ):
     """
     Deblend a set of objects with fixed centers.
@@ -270,6 +272,22 @@ def deblend(
         default DEFAULT_CEN_SIGMA0 = 0.1 (the scale of detection
         centroid errors).  Zero freezes the centers at the
         detection positions.  Unused with recenter=False.
+    group_errors: bool, optional
+        If True and the deblend converged with two or more
+        members (all gauss/exp/dev), replace the per-object flux
+        errors with the group-coupled sandwich, which prices the
+        neighbor-noise coupling the per-object sandwiches neglect
+        (their deterministic-neighbor assumption is low by
+        10-30 percent at 2 arcsec and up to 2x for tight
+        recentered pairs), and fill flux_cov.  See group_errors.
+        Requires ap_rad=0.  Default False
+    anchor_sigma: float, optional
+        With group_errors and recentering, the per-coordinate
+        noise in arcsec of the anchor (detection) positions; the
+        linear anchor response is added to the covariance (for
+        tight pairs the anchor noise can double the flux
+        variance).  0 (default) leaves the errors conditional on
+        the anchors
 
     Returns
     -------
@@ -284,8 +302,11 @@ def deblend(
             demoted to a fixed point source, in which case type
             reports 'star' and the flux is the compact
             matched-aperture flux), flux and flux_err (arrays over
-            bands), s2n (the flux s/n combined over bands in
-            quadrature), cen, cen_pull.  Also gauss_T, gauss_e1,
+            bands), flux_cov (the (nband, nband) cross-band flux
+            covariance from the shared family response, what
+            honest color errors need; None on the star, bdf-joint
+            and fallback paths), s2n (the flux s/n combined over
+            bands in quadrature), cen, cen_pull.  Also gauss_T, gauss_e1,
             gauss_e2 with errors and gauss_e_flags: the
             gauss-estimator shapes from the converged weight, which
             is the adaptive-moments fixed point on the
@@ -303,6 +324,12 @@ def deblend(
     mbobs = get_mb_obs(obs)
     nband = len(mbobs)
 
+    if group_errors and ap_rad != 0:
+        raise ValueError(
+            'group_errors requires ap_rad=0: the impulse-measured '
+            'transfer assumes no apodization'
+        )
+
     fwhm_smooth, Tsmooth = _get_smoothing(
         mbobs, fwhm_smooth, smooth_fac, rng,
     )
@@ -313,12 +340,20 @@ def deblend(
     )
 
     epochs_per_obj = [epochs] * len(objects)
-    return _Deblender(
+    deb = _Deblender(
         epochs_per_obj, nband, objects, fwhm_smooth, Tsmooth,
         maxiter, tol, fixed_models=fixed_models,
         recenter=recenter, cen_sigma0=cen_sigma0,
         flux_tol=flux_tol, cen_tol=cen_tol,
-    ).go()
+    )
+    res = deb.go()
+    if group_errors:
+        from .group_errors import apply_group_errors
+
+        res['group_errors'] = apply_group_errors(
+            deb, mbobs, res, anchor_sigma=anchor_sigma,
+        )
+    return res
 
 
 def deblend_stamps(
@@ -1787,7 +1822,7 @@ class _Deblender(object):
 
         sums_i, fs, ws, _, _ = self._get_object_sums(i)
         fvar_raw, fmcov, covj = self._accumulate_error_sums(i)
-        fvar, fam_cov, gfvar, gfam_cov, fd_var_tot = (
+        fvar, fam_cov, fcov_raw, gfvar, gfam_cov, fd_var_tot = (
             self._run_sandwiches(
                 i, sums_i, covj, fs, fvar_raw, fmcov,
             )
@@ -1799,6 +1834,7 @@ class _Deblender(object):
             'deblend_flags': int(self.dbflags[i]),
             'flux': m['F'].copy(),
             'flux_err': flux_err,
+            'flux_cov': _flux_cov_phys(m['F'], fs, fcov_raw),
             's2n': s2n,
             'cen': np.array(self.positions[i]),
             'cen_pull': self.cen_pull[i],
@@ -1888,12 +1924,16 @@ class _Deblender(object):
 
         Returns
         -------
-        fvar, fam_cov, gfvar, gfam_cov, fd_var_tot
+        fvar, fam_cov, fcov_raw, gfvar, gfam_cov, fd_var_tot;
+        fcov_raw is the full cross-band covariance of the flux
+        sums from the shared family response (None on the star,
+        bdf-joint and fallback paths)
         """
         m = self.models[i]
 
         fvar = fvar_raw
         fam_cov = None
+        fcov_raw = None
         gfvar = None
         gfam_cov = None
         fd_var_tot = None
@@ -1922,7 +1962,7 @@ class _Deblender(object):
                     )
             if fvar is None:
                 fd_var_tot = None
-                fvar, fam_cov = model_sandwich(
+                fvar, fam_cov, fcov_raw = model_sandwich(
                     mtype, Sfam, self.Sw[i], self.Tsmooth,
                     sums_i, covj, fs, fvar_raw, fmcov,
                 )
@@ -1932,6 +1972,7 @@ class _Deblender(object):
                 # structure errors flagged downstream
                 fvar = fvar_raw
                 fam_cov = None
+                fcov_raw = None
             if mtype == 'gauss':
                 # the weight equals the gauss family covariance, so
                 # the sandwiches coincide
@@ -1940,7 +1981,7 @@ class _Deblender(object):
             else:
                 # gauss-estimator errors under the same weight, for
                 # the low-noise shape entries
-                gfvar, gfam_cov = model_sandwich(
+                gfvar, gfam_cov, _ = model_sandwich(
                     'gauss', self.Sw[i] - self.smooth_cov,
                     self.Sw[i], self.Tsmooth,
                     sums_i, covj, fs, fvar_raw, fmcov,
@@ -1948,7 +1989,7 @@ class _Deblender(object):
                 if gfvar is None:
                     gfvar = fvar_raw
                     gfam_cov = None
-        return fvar, fam_cov, gfvar, gfam_cov, fd_var_tot
+        return fvar, fam_cov, fcov_raw, gfvar, gfam_cov, fd_var_tot
 
     def _set_shape(self, res, i, fam_cov):
         """
@@ -2124,6 +2165,21 @@ def _matched_flux(fs, ws, Sigma, cov):
     weight
     """
     return fs / ws * 2 * np.pi * np.sqrt(det2(Sigma + cov))
+
+
+def _flux_cov_phys(F, fs, fcov_raw):
+    """
+    the physical cross-band flux covariance from the raw flux-sum
+    covariance, with the same per-band normalization as
+    _flux_errors (diag equals flux_err ** 2 where defined).
+    None in, None out
+    """
+    if fcov_raw is None:
+        return None
+    scale = np.zeros(F.size)
+    wgood = fs != 0
+    scale[wgood] = F[wgood] / fs[wgood]
+    return np.outer(scale, scale) * fcov_raw
 
 
 def _flux_errors(F, fs, fvar):
