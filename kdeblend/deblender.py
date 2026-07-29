@@ -150,7 +150,7 @@ def deblend(
     cen_sigma0=DEFAULT_CEN_SIGMA0,
     flux_tol=None,
     cen_tol=None,
-    group_errors=False,
+    full_errors=False,
     anchor_sigma=0.0,
 ):
     """
@@ -272,17 +272,22 @@ def deblend(
         default DEFAULT_CEN_SIGMA0 = 0.1 (the scale of detection
         centroid errors).  Zero freezes the centers at the
         detection positions.  Unused with recenter=False.
-    group_errors: bool, optional
-        If True and the deblend converged with two or more
-        members (all gauss/exp/dev), replace the per-object flux
-        errors with the group-coupled sandwich, which prices the
-        neighbor-noise coupling the per-object sandwiches neglect
-        (their deterministic-neighbor assumption is low by
-        10-30 percent at 2 arcsec and up to 2x for tight
-        recentered pairs), and fill flux_cov.  See group_errors.
-        Requires ap_rad=0.  Default False
+    full_errors: bool, optional
+        If True and the deblend converged (all members
+        gauss/exp/dev), replace the per-object flux and
+        structure errors with the full (fixed-point) values and
+        fill flux_cov -- a full accounting of the errors.  For
+        blend members this prices the neighbor-noise coupling
+        the per-object sandwiches neglect (fluxes low by 10-30
+        percent at 2 arcsec, T by 35 percent in tight blends);
+        for every object including singles the structure errors
+        avoid the model-consistency substitution of the
+        per-object sandwich, which under-predicts T errors by
+        ~12 percent under model mismatch (real morphologies fit
+        with exp).  See full_errors.  Requires ap_rad=0.
+        Default False
     anchor_sigma: float or array, optional
-        With group_errors and recentering, the noise of the
+        With full_errors and recentering, the noise of the
         anchor (detection) positions: a scalar sigma in arcsec,
         an (nobj,) array of per-object sigmas, or an
         (nobj, 2, 2) array of per-object position covariances in
@@ -328,9 +333,9 @@ def deblend(
     mbobs = get_mb_obs(obs)
     nband = len(mbobs)
 
-    if group_errors and ap_rad != 0:
+    if full_errors and ap_rad != 0:
         raise ValueError(
-            'group_errors requires ap_rad=0: the impulse-measured '
+            'full_errors requires ap_rad=0: the influence-kernel '
             'transfer assumes no apodization'
         )
 
@@ -341,6 +346,7 @@ def deblend(
     epochs = _prep_epochs(
         mbobs, fwhm_smooth=fwhm_smooth, ap_rad=ap_rad,
         use_noise_image=use_noise_image, vcen=0.0, ucen=0.0,
+        store_transfer=full_errors,
     )
 
     epochs_per_obj = [epochs] * len(objects)
@@ -351,10 +357,10 @@ def deblend(
         flux_tol=flux_tol, cen_tol=cen_tol,
     )
     res = deb.go()
-    if group_errors:
-        from .group_errors import apply_group_errors
+    if full_errors:
+        from .full_errors import apply_full_errors
 
-        res['group_errors'] = apply_group_errors(
+        res['full_errors'] = apply_full_errors(
             deb, mbobs, res, anchor_sigma=anchor_sigma,
         )
     return res
@@ -463,6 +469,7 @@ def _get_smoothing(mbobs, fwhm_smooth, smooth_fac, rng):
 
 def _prep_epochs(
     mbobs, fwhm_smooth, ap_rad, use_noise_image, vcen, ucen,
+    store_transfer=False,
 ):
     """
     the prepared epochs for all bands (see
@@ -478,6 +485,7 @@ def _prep_epochs(
             ep = prep_epoch(
                 tobs, band=band, fwhm_smooth=fwhm_smooth,
                 ap_rad=ap_rad, use_noise_image=use_noise_image,
+                store_transfer=store_transfer,
             )
             ep['vcen'] = vcen
             ep['ucen'] = ucen

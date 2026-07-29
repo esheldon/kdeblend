@@ -1,37 +1,46 @@
 # TODO
 
-- Investigate the isolated fam_T_err calibration: the field
-  FD probe (2026-07-29) reads fam_T at 1.12 even for isolated
-  objects (e1/e2 are honest there), so the per-object structure
-  sandwich itself under-predicts T errors ~12 percent; fix
-  before the group extension inherits it.
+- Consider bdf for the PAdmomFitter full errors (gauss/exp/dev
+  done).
 
-- Extend apply_group_errors to the structure errors: the group
-  covariance already contains the cov/Sw rows; the field probe
-  shows the per-object T/e errors miss 20-35 percent in the
-  tight bin (e1 1.20, T 1.35) while the group fluxes are
-  honest there (0.99).
 
 - Recenter-on field validation: anchor term with the sep
   covariances end-to-end, and the neglected anchor-sums
   cross-correlation (phase-randomized re-centroiding probe).
 
 - Extend `bdf_joint_sandwich` with the cross-band flux
-  covariance (the model_sandwich extension covers gauss/exp/dev;
-  bdf currently reports flux_cov=None on the joint path) and
-  lift the bdf/star member guard in group_errors.
+  covariance and lift the bdf/star guard in full_errors.
 
-- gauss-estimator flux covariance (gauss_flux_cov) from the
-  gauss sandwich call in _run_sandwiches, if the gauss-aperture
-  colors are ever used downstream.
+- kdeblend gauss-estimator full errors from the Sw rows (and
+  gauss_flux_cov): now with measured motivation -- the gauss
+  delta-method errors are low even on exp truth (T 1.14, flux
+  1.06; dev 1.32/1.15) because every non-gaussian galaxy is
+  mismatched for a gaussian-weight estimator; the PAdmomFitter
+  gauss full errors fix this to 1.00-1.02 (MC 2026-07-29).
 
-DONE (2026-07-29, validated by unit tests, the m=1 reduction
-and 400-refit ensembles): the group-coupled adjoint sandwich
-(kdeblend/group_errors.py; deblend(group_errors=...,
-anchor_sigma=...) with scalar / per-object-sigma /
-per-object-covariance anchors) and the model_sandwich
-cross-band flux covariance for singles (ngmix kspace-admom,
-result flux_cov).  Wired into simcoadd-mdet: required
-group_errors bool on the kdeblend fitter, sep
-errx2/erry2/errxy anchor covariances when recentering,
-flux_cov_{b1}_{b2} catalog columns gated on the mode.
+- Remaining cost levers, all bounded (full errors now 21 ms
+  single / 2.0-2.6x fit, Cov(S)-dominated at 13.6 ms): a numba
+  analytic model-sum derivative kernel next to
+  gauss_comps_ksums (replacing the closed-form micro-FDs in
+  _model_sum_derivs, ~2-4 ms), and Cov(S) itself.  Measured
+  dead ends, do not revisit: chirp-z zoom kernels (exact but
+  slower than the rfft path -- czt constant factor); micro-FD
+  chain evaluations (superseded by the hand-differentiated
+  algebra, which wins at every group size).
+
+DONE (2026-07-29): PAdmomFitter(full_errors=True) for exp/dev
+(ngmix padmom_full_covariance): dev-truth MC calibrated at
+0.98 (T) / 0.99 (flux) where the sandwich reads 1.17 / 1.11;
+cost 4.2 -> 13.8 ms per fit.
+
+DONE (2026-07-29, validated by unit tests, ensembles, mismatch
+MC and field-scale FD probes; all errors honest 0.95-1.06 at
+field scale): full (fixed-point) errors -- fluxes, cross-band
+flux covariance, and T/e1/e2 -- for all objects including
+singles, in kdeblend/full_errors.py on the
+ngmix.prepsfadmom.full_errors building blocks (analytic
+ktransfer in prep_epoch, closed-form kernels and theta
+derivatives, rfft influence kernels, targeted state
+save/restore), wired through simcoadd-mdet as the required
+full_errors config option with sep anchor covariances and
+flux_cov_{b1}_{b2} catalog columns.

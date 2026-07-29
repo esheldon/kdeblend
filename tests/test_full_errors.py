@@ -1,5 +1,5 @@
 """
-tests for the group-coupled sandwich errors: the analytic kernel
+tests for the full (fixed-point) errors: the analytic kernel
 derivatives against finite differences of the exact-exp kernels,
 the m=1 reduction to the per-object sandwich, and the pair
 behavior (inflated flux errors, negative member covariance,
@@ -78,19 +78,20 @@ def run_deblend(mbobs, offsets, **kw):
     )
 
 
-def test_group_errors_dS_dtheta():
-    """the analytic kernel derivatives match finite differences
-    of the exact-exp kernel contraction (the numba kernel itself
-    only agrees to its table-exp accuracy)"""
+def test_full_errors_restore_fidelity():
+    """the targeted save/restore around a Jacobi evaluation
+    leaves the deblender state bit-identical to a full deepcopy
+    reference: guards the MUTABLE_ATTRS enumeration against
+    future changes to the update path"""
+    import copy
+
     from kdeblend.deblender import (
         _Deblender, _prep_epochs, _get_smoothing,
     )
-    from kdeblend.group_errors import (
-        _build_kernels, _dS_dtheta,
-    )
+    from kdeblend import full_errors as fe
 
     rng = np.random.RandomState(99)
-    offsets = [(-1.0, 0.0), (1.0, 0.0)]
+    offsets = [(-0.5, 0.0), (0.5, 0.0)]
     mbobs = make_mbobs(rng, offsets)
     fwhm_smooth, Tsmooth = _get_smoothing(
         mbobs, None, 1.05, np.random.RandomState(3),
@@ -105,44 +106,75 @@ def test_group_errors_dS_dtheta():
     ]
     deb = _Deblender(
         [epochs] * 2, NBAND, objects, fwhm_smooth, Tsmooth,
-        500, 1.0e-6,
+        500, 1.0e-6, recenter=True, cen_sigma0=0.1,
     )
     deb.go()
 
-    ep = deb.epochs_per_obj[0][0]
-    D = _dS_dtheta(deb, 0, ep)
-    Dfd = np.zeros((6, 5))
-    sw0 = deb.Sw[0].copy()
-    pos0 = deb.positions[0]
-    hs = [1e-5, 1e-5, 1e-5, 1e-6, 1e-6]
-    for t in range(5):
-        for sign in (1, -1):
-            sw = sw0.copy()
-            pos = list(pos0)
-            if t < 3:
-                r, c = [(0, 0), (0, 1), (1, 1)][t]
-                sw[r, c] += sign * hs[t]
-                sw[c, r] = sw[r, c]
-            else:
-                pos[t - 3] += sign * hs[t]
-            deb.Sw[0] = sw
-            deb.positions[0] = tuple(pos)
-            sums = (_build_kernels(deb, 0, ep) @ ep['kim']).real
-            Dfd[:, t] += sign * sums / (2 * hs[t])
-        deb.Sw[0] = sw0.copy()
-        deb.positions[0] = pos0
-    rel = np.abs(D - Dfd) / (np.abs(Dfd) + 1e-8)
-    assert rel.max() < 1.0e-5
+    skip = ('epochs_per_obj', 'esums')
+    ref = {
+        k: copy.deepcopy(v) for k, v in deb.__dict__.items()
+        if k not in skip
+    }
+
+    snap = fe._save_state(deb)
+    x0 = deb._pack_state()
+    caches = [
+        [fe._data_esums(deb, i, ep) for ep in epochs]
+        for i in range(2)
+    ]
+    from ngmix.prepsfadmom.full_errors import dsums_dtheta
+    Ds = [
+        [
+            dsums_dtheta(
+                ep, deb.Sw[i],
+                deb.positions[i][0] - ep['vcen'],
+                deb.positions[i][1] - ep['ucen'],
+            )
+            for ep in epochs
+        ]
+        for i in range(2)
+    ]
+    theta0s = [fe._theta_of(deb, i) for i in range(2)]
+    patched = fe._make_patched(deb, caches, Ds, theta0s, {})
+    xp = x0.copy()
+    xp[0] += 1.0e-3
+    fe._jacobi_block(deb, snap, xp, 0, patched)
+    dp = np.zeros((2, 2))
+    dp[0, 0] = 1.0e-4
+    fe._jacobi_block_anchor(deb, snap, x0, 1, patched, dp)
+
+    def same(a, b):
+        if isinstance(a, np.ndarray):
+            return np.array_equal(a, b, equal_nan=True)
+        if isinstance(a, dict):
+            return set(a) == set(b) and all(
+                same(a[k], b[k]) for k in a
+            )
+        if isinstance(a, (list, tuple)):
+            return len(a) == len(b) and all(
+                same(x, y) for x, y in zip(a, b)
+            )
+        try:
+            return bool(a == b) or (a != a and b != b)
+        except Exception:
+            return repr(a) == repr(b)
+
+    bad = [
+        k for k in ref
+        if not same(deb.__dict__[k], ref[k])
+    ]
+    assert bad == [], f'state not restored: {bad}'
 
 
-def test_group_errors_single_reduction():
+def test_full_errors_single_reduction():
     """at m=1 the group sandwich must agree with the per-object
-    sandwich: same estimating equations.  Checked through the
-    module directly since the production path gates at m >= 2"""
+    sandwich on matched data: same estimating equations.  Also
+    checks the production path now applies to singles, with the
+    structure errors wired from the family-covariance block"""
     from kdeblend.deblender import (
         _Deblender, _prep_epochs, _get_smoothing,
     )
-    from kdeblend.group_errors import group_covariance
+    from kdeblend.full_errors import full_covariance
 
     rng = np.random.RandomState(11)
     offsets = [(0.0, 0.0)]
@@ -156,6 +188,7 @@ def test_group_errors_single_reduction():
     epochs = _prep_epochs(
         mbobs, fwhm_smooth=fwhm_smooth, ap_rad=0.0,
         use_noise_image=False, vcen=0.0, ucen=0.0,
+        store_transfer=True,
     )
     deb = _Deblender(
         [epochs], NBAND,
@@ -164,7 +197,7 @@ def test_group_errors_single_reduction():
     )
     gres = deb.go()
     assert gres['converged']
-    cov, slices = group_covariance(deb, mbobs)
+    cov, slices = full_covariance(deb, mbobs)
 
     for b in range(NBAND):
         grp = np.sqrt(cov[b, b])
@@ -177,10 +210,25 @@ def test_group_errors_single_reduction():
     assert cov[0, 1] > 0
     assert np.abs(cov[0, 1] / fcov[0, 1] - 1) < 0.25
 
+    # the production path applies to singles: group flux errors,
+    # and structure errors within ~10 percent of the per-object
+    # sandwich on this matched-model scene
+    resg = run_deblend(mbobs, offsets, full_errors=True)
+    assert resg['converged'] and resg['full_errors']
+    r0 = res['objects'][0]
+    rg = resg['objects'][0]
+    assert np.allclose(
+        rg['flux_err'], np.sqrt(np.diag(cov)[:NBAND]),
+        rtol=1e-6,
+    )
+    for key in ('T_err', 'e1_err', 'e2_err'):
+        assert np.isfinite(rg[key])
+        assert np.abs(rg[key] / r0[key] - 1) < 0.15
+
 
 @pytest.mark.parametrize('recenter', [False, True])
-def test_group_errors_pair(recenter):
-    """a close pair with group_errors=True: flux errors inflate
+def test_full_errors_pair(recenter):
+    """a close pair with full_errors=True: flux errors inflate
     over the deterministic-neighbor values, the member flux
     covariance is negative, and flux_cov is filled"""
     rng = np.random.RandomState(21)
@@ -191,11 +239,11 @@ def test_group_errors_pair(recenter):
     if recenter:
         kw = {'recenter': True, 'cen_sigma0': 0.1}
     res0 = run_deblend(mbobs, offsets, **kw)
-    res = run_deblend(mbobs, offsets, group_errors=True, **kw)
+    res = run_deblend(mbobs, offsets, full_errors=True, **kw)
     assert res['converged']
-    assert res['group_errors']
+    assert res['full_errors']
 
-    from kdeblend.group_errors import group_covariance  # noqa
+    from kdeblend.full_errors import full_covariance  # noqa
 
     for i in range(2):
         e0 = res0['objects'][i]['flux_err']
@@ -207,11 +255,17 @@ def test_group_errors_pair(recenter):
         assert np.allclose(
             np.sqrt(np.diag(fcov)), e1, rtol=1e-6,
         )
+        # the structure errors inflate too (T feels the tight
+        # neighbor term strongly)
+        assert (
+            res['objects'][i]['T_err']
+            > res0['objects'][i]['T_err']
+        )
 
 
-def test_group_errors_star_fallback():
+def test_full_errors_star_fallback():
     """a group containing a star keeps the per-object errors and
-    reports group_errors False"""
+    reports full_errors False"""
     rng = np.random.RandomState(31)
     offsets = [(-0.5, 0.0), (0.5, 0.0)]
     mbobs = make_mbobs(rng, offsets)
@@ -221,12 +275,12 @@ def test_group_errors_star_fallback():
     ]
     res = deblend(
         mbobs, objects, tol=1.0e-6,
-        rng=np.random.RandomState(5), group_errors=True,
+        rng=np.random.RandomState(5), full_errors=True,
     )
-    assert res['group_errors'] is False
+    assert res['full_errors'] is False
 
 
-def test_group_errors_anchor_forms():
+def test_full_errors_anchor_forms():
     """scalar, per-object-sigma and per-object-covariance
     anchor_sigma inputs agree when they encode the same noise,
     and anisotropic covariances change the answer"""
@@ -237,19 +291,19 @@ def test_group_errors_anchor_forms():
 
     sig = 0.05
     res_s = run_deblend(
-        mbobs, offsets, group_errors=True, anchor_sigma=sig,
+        mbobs, offsets, full_errors=True, anchor_sigma=sig,
         **kw,
     )
-    assert res_s['converged'] and res_s['group_errors']
+    assert res_s['converged'] and res_s['full_errors']
     res_v = run_deblend(
-        mbobs, offsets, group_errors=True,
+        mbobs, offsets, full_errors=True,
         anchor_sigma=np.array([sig, sig]), **kw,
     )
     covs = np.array([
         sig ** 2 * np.eye(2), sig ** 2 * np.eye(2),
     ])
     res_c = run_deblend(
-        mbobs, offsets, group_errors=True, anchor_sigma=covs,
+        mbobs, offsets, full_errors=True, anchor_sigma=covs,
         **kw,
     )
     e_s = res_s['objects'][0]['flux_err']
@@ -261,16 +315,69 @@ def test_group_errors_anchor_forms():
     # anchor noise inflates over the conditioned errors, and an
     # anisotropic covariance differs from the isotropic one
     res_0 = run_deblend(
-        mbobs, offsets, group_errors=True, **kw,
+        mbobs, offsets, full_errors=True, **kw,
     )
     assert np.all(e_s > res_0['objects'][0]['flux_err'])
     aniso = np.array([
         np.diag([sig ** 2, 0.0]), np.diag([sig ** 2, 0.0]),
     ])
     res_a = run_deblend(
-        mbobs, offsets, group_errors=True, anchor_sigma=aniso,
+        mbobs, offsets, full_errors=True, anchor_sigma=aniso,
         **kw,
     )
     assert not np.allclose(
         res_a['objects'][0]['flux_err'], e_s, rtol=1e-3,
+    )
+
+
+@pytest.mark.parametrize('recenter', [False, True])
+def test_full_errors_chain_vs_fd(recenter):
+    """the chain-rule Jacobian/data-response assembly agrees
+    with the full finite-difference reference: same covariance
+    to a fraction of a percent on a close pair, with and
+    without recentering (and with the anchor term when
+    recentered)"""
+    from kdeblend.deblender import (
+        _Deblender, _prep_epochs, _get_smoothing,
+    )
+    from kdeblend.full_errors import full_covariance
+
+    rng = np.random.RandomState(21)
+    offsets = [(-0.5, 0.0), (0.5, 0.0)]
+    mbobs = make_mbobs(rng, offsets)
+    fwhm_smooth, Tsmooth = _get_smoothing(
+        mbobs, None, 1.05, np.random.RandomState(5),
+    )
+    epochs = _prep_epochs(
+        mbobs, fwhm_smooth=fwhm_smooth, ap_rad=0.0,
+        use_noise_image=False, vcen=0.0, ucen=0.0,
+        store_transfer=True,
+    )
+    objects = [
+        {'v': dv, 'u': du, 'type': 'exp', 'Tguess': 0.3}
+        for du, dv in offsets
+    ]
+    kw = {}
+    if recenter:
+        kw = {'recenter': True, 'cen_sigma0': 0.1}
+    deb = _Deblender(
+        [epochs] * 2, NBAND, objects, fwhm_smooth, Tsmooth,
+        500, 1.0e-6, **kw,
+    )
+    res = deb.go()
+    assert res['converged']
+
+    asig = 0.05 if recenter else 0.0
+    cov_c, sl = full_covariance(
+        deb, mbobs, anchor_sigma=asig, use_chain=True,
+    )
+    cov_f, _ = full_covariance(
+        deb, mbobs, anchor_sigma=asig, use_chain=False,
+    )
+    dd = np.sqrt(np.diag(cov_c) / np.diag(cov_f))
+    assert np.all(np.abs(dd - 1) < 5.0e-3), dd
+    # off-diagonals of the flux blocks agree too
+    assert np.allclose(
+        cov_c[:NBAND, :NBAND], cov_f[:NBAND, :NBAND],
+        rtol=2e-2, atol=0,
     )
