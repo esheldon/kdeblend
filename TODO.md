@@ -3,9 +3,15 @@
 - Consider bdf for the PAdmomFitter full errors (gauss/exp/dev
   done).
 
-- Recenter-on field validation: anchor term with the sep
-  covariances end-to-end, and the neglected anchor-sums
-  cross-correlation (phase-randomized re-centroiding probe).
+- Tight-blend (nn < 8 px) structure errors under recentering:
+  the moving-anchor FD probe reads fam/gauss e and T 15-30
+  percent low in the jumpy-anchor half of that bin (sep
+  deblend-position instability under noise, a non-gaussian
+  channel outside the linear anchor term; 65-row bin, EPS=1
+  doubles the noise so this is an upper-ish estimate).
+  Possible mitigations if it matters: inflate the anchor
+  covariances for multi-peak segments, or flag unstable-anchor
+  rows.
 
 - Extend `bdf_joint_sandwich` with the cross-band flux
   covariance and lift the bdf/star guard in full_errors.
@@ -20,6 +26,20 @@
   slower than the rfft path -- czt constant factor); micro-FD
   chain evaluations (superseded by the hand-differentiated
   algebra, which wins at every group size).
+
+DONE (2026-07-29): recenter-on field validation (moving-anchor
+FD probe, 64 wldb fields, arms re-run sep on the perturbed
+detection coadd and hand the matched positions in as anchors,
+so anchor noise and the anchor-sums cross-correlation enter).
+All reported errors honest with recentering on: fluxes
+0.97-1.12, e1/e2 0.95-1.01, colors 0.87-1.00, gauss entries
+0.97-1.13.  The anchor term contributes at most 0.6 percent of
+any reported error at production settings (data dominates the
+centers at cen_sigma0 = 0.1), so the neglected anchor-sums
+cross-correlation is bounded to irrelevance; sep errx2
+underprices the actual anchor noise response about 2x (median
+|da|/sep-err 2.0-2.5), immaterial at that share.  Residual:
+tight-blend T/e excess, moved to the open list above.
 
 DONE (2026-07-29): kdeblend gauss-estimator full errors from
 the Sw rows: gauss_T/e errors from the weight block of the
