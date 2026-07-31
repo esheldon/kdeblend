@@ -227,7 +227,23 @@ def full_covariance(deb, mbobs, anchor_sigma=0.0,
     use_chain=False uses the full finite-difference
     evaluations, retained as the reference for the equivalence
     tests
+
+    The dense products run under single_core_blas: the stack is
+    single core by design (parallelism is process level), and
+    the covariance/Jacobian products are large enough for a
+    threaded BLAS to fan out to every core, which measures
+    slower even in a single process
     """
+    from ngmix.util import single_core_blas
+
+    with single_core_blas():
+        return _full_covariance(
+            deb=deb, mbobs=mbobs, anchor_sigma=anchor_sigma,
+            use_chain=use_chain,
+        )
+
+
+def _full_covariance(deb, mbobs, anchor_sigma, use_chain):
     if use_chain is None:
         use_chain = True
     snap = _save_state(deb)
