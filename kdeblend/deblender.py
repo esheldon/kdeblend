@@ -148,6 +148,7 @@ def deblend(
     fixed_models=None,
     recenter=False,
     cen_sigma0=DEFAULT_CEN_SIGMA0,
+    e_sigma0=0.0,
     flux_tol=None,
     cen_tol=None,
     full_errors=False,
@@ -272,6 +273,29 @@ def deblend(
         default DEFAULT_CEN_SIGMA0 = 0.1 (the scale of detection
         centroid errors).  Zero freezes the centers at the
         detection positions.  Unused with recenter=False.
+    e_sigma0: float, optional
+        The prior width of an ellipticity regularization of the
+        model family updates (exp/dev/bdf), pulling the proposed
+        family covariance toward round at fixed trace with
+        weight k = e_sigma0^2/(e_sigma0^2 + sigma_e^2), sigma_e
+        the object's one-time ellipticity noise, mirroring the
+        center regularization.  Only the model state is pulled;
+        the adaptive weight follows the unshrunk measured
+        deweight, preserving the deweight consistency that keeps
+        the measurement linear in shear (shrinking the weight
+        itself reintroduces the weight-mismatch nonlinearity).
+        Gauss-type objects, whose model is the weight, are not
+        regularized.  The prior center (round) is data
+        independent, so unlike the center anchor it imports no
+        detection noise.  A bright object keeps its measured
+        shape, a marginal one is pulled toward round, damping
+        the discrete deblend-path jumps such objects otherwise
+        transmit; the shrinkage is a smooth response reduction
+        that metacal calibrates to first order.  Default 0.0
+        (off).  NOTE: the full_errors chain path (use_chain=True)
+        does not yet include the shrinkage term in the update
+        derivatives; use_chain=False differentiates the actual
+        update and remains exact.
     full_errors: bool, optional
         If True and the deblend converged (all members
         gauss/exp/dev), replace the per-object flux and
@@ -354,6 +378,7 @@ def deblend(
         epochs_per_obj, nband, objects, fwhm_smooth, Tsmooth,
         maxiter, tol, fixed_models=fixed_models,
         recenter=recenter, cen_sigma0=cen_sigma0,
+        e_sigma0=e_sigma0,
         flux_tol=flux_tol, cen_tol=cen_tol,
     )
     res = deb.go()
@@ -378,6 +403,7 @@ def deblend_stamps(
     fixed_models=None,
     recenter=False,
     cen_sigma0=DEFAULT_CEN_SIGMA0,
+    e_sigma0=0.0,
     flux_tol=None,
     cen_tol=None,
 ):
@@ -451,6 +477,7 @@ def deblend_stamps(
         epochs_per_obj, nband, objects, fwhm_smooth, Tsmooth,
         maxiter, tol, fixed_models=fixed_models,
         recenter=recenter, cen_sigma0=cen_sigma0,
+        e_sigma0=e_sigma0,
         flux_tol=flux_tol, cen_tol=cen_tol,
     ).go()
 
@@ -535,13 +562,15 @@ class _Deblender(object):
     def __init__(
         self, epochs_per_obj, nband, objects, fwhm_smooth, Tsmooth,
         maxiter, tol, fixed_models=None, recenter=False,
-        cen_sigma0=DEFAULT_CEN_SIGMA0, flux_tol=None, cen_tol=None,
+        cen_sigma0=DEFAULT_CEN_SIGMA0, e_sigma0=0.0,
+        flux_tol=None, cen_tol=None,
     ):
         if len(objects) == 0:
             raise ValueError('no objects sent')
 
         self.recenter = bool(recenter)
         self.cen_sigma0 = cen_sigma0
+        self.e_sigma0 = float(e_sigma0)
 
         # per bdf object: the latest two-aperture component fluxes
         # (nband, 2), the raw split and its variance, and the
@@ -599,6 +628,9 @@ class _Deblender(object):
         # per-object pull noise for the recentering, computed
         # lazily at the first center update (negative marks unset)
         self._cen_sigma_sweep = np.full(self.nobj, -1.0)
+        # per-object ellipticity noise for the shape shrinkage,
+        # computed lazily at the first structure update
+        self._e_sigma_sweep = np.full(self.nobj, -1.0)
         # scratch for the k-space sum kernels, overwritten per call
         self.esums = np.zeros(6)
 
@@ -959,6 +991,51 @@ class _Deblender(object):
         Twt = self.Sw[i][0, 0] + self.Sw[i][1, 1]
         return self._note_change('cen', dmax / np.sqrt(Twt))
 
+    def _shrink_family_shift(self, i, sums, shift):
+        """
+        regularize the ellipticity of the proposed family
+        covariance toward round at fixed trace: the update target
+        cov + shift is replaced by
+
+            k (cov + shift) + (1 - k) (tr(cov + shift)/2) I
+
+        with k = e_sigma0^2/(e_sigma0^2 + sigma_e^2), mirroring
+        the center regularization and the bdf split shrinkage,
+        and the regularized shift is returned for the damped
+        step, so the validity machinery sees the actual step.
+        Only the model family state is pulled toward round (a
+        data independent prior center, importing no detection
+        noise); the adaptive weight follows the unshrunk
+        measured deweight, preserving the deweight consistency
+        that keeps the measurement linear in shear.  Shrinking
+        the weight itself reintroduces the weight-mismatch
+        nonlinearity, measured as a large response cubic.
+        Gauss-type objects, whose model is the weight, are not
+        regularized.  The ellipticity noise is computed once per
+        object at the first update, like the center pull noise:
+        approximate, setting only the regularization strength
+        """
+        if self._e_sigma_sweep[i] < 0:
+            covj = self._accumulate_error_sums(i)[2]
+            Tsum = sums[4]
+            if Tsum > 0:
+                var = 0.5 * (covj[2, 2] + covj[3, 3]) / Tsum ** 2
+            else:
+                var = -1.0
+            self._e_sigma_sweep[i] = (
+                np.sqrt(var) if var > 0 else 0.0
+            )
+
+        sig = self._e_sigma_sweep[i]
+        if not np.isfinite(sig):
+            return shift
+        s0 = self.e_sigma0
+        k = s0 ** 2 / (s0 ** 2 + sig ** 2)
+        target = self.models[i]['cov'] + shift
+        Tt = target[0, 0] + target[1, 1]
+        target = k * target + (1.0 - k) * 0.5 * Tt * np.eye(2)
+        return target - self.models[i]['cov']
+
     def _deweight_measured(self, i, sums):
         """
         the deweight update of object i's weight from the measured
@@ -1027,6 +1104,8 @@ class _Deblender(object):
         m = self.models[i]
 
         shift = self._mixture_shift(i, newSw, sums, pred)
+        if self.e_sigma0 > 0:
+            shift = self._shrink_family_shift(i, sums, shift)
         prop, shift, accepted, idamp = self._damped_step(i, shift)
 
         newF = m['F'] * fs / fs_pred
