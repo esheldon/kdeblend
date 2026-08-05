@@ -73,7 +73,8 @@ def run_deblend(mbobs, offsets, **kw):
         for du, dv in offsets
     ]
     return deblend(
-        mbobs, objects, tol=1.0e-6, rng=np.random.RandomState(5),
+        mbobs, objects, tol=1.0e-6, maxiter=2000,
+        rng=np.random.RandomState(5),
         **kw,
     )
 
@@ -91,7 +92,7 @@ def test_full_errors_restore_fidelity():
     from kdeblend import full_errors as fe
 
     rng = np.random.RandomState(99)
-    offsets = [(-0.5, 0.0), (0.5, 0.0)]
+    offsets = [(-0.625, 0.0), (0.625, 0.0)]
     mbobs = make_mbobs(rng, offsets)
     fwhm_smooth, Tsmooth = _get_smoothing(
         mbobs, None, 1.05, np.random.RandomState(3),
@@ -106,7 +107,7 @@ def test_full_errors_restore_fidelity():
     ]
     deb = _Deblender(
         [epochs] * 2, NBAND, objects, fwhm_smooth, Tsmooth,
-        500, 1.0e-6, recenter=True, cen_sigma0=0.1,
+        2000, 1.0e-6, recenter=True, cen_sigma0=0.1,
     )
     deb.go()
 
@@ -193,7 +194,7 @@ def test_full_errors_single_reduction():
     deb = _Deblender(
         [epochs], NBAND,
         [{'v': 0.0, 'u': 0.0, 'type': 'exp', 'Tguess': 0.3}],
-        fwhm_smooth, Tsmooth, 500, 1.0e-6,
+        fwhm_smooth, Tsmooth, 2000, 1.0e-6,
     )
     gres = deb.go()
     assert gres['converged']
@@ -249,7 +250,7 @@ def test_full_errors_pair(recenter):
     over the deterministic-neighbor values, the member flux
     covariance is negative, and flux_cov is filled"""
     rng = np.random.RandomState(21)
-    offsets = [(-0.5, 0.0), (0.5, 0.0)]
+    offsets = [(-0.625, 0.0), (0.625, 0.0)]
     mbobs = make_mbobs(rng, offsets)
 
     kw = {}
@@ -318,7 +319,7 @@ def test_full_errors_anchor_forms():
     anchor_sigma inputs agree when they encode the same noise,
     and anisotropic covariances change the answer"""
     rng = np.random.RandomState(21)
-    offsets = [(-0.5, 0.0), (0.5, 0.0)]
+    offsets = [(-0.625, 0.0), (0.625, 0.0)]
     mbobs = make_mbobs(rng, offsets)
     kw = {'recenter': True, 'cen_sigma0': 0.1}
 
@@ -376,7 +377,7 @@ def test_full_errors_chain_vs_fd(recenter):
     from kdeblend.full_errors import full_covariance
 
     rng = np.random.RandomState(21)
-    offsets = [(-0.5, 0.0), (0.5, 0.0)]
+    offsets = [(-0.625, 0.0), (0.625, 0.0)]
     mbobs = make_mbobs(rng, offsets)
     fwhm_smooth, Tsmooth = _get_smoothing(
         mbobs, None, 1.05, np.random.RandomState(5),
@@ -395,7 +396,7 @@ def test_full_errors_chain_vs_fd(recenter):
         kw = {'recenter': True, 'cen_sigma0': 0.1}
     deb = _Deblender(
         [epochs] * 2, NBAND, objects, fwhm_smooth, Tsmooth,
-        500, 1.0e-6, **kw,
+        2000, 1.0e-6, **kw,
     )
     res = deb.go()
     assert res['converged']
