@@ -136,6 +136,67 @@ NONCONTRACT_FAC = 0.7
 DEFAULT_CEN_SIGMA0 = 0.1
 
 
+def build_deblender(
+    obs, objects,
+    fwhm_smooth=None,
+    smooth_fac=1.05,
+    ap_rad=0.0,
+    maxiter=DEFAULT_MAXITER,
+    tol=DEFAULT_TOL,
+    use_noise_image=False,
+    rng=None,
+    fixed_models=None,
+    recenter=False,
+    cen_sigma0=DEFAULT_CEN_SIGMA0,
+    e_sigma0=0.0,
+    flux_tol=None,
+    cen_tol=None,
+    full_errors=False,
+):
+    """
+    prep the epochs and construct the deblender without running
+    it.  Parameters are as for deblend; full_errors here only
+    controls the per-epoch transfer storage.  Extracted from
+    deblend so external harnesses (e.g. the port differential
+    rig) can drive the exact production construction and access
+    the deblender state directly.
+
+    Returns
+    -------
+    deb, mbobs
+        the constructed _Deblender (ready for .go()) and the
+        MultiBandObsList
+    """
+    mbobs = get_mb_obs(obs)
+    nband = len(mbobs)
+
+    if full_errors and ap_rad != 0:
+        raise ValueError(
+            'full_errors requires ap_rad=0: the influence-kernel '
+            'transfer assumes no apodization'
+        )
+
+    fwhm_smooth, Tsmooth = _get_smoothing(
+        mbobs, fwhm_smooth, smooth_fac, rng,
+    )
+
+    epochs = _prep_epochs(
+        mbobs, fwhm_smooth=fwhm_smooth, ap_rad=ap_rad,
+        use_noise_image=use_noise_image, vcen=0.0, ucen=0.0,
+        store_transfer=full_errors,
+    )
+
+    epochs_per_obj = [epochs] * len(objects)
+    deb = _Deblender(
+        epochs_per_obj, nband, objects, fwhm_smooth, Tsmooth,
+        maxiter, tol, fixed_models=fixed_models,
+        recenter=recenter, cen_sigma0=cen_sigma0,
+        e_sigma0=e_sigma0,
+        flux_tol=flux_tol, cen_tol=cen_tol,
+    )
+    return deb, mbobs
+
+
 def deblend(
     obs, objects,
     fwhm_smooth=None,
@@ -354,32 +415,22 @@ def deblend(
         numiter: number of sweeps
         nskip: total number of skipped structure updates
     """
-    mbobs = get_mb_obs(obs)
-    nband = len(mbobs)
-
-    if full_errors and ap_rad != 0:
-        raise ValueError(
-            'full_errors requires ap_rad=0: the influence-kernel '
-            'transfer assumes no apodization'
-        )
-
-    fwhm_smooth, Tsmooth = _get_smoothing(
-        mbobs, fwhm_smooth, smooth_fac, rng,
-    )
-
-    epochs = _prep_epochs(
-        mbobs, fwhm_smooth=fwhm_smooth, ap_rad=ap_rad,
-        use_noise_image=use_noise_image, vcen=0.0, ucen=0.0,
-        store_transfer=full_errors,
-    )
-
-    epochs_per_obj = [epochs] * len(objects)
-    deb = _Deblender(
-        epochs_per_obj, nband, objects, fwhm_smooth, Tsmooth,
-        maxiter, tol, fixed_models=fixed_models,
-        recenter=recenter, cen_sigma0=cen_sigma0,
+    deb, mbobs = build_deblender(
+        obs, objects,
+        fwhm_smooth=fwhm_smooth,
+        smooth_fac=smooth_fac,
+        ap_rad=ap_rad,
+        maxiter=maxiter,
+        tol=tol,
+        use_noise_image=use_noise_image,
+        rng=rng,
+        fixed_models=fixed_models,
+        recenter=recenter,
+        cen_sigma0=cen_sigma0,
         e_sigma0=e_sigma0,
-        flux_tol=flux_tol, cen_tol=cen_tol,
+        flux_tol=flux_tol,
+        cen_tol=cen_tol,
+        full_errors=full_errors,
     )
     res = deb.go()
     if full_errors:
