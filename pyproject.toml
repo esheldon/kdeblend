@@ -21,6 +21,9 @@ Homepage = "https://github.com/esheldon/kdeblend"
 [tool.setuptools.packages.find]
 include = ["kdeblend*"]
 
+[tool.setuptools.package-data]
+"kdeblend.gpu" = ["cuda/*.cu", "cuda/*.cuh"]
+
 [tool.setuptools.dynamic]
 version = {attr = "kdeblend._version.__version__"}
 
