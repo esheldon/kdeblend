@@ -12,6 +12,9 @@ requires-python = ">=3.8"
 dependencies = ["numpy", "ngmix"]
 dynamic = ["version"]
 
+[project.optional-dependencies]
+gpu = ["cupy"]
+
 [project.urls]
 Homepage = "https://github.com/esheldon/kdeblend"
 
