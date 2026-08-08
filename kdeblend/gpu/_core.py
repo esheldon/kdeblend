@@ -55,7 +55,15 @@ _EXPCT = ', '.join(f'{cT:.17e}' for f, cT in _EXP_COMPS)
 GMAX = 64
 SPO = 9         # packed slots per object (F,1 + cen,2 + cov,3 + Sw,3)
 NT = 256
-DIM_MAX = 512
+
+# padded-fft dim scope, set by the kernel's static shared memory
+# (the phasor tables are 4 * DIM_MAX * sizeof(MODET) of the 48 KB
+# block limit): the fp32 production kernel reaches 1536 (~37 KB),
+# the fp64 kernel (and the fp64-only init_sums) 1024 (~45 KB).
+# Groups between the two run through CPU prep + the fp32 kernel;
+# only dims beyond DIM_MAX fall back to the CPU fitter.
+DIM_MAX = 1536
+DIM_MAX_FP64 = 1024
 
 _CUDA_DIR = os.path.join(os.path.dirname(__file__), 'cuda')
 
@@ -94,13 +102,14 @@ def _load_cuda_source():
     return '\n'.join(parts)
 
 
-def _prologue(nt):
+def _prologue(nt, fp32):
     """the compile-time configuration and python-derived constant
     tables, as preprocessor defines prepended to the source"""
+    dim_max = DIM_MAX if fp32 else DIM_MAX_FP64
     return '\n'.join([
         f'#define NTHREADS_H {nt}',
         f'#define NEXPC_H {NEXPC}',
-        f'#define DIM_MAX_H {DIM_MAX}',
+        f'#define DIM_MAX_H {dim_max}',
         f'#define GMAX_H {GMAX}',
         f'#define EXPVALS_H {_EXPVALS}',
         f'#define EXPVALSF_H {_EXPVALSF}',
@@ -118,7 +127,7 @@ def _get_module(fp32, nt):
     assert nt >= 2 and (nt & (nt - 1)) == 0, 'nt must be power of 2'
     key = (bool(fp32), nt)
     if key not in _MODULES:
-        src = _prologue(nt) + _load_cuda_source()
+        src = _prologue(nt, key[0]) + _load_cuda_source()
         opts = ('-DMODE_FP32',) if key[0] else ()
         _MODULES[key] = cp.RawModule(code=src, options=opts)
     return _MODULES[key]
@@ -299,8 +308,22 @@ def _alloc_scratch(packed, ns, ng, nobj_tot):
     packed['err'] = cp.zeros(ng, dtype=cp.int32)
 
 
+def _check_dims(h, fp32):
+    """the fp64 module (and init_sums) compiles with the smaller
+    DIM_MAX_FP64 phasor tables; reject over-scope dims up front
+    rather than corrupting shared memory"""
+    lim = DIM_MAX if fp32 else DIM_MAX_FP64
+    dmax = int(np.max(h['dim']))
+    if dmax > lim:
+        raise ValueError(
+            f'dim {dmax} exceeds the '
+            f'{"fp32" if fp32 else "fp64"} kernel scope {lim}'
+        )
+
+
 def to_gpu(h, fp32=False):
     """host pack -> device arrays + scratch/output allocations"""
+    _check_dims(h, fp32)
     dts = _mode_dtypes(fp32)
     ng = int(h['ng'])
     packed = {'ng': ng, 'fp32': fp32}
@@ -321,6 +344,7 @@ def to_gpu_multi(small_h, mode_list, fp32=False):
     list of per-submission mode-array dicts: the mode fields (the
     bulk of the bytes) are copied per submission straight into
     device slabs, no host merge"""
+    _check_dims(small_h, fp32)
     dts = _mode_dtypes(fp32)
     ng = int(small_h['ng'])
     packed = {'ng': ng, 'fp32': fp32}
@@ -363,6 +387,7 @@ def to_gpu_device_modes(small_h, mode_dev, moff, fp32=False):
     pack_host_small (merged) pack, mode_dev the assembled device
     mode dict (kdeblend.gpu.prep.assemble_mode_fields), moff the
     host int64 group offsets matching it"""
+    _check_dims(small_h, fp32)
     dts = _mode_dtypes(fp32)
     ng = int(small_h['ng'])
     packed = {'ng': ng, 'fp32': fp32}

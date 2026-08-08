@@ -233,3 +233,52 @@ def test_stub_fit_matches_host_pack():
         assert np.abs(a - b).max() < 1e-2 * scale, (
             k, np.abs(a - b).max(), scale,
         )
+
+
+def test_bigdim_fp32_scope():
+    """a group whose padded dim exceeds the fp64 scope but fits
+    the fp32 kernel: host-pack fp32 fit matches the CPU fitter at
+    the class level; the fp64 upload path refuses it"""
+    from kdeblend.gpu import (
+        _core, DIM_MAX, DIM_MAX_FP64, pack_host, to_gpu,
+        fit_groups, writeback, install_sum_overrides,
+        result_from_state,
+    )
+
+    rng = np.random.RandomState(44)
+    # a wide pair on a 280px stamp: target_dim 1120
+    from _sims import make_blend_obs
+    sep = 30.0
+    a = dict(kind='exp', e1=0.1, e2=0.0, hlr=0.5, flux=8.0,
+             v=0.0, u=-sep / 2 * 0.2)
+    b = dict(kind='exp', e1=-0.05, e2=0.1, hlr=0.4, flux=6.0,
+             v=0.5, u=sep / 2 * 0.2)
+    obs = make_blend_obs([a, b], 0.9, noise=0.01, rng=rng,
+                         dim=280)
+    obs.noise = rng.normal(scale=0.01, size=obs.image.shape)
+    objects = [
+        dict(v=0.0, u=-sep / 2 * 0.2, Tguess=0.5, type='exp'),
+        dict(v=0.5, u=sep / 2 * 0.2, Tguess=0.4, type='exp'),
+    ]
+    kw = dict(FIT_KW)
+    kw['maxiter'] = 500
+
+    deb_cpu, _ = kdeblend.build_deblender(
+        obs, [dict(o) for o in objects], **kw)
+    deb_gpu, _ = kdeblend.build_deblender(
+        obs, [dict(o) for o in objects], **kw)
+    ep = deb_gpu.epochs_per_obj[0][0]
+    assert DIM_MAX_FP64 < ep['dim'] <= DIM_MAX, ep['dim']
+
+    # fp64 path must refuse it up front
+    with pytest.raises(ValueError):
+        to_gpu(pack_host([deb_gpu]), fp32=False)
+
+    res_cpu = deb_cpu.go()
+    res_gpu = fit_groups([deb_gpu], fp32=True)[0]
+    assert res_gpu['converged'] == res_cpu['converged']
+    for oc, og in zip(res_cpu['objects'], res_gpu['objects']):
+        assert og['type'] == oc['type']
+        assert og['deblend_flags'] == oc['deblend_flags']
+        assert abs(og['e1'] - oc['e1']) < 5.0e-3
+        assert abs(og['T'] / oc['T'] - 1) < 5.0e-3

@@ -24,13 +24,15 @@ as the production deblending path uses it.
 import numpy as np
 import cupy as cp
 
-from ._core import NT, DIM_MAX, get_init_sums_kernel
+from ._core import NT, DIM_MAX_FP64, get_init_sums_kernel
 
 MIN_PSF_FRAC = 1.0e-5
 
-# stamps per batched rfft2 (3 per group): bounds the transient
-# device memory of a dense-field prep to ~D^2*CHUNK*3*24B
-CHUNK_GROUPS = 8
+# transient budget per batched rfft2 chunk (the (3B, D, D)
+# stack): a byte bound rather than a group count, so dense
+# fields and big dims are both bounded (at D=384 this is ~36
+# groups per chunk, at D=1024 ~5)
+DEFAULT_CHUNK_BYTES = 128 * 1024 ** 2
 
 
 def _prep_class_chunk(reqs, gis, D, entry, kim_parts, ef2_parts):
@@ -169,7 +171,8 @@ class PrepSlab(object):
         }
 
 
-def prep_groups(reqs, geom_cache, nt=NT):
+def prep_groups(reqs, geom_cache, nt=NT,
+                chunk_bytes=DEFAULT_CHUNK_BYTES):
     """
     device prep for a batch of groups.
 
@@ -196,10 +199,14 @@ def prep_groups(reqs, geom_cache, nt=NT):
     geom_keys = []
     geoms = {}
     for r in reqs:
-        if r['target_dim'] > DIM_MAX:
+        # the init_sums kernel runs in the fp64 module, whose
+        # phasor tables cap at DIM_MAX_FP64; bigger groups (up to
+        # the fp32 DIM_MAX) go through CPU prep + the host-pack
+        # path instead
+        if r['target_dim'] > DIM_MAX_FP64:
             raise ValueError(
                 f"target_dim {r['target_dim']} exceeds "
-                f"DIM_MAX {DIM_MAX}"
+                f"DIM_MAX_FP64 {DIM_MAX_FP64}"
             )
         key, entry = geom_cache.get(
             r['target_dim'], r['jac4'], r['Tsmooth'],
@@ -221,10 +228,10 @@ def prep_groups(reqs, geom_cache, nt=NT):
         # chunk the batched ffts: a dense field can put tens of
         # groups in one class, and an unchunked (3B, D, D) stack
         # plus its transform spikes to a GB of transient device
-        # memory that then sits cached in the feeder's pool.
-        # ~24 planes keeps the batching win with a bounded spike
-        for c0 in range(0, len(all_gis), CHUNK_GROUPS):
-            gis = all_gis[c0:c0 + CHUNK_GROUPS]
+        # memory that then sits cached in the feeder's pool
+        per = max(1, int(chunk_bytes // (3 * D * D * 8)))
+        for c0 in range(0, len(all_gis), per):
+            gis = all_gis[c0:c0 + per]
             _prep_class_chunk(
                 reqs, gis, D, entry, kim_parts, ef2_parts,
             )
