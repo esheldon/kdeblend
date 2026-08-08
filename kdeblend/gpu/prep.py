@@ -101,17 +101,26 @@ class GeometryCache(object):
     ngmix lru: (dim, dvdrow, dvdcol, dudrow, dudcol, Tsmooth).
     The grids are built on the CPU with the exact production code
     so the retained-mode selection is bitwise the CPU path's,
-    then uploaded once."""
+    then uploaded once.
 
-    def __init__(self):
+    LRU-bounded: group cutout dims vary freely, so an unbounded
+    cache grows for the whole run (a few MB of device arrays per
+    distinct geometry).  Eviction is safe at any time — live
+    PrepSlabs hold direct references to their entries."""
+
+    def __init__(self, maxsize=48):
         self._entries = {}
+        self._maxsize = int(maxsize)
 
     def get(self, dim, jac4, Tsmooth):
         from ngmix.prepsfadmom.prep import _get_kspace_grids
 
         key = (int(dim),) + tuple(float(v) for v in jac4) \
             + (float(Tsmooth),)
-        if key not in self._entries:
+        if key in self._entries:
+            # refresh recency (dict preserves insertion order)
+            self._entries[key] = self._entries.pop(key)
+        else:
             grids = _get_kspace_grids(*key)
             entry = _GeomEntry(grids)
             # flat rfft half-plane index for the gathers
@@ -121,6 +130,8 @@ class GeometryCache(object):
                 + entry.ix.astype(cp.int64)
             )
             self._entries[key] = entry
+            while len(self._entries) > self._maxsize:
+                self._entries.pop(next(iter(self._entries)))
         return key, self._entries[key]
 
 
