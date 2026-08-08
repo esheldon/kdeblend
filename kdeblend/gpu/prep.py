@@ -28,6 +28,58 @@ from ._core import NT, DIM_MAX, get_init_sums_kernel
 
 MIN_PSF_FRAC = 1.0e-5
 
+# stamps per batched rfft2 (3 per group): bounds the transient
+# device memory of a dense-field prep to ~D^2*CHUNK*3*24B
+CHUNK_GROUPS = 8
+
+
+def _prep_class_chunk(reqs, gis, D, entry, kim_parts, ef2_parts):
+    """pad+rfft one chunk of same-(dim, geometry) groups and fill
+    their kim/ef2 slots (see prep_groups)"""
+    B = len(gis)
+    stack = cp.zeros((3 * B, D, D), dtype=cp.float64)
+    effs = np.empty(B)
+    for j, gi in enumerate(gis):
+        r = reqs[gi]
+        effs[j] = r['eff_pad_factor']
+        for s, im in enumerate(
+                (r['image'], r['noise'], r['psf'])):
+            ny, nx = im.shape
+            p0 = (D - ny) // 2
+            p1 = (D - nx) // 2
+            stack[3 * j + s, p0:p0 + ny, p1:p1 + nx] = (
+                cp.asarray(im)
+            )
+    kflat = cp.fft.rfft2(stack).reshape(3 * B, -1)
+
+    rows = np.arange(B)
+    kim_s = kflat[3 * rows][:, entry.gidx]
+    kno_s = kflat[3 * rows + 1][:, entry.gidx]
+    kps_s = kflat[3 * rows + 2][:, entry.gidx]
+
+    # deconvolution guard, matching ngmix
+    # _deconvolve_im_psf_inplace op for op: modes with
+    # 0 < |kpsf| <= min_amp are scaled to min_amp preserving
+    # phase; exact zeros become min_amp
+    max_amp = cp.abs(kflat[3 * rows + 2, 0])[:, None]
+    min_amp = MIN_PSF_FRAC * max_amp
+    aps = cp.abs(kps_s)
+    low = aps <= min_amp
+    kps_c = cp.where(low & (aps != 0),
+                     kps_s / aps * min_amp, kps_s)
+    kps_c = cp.where(low & (aps == 0),
+                     min_amp.astype(kps_s.dtype), kps_c)
+
+    kim_d = (kim_s / kps_c) * entry.fold[None, :]
+    pnoise = cp.abs(kno_s) ** 2 \
+        * cp.asarray(effs ** 2)[:, None]
+    ef2_d = entry.fold2[None, :] * pnoise \
+        / cp.abs(kps_c) ** 2
+
+    for j, gi in enumerate(gis):
+        kim_parts[gi] = kim_d[j]
+        ef2_parts[gi] = ef2_d[j]
+
 
 class _GeomEntry(object):
     def __init__(self, grids):
@@ -153,51 +205,18 @@ def prep_groups(reqs, geom_cache, nt=NT):
 
     kim_parts = [None] * ngroup
     ef2_parts = [None] * ngroup
-    for (D, gkey), gis in classes.items():
+    for (D, gkey), all_gis in classes.items():
         entry = geoms[gkey]
-        B = len(gis)
-        stack = cp.zeros((3 * B, D, D), dtype=cp.float64)
-        effs = np.empty(B)
-        for j, gi in enumerate(gis):
-            r = reqs[gi]
-            effs[j] = r['eff_pad_factor']
-            for s, im in enumerate(
-                    (r['image'], r['noise'], r['psf'])):
-                ny, nx = im.shape
-                p0 = (D - ny) // 2
-                p1 = (D - nx) // 2
-                stack[3 * j + s, p0:p0 + ny, p1:p1 + nx] = (
-                    cp.asarray(im)
-                )
-        kflat = cp.fft.rfft2(stack).reshape(3 * B, -1)
-
-        rows = np.arange(B)
-        kim_s = kflat[3 * rows][:, entry.gidx]
-        kno_s = kflat[3 * rows + 1][:, entry.gidx]
-        kps_s = kflat[3 * rows + 2][:, entry.gidx]
-
-        # deconvolution guard, matching ngmix
-        # _deconvolve_im_psf_inplace op for op: modes with
-        # 0 < |kpsf| <= min_amp are scaled to min_amp preserving
-        # phase; exact zeros become min_amp
-        max_amp = cp.abs(kflat[3 * rows + 2, 0])[:, None]
-        min_amp = MIN_PSF_FRAC * max_amp
-        aps = cp.abs(kps_s)
-        low = aps <= min_amp
-        kps_c = cp.where(low & (aps != 0),
-                         kps_s / aps * min_amp, kps_s)
-        kps_c = cp.where(low & (aps == 0),
-                         min_amp.astype(kps_s.dtype), kps_c)
-
-        kim_d = (kim_s / kps_c) * entry.fold[None, :]
-        pnoise = cp.abs(kno_s) ** 2 \
-            * cp.asarray(effs ** 2)[:, None]
-        ef2_d = entry.fold2[None, :] * pnoise \
-            / cp.abs(kps_c) ** 2
-
-        for j, gi in enumerate(gis):
-            kim_parts[gi] = kim_d[j]
-            ef2_parts[gi] = ef2_d[j]
+        # chunk the batched ffts: a dense field can put tens of
+        # groups in one class, and an unchunked (3B, D, D) stack
+        # plus its transform spikes to a GB of transient device
+        # memory that then sits cached in the feeder's pool.
+        # ~24 planes keeps the batching win with a bounded spike
+        for c0 in range(0, len(all_gis), CHUNK_GROUPS):
+            gis = all_gis[c0:c0 + CHUNK_GROUPS]
+            _prep_class_chunk(
+                reqs, gis, D, entry, kim_parts, ef2_parts,
+            )
 
     moff = np.zeros(ngroup + 1, dtype=np.int64)
     for gi in range(ngroup):
