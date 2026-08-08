@@ -45,13 +45,18 @@ __device__ void phasor_tables(const Params& P, Shm& sh, int tid)
 }
 
 // weighted mode-moment partial sums into sh.red[0..5][tid];
-// caller syncs then tree-reduces with block_reduce6
+// caller syncs then tree-reduces with block_reduce6.  kim is
+// indexed at m0k + m and the geometry arrays (iy/ix/kv/ku) at
+// m0g + m: the deblend pack duplicates geometry per group (both
+// offsets P.m0), while the init-sums kernel shares one geometry
+// CSR across groups
 __device__ void mode_sum_partials(
     const Params& P, Shm& sh, int tid, int nt,
     const KIMT* __restrict__ kim,
     const int* __restrict__ iy, const int* __restrict__ ix,
     const MODET* __restrict__ kv, const MODET* __restrict__ ku,
-    double w00, double w01, double w11)
+    double w00, double w01, double w11,
+    long m0k, long m0g)
 {
 #ifdef MODE_FP32
     {
@@ -63,20 +68,20 @@ __device__ void mode_sum_partials(
         float k0_ = 0, kv_ = 0, ku_ = 0,
               kvv = 0, kvu = 0, kuu = 0;
         for (long m = tid; m < P.nm; m += nt) {
-            const float kvi = kv[P.m0 + m];
-            const float kui = ku[P.m0 + m];
+            const float kvi = kv[m0g + m];
+            const float kui = ku[m0g + m];
             const float Sv = w00f * kvi + w01f * kui;
             const float Su = w01f * kvi + w11f * kui;
             const float chi2 = kvi * Sv + kui * Su;
             if (chi2 > 25.0f || chi2 < 0.0f) continue;
             const float wk = fexpf_(-0.5f * chi2);
-            const int y = iy[P.m0 + m];
-            const int x = ix[P.m0 + m];
+            const int y = iy[m0g + m];
+            const int x = ix[m0g + m];
             const float pr = sh.pyre[y] * sh.pxre[x]
                 - sh.pyim[y] * sh.pxim[x];
             const float pi = sh.pyre[y] * sh.pxim[x]
                 + sh.pyim[y] * sh.pxre[x];
-            const float2 val = kim[P.m0 + m];
+            const float2 val = kim[m0k + m];
             const float re = val.x * pr - val.y * pi;
             const float im = val.y * pr + val.x * pi;
             const float wre = wk * re;
@@ -100,20 +105,20 @@ __device__ void mode_sum_partials(
         double s0_ = 0, sv = 0, su = 0,
                svv = 0, svu = 0, suu = 0;
         for (long m = tid; m < P.nm; m += nt) {
-            const double kvi = kv[P.m0 + m];
-            const double kui = ku[P.m0 + m];
+            const double kvi = kv[m0g + m];
+            const double kui = ku[m0g + m];
             const double Sv = w00 * kvi + w01 * kui;
             const double Su = w01 * kvi + w11 * kui;
             const double chi2 = kvi * Sv + kui * Su;
             if (chi2 > 25.0 || chi2 < 0.0) continue;
             const double wk = fexp(-0.5 * chi2);
-            const int y = iy[P.m0 + m];
-            const int x = ix[P.m0 + m];
+            const int y = iy[m0g + m];
+            const int x = ix[m0g + m];
             const double pr = sh.pyre[y] * sh.pxre[x]
                 - sh.pyim[y] * sh.pxim[x];
             const double pi = sh.pyre[y] * sh.pxim[x]
                 + sh.pyim[y] * sh.pxre[x];
-            const double2 val = kim[P.m0 + m];
+            const double2 val = kim[m0k + m];
             const double re = val.x * pr - val.y * pi;
             const double im = val.y * pr + val.x * pi;
             const double wre = wk * re;

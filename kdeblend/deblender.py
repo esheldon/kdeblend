@@ -152,6 +152,9 @@ def build_deblender(
     flux_tol=None,
     cen_tol=None,
     full_errors=False,
+    epochs=None,
+    measured_init_sums5=None,
+    defer_flux_init=False,
 ):
     """
     prep the epochs and construct the deblender without running
@@ -160,6 +163,14 @@ def build_deblender(
     deblend so external harnesses (e.g. the port differential
     rig) can drive the exact production construction and access
     the deblender state directly.
+
+    epochs, optional, is a caller-prepared epoch list (with vcen/
+    ucen stamped) that replaces the internal _prep_epochs; the
+    device-prep path uses it with stub epochs whose array entries
+    live on the gpu (kim et al None), together with
+    measured_init_sums5, the per (object, band) measured flux
+    sums admom_ksums would have produced for the flux
+    initialization (see _Deblender._init_fluxes).
 
     Returns
     -------
@@ -180,11 +191,12 @@ def build_deblender(
         mbobs, fwhm_smooth, smooth_fac, rng,
     )
 
-    epochs = _prep_epochs(
-        mbobs, fwhm_smooth=fwhm_smooth, ap_rad=ap_rad,
-        use_noise_image=use_noise_image, vcen=0.0, ucen=0.0,
-        store_transfer=full_errors,
-    )
+    if epochs is None:
+        epochs = _prep_epochs(
+            mbobs, fwhm_smooth=fwhm_smooth, ap_rad=ap_rad,
+            use_noise_image=use_noise_image, vcen=0.0, ucen=0.0,
+            store_transfer=full_errors,
+        )
 
     epochs_per_obj = [epochs] * len(objects)
     deb = _Deblender(
@@ -193,6 +205,8 @@ def build_deblender(
         recenter=recenter, cen_sigma0=cen_sigma0,
         e_sigma0=e_sigma0,
         flux_tol=flux_tol, cen_tol=cen_tol,
+        measured_init_sums5=measured_init_sums5,
+        defer_flux_init=defer_flux_init,
     )
     return deb, mbobs
 
@@ -615,9 +629,21 @@ class _Deblender(object):
         maxiter, tol, fixed_models=None, recenter=False,
         cen_sigma0=DEFAULT_CEN_SIGMA0, e_sigma0=0.0,
         flux_tol=None, cen_tol=None,
+        measured_init_sums5=None, defer_flux_init=False,
     ):
         if len(objects) == 0:
             raise ValueError('no objects sent')
+
+        # per (object, band) measured flux sums for the flux
+        # initialization, replacing the admom_ksums passes when
+        # the epoch mode arrays live elsewhere (the device-prep
+        # path); see _init_fluxes.  With defer_flux_init the
+        # construction stops before _init_fluxes so the caller
+        # can read the guess state (Sw, positions), compute the
+        # measured sums externally, set _measured_init_sums5 and
+        # call _init_fluxes itself.
+        self._measured_init_sums5 = measured_init_sums5
+        self._defer_flux_init = bool(defer_flux_init)
 
         self.recenter = bool(recenter)
         self.cen_sigma0 = cen_sigma0
@@ -694,7 +720,8 @@ class _Deblender(object):
         self.nrestart = np.zeros(self.nobj, dtype='i4')
         self.dbflags = np.zeros(self.nobj, dtype='i4')
 
-        self._init_fluxes()
+        if not self._defer_flux_init:
+            self._init_fluxes()
 
     def _init_models(self, objects):
         """
@@ -783,16 +810,26 @@ class _Deblender(object):
                     if ep['band'] != band:
                         continue
                     fac = ep['weight'] * ep['detAtinv']
-                    alpha, beta = get_phase_angles(
-                        ep, vi - ep['vcen'], ui - ep['ucen'],
-                    )
-                    admom_ksums(
-                        ep['kim'], ep['iy'], ep['ix'], ep['dim'],
-                        alpha, beta, ep['kv'], ep['ku'],
-                        Sw[0, 0], Sw[0, 1], Sw[1, 1], ep['df2'],
-                        self.esums,
-                    )
-                    bvec[i] += fac * self.esums[5]
+                    if self._measured_init_sums5 is not None:
+                        # device-prep path: the measured sums were
+                        # computed on the gpu (one epoch per band
+                        # by construction there)
+                        bvec[i] += fac * (
+                            self._measured_init_sums5[i, band]
+                        )
+                    else:
+                        alpha, beta = get_phase_angles(
+                            ep, vi - ep['vcen'], ui - ep['ucen'],
+                        )
+                        admom_ksums(
+                            ep['kim'], ep['iy'], ep['ix'],
+                            ep['dim'],
+                            alpha, beta, ep['kv'], ep['ku'],
+                            Sw[0, 0], Sw[0, 1], Sw[1, 1],
+                            ep['df2'],
+                            self.esums,
+                        )
+                        bvec[i] += fac * self.esums[5]
                     for p, fm in zip(self.fpositions, self.fmodels):
                         bvec[i] -= fac * model_ksums(
                             fm, band, p[0] - vi, p[1] - ui,

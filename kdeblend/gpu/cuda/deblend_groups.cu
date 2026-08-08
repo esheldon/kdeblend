@@ -142,7 +142,7 @@ extern "C" __global__ void deblend_groups(
 
             mode_sum_partials(P, sh, tid, nt,
                               kim, iy, ix, kv, ku,
-                              w00, w01, w11);
+                              w00, w01, w11, P.m0, P.m0);
             __syncthreads();
             block_reduce6(sh, tid, nt);
 
@@ -201,7 +201,7 @@ extern "C" __global__ void deblend_groups(
         // moment-sum reduction at the final state
         mode_sum_partials(P, sh, tid, nt,
                           kim, iy, ix, kv, ku,
-                          w00, w01, w11);
+                          w00, w01, w11, P.m0, P.m0);
         __syncthreads();
         block_reduce6(sh, tid, nt);
 

@@ -70,6 +70,7 @@ _CUDA_FILES = (
     'sweep.cuh',
     'measure.cuh',
     'deblend_groups.cu',
+    'init_sums.cu',
 )
 
 
@@ -109,25 +110,34 @@ def _prologue(nt):
     ])
 
 
-_KERNELS = {}
+_MODULES = {}
 
 
-def get_kernel(fp32=False, nt=NT):
+def _get_module(fp32, nt):
     nt = int(nt)
     assert nt >= 2 and (nt & (nt - 1)) == 0, 'nt must be power of 2'
     key = (bool(fp32), nt)
-    if key not in _KERNELS:
+    if key not in _MODULES:
         src = _prologue(nt) + _load_cuda_source()
         opts = ('-DMODE_FP32',) if key[0] else ()
-        _KERNELS[key] = cp.RawKernel(
-            src, 'deblend_groups', options=opts,
-        )
-    return _KERNELS[key]
+        _MODULES[key] = cp.RawModule(code=src, options=opts)
+    return _MODULES[key]
 
 
-def pack_host(debs):
-    """pack constructed _Deblender instances into host numpy arrays
-    (npz-serializable; convert with to_gpu, or use pack_groups)"""
+def get_kernel(fp32=False, nt=NT):
+    return _get_module(fp32, nt).get_function('deblend_groups')
+
+
+def get_init_sums_kernel(nt=NT):
+    """the fp64 per-(group, object) measured-sums kernel used by
+    the device-prep flux initialization (see gpu/prep.py)"""
+    return _get_module(False, nt).get_function('init_sums')
+
+
+def _pack_host_impl(debs, with_modes=True):
+    """pack constructed _Deblender instances into host numpy
+    arrays; with_modes=False skips the mode fields (and moff) for
+    deblenders whose mode arrays are device-resident"""
     ng = len(debs)
     per = {k: [] for k in
            ['nobj', 'dim', 'df2', 'drow', 'dcol', 'jac', 'wt',
@@ -171,13 +181,14 @@ def pack_host(debs):
         per['recenter'].append(1 if deb.recenter else 0)
         per['censig0'].append(deb.cen_sigma0)
 
-        modes['kim'].append(ep['kim'])
-        modes['iy'].append(ep['iy'].astype(np.int32))
-        modes['ix'].append(ep['ix'].astype(np.int32))
-        modes['kv'].append(ep['kv'])
-        modes['ku'].append(ep['ku'])
-        modes['ef2'].append(ep['err_fac2'])
-        moff.append(moff[-1] + ep['kim'].size)
+        if with_modes:
+            modes['kim'].append(ep['kim'])
+            modes['iy'].append(ep['iy'].astype(np.int32))
+            modes['ix'].append(ep['ix'].astype(np.int32))
+            modes['kv'].append(ep['kv'])
+            modes['ku'].append(ep['ku'])
+            modes['ef2'].append(ep['err_fac2'])
+            moff.append(moff[-1] + ep['kim'].size)
 
         # fixed models: pre-expanded comps under any weight
         from ngmix.prepsfadmom.models import model_comps
@@ -216,15 +227,8 @@ def pack_host(debs):
     def hn(x, dt):
         return np.asarray(x, dtype=dt)
 
-    return dict(
+    out = dict(
         ng=np.int64(ng),
-        kim=hn(np.concatenate(modes['kim']), np.complex128),
-        iy=hn(np.concatenate(modes['iy']), np.int32),
-        ix=hn(np.concatenate(modes['ix']), np.int32),
-        kv=hn(np.concatenate(modes['kv']), np.float64),
-        ku=hn(np.concatenate(modes['ku']), np.float64),
-        ef2=hn(np.concatenate(modes['ef2']), np.float64),
-        moff=hn(moff, np.int64),
         fcomp=hn(np.array(fixed, dtype=np.float64).reshape(-1, 6)
                  if fixed else np.zeros((0, 6)), np.float64),
         foff=hn(foff, np.int64),
@@ -259,6 +263,17 @@ def pack_host(debs):
         ooff=hn(ooff, np.int64),
         soff=hn(soff, np.int64),
     )
+    if with_modes:
+        out.update(
+            kim=hn(np.concatenate(modes['kim']), np.complex128),
+            iy=hn(np.concatenate(modes['iy']), np.int32),
+            ix=hn(np.concatenate(modes['ix']), np.int32),
+            kv=hn(np.concatenate(modes['kv']), np.float64),
+            ku=hn(np.concatenate(modes['ku']), np.float64),
+            ef2=hn(np.concatenate(modes['ef2']), np.float64),
+            moff=hn(moff, np.int64),
+        )
+    return out
 
 
 MODE_FIELDS = ('kim', 'kv', 'ku', 'ef2', 'iy', 'ix')
@@ -321,6 +336,43 @@ def to_gpu_multi(small_h, mode_list, fp32=False):
         off += n
     for k, v in small_h.items():
         if k == 'ng':
+            continue
+        packed[k] = cp.asarray(v)
+    _alloc_scratch(packed, int(small_h['soff'][-1]), ng,
+                   int(small_h['ooff'][-1]))
+    return packed
+
+
+def pack_host_small(debs):
+    """pack_host minus the mode fields, for deblenders whose mode
+    arrays are device-resident (device-prep stub epochs: ep['kim']
+    et al are None).  moff is omitted too — the batch assembler
+    derives it from the resident slabs"""
+    return _pack_host_impl(debs, with_modes=False)
+
+
+def pack_host(debs):
+    """pack constructed _Deblender instances into host numpy arrays
+    (npz-serializable; convert with to_gpu, or use pack_groups)"""
+    return _pack_host_impl(debs, with_modes=True)
+
+
+def to_gpu_device_modes(small_h, mode_dev, moff, fp32=False):
+    """assemble a batch whose mode fields are already device
+    arrays (the device-prep resident path): small_h is a
+    pack_host_small (merged) pack, mode_dev the assembled device
+    mode dict (kdeblend.gpu.prep.assemble_mode_fields), moff the
+    host int64 group offsets matching it"""
+    dts = _mode_dtypes(fp32)
+    ng = int(small_h['ng'])
+    packed = {'ng': ng, 'fp32': fp32}
+    for k, dt in dts.items():
+        arr = mode_dev[k]
+        assert arr.dtype == dt, (k, arr.dtype, dt)
+        packed[k] = arr
+    packed['moff'] = cp.asarray(np.asarray(moff, dtype=np.int64))
+    for k, v in small_h.items():
+        if k in ('ng', 'moff'):
             continue
         packed[k] = cp.asarray(v)
     _alloc_scratch(packed, int(small_h['soff'][-1]), ng,
