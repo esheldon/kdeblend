@@ -65,6 +65,28 @@ NT = 256
 DIM_MAX = 1536
 DIM_MAX_FP64 = 1024
 
+# compile tiers for DIM_MAX_H: the phasor tables are STATIC
+# shared memory sized by the compiled DIM_MAX, and occupancy
+# (blocks/SM) falls as it grows — measured as a ~2x wall on
+# dense uniform-depth batches when everything compiled at 1536.
+# Each launch picks the smallest tier covering its batch, so
+# normal batches keep the small-table occupancy and only deep
+# solo launches pay for big phasors.
+DIM_TIERS = (512, 1024, 1536)
+
+
+def _tier_for(dmax, fp32):
+    lim = DIM_MAX if fp32 else DIM_MAX_FP64
+    if dmax > lim:
+        raise ValueError(
+            f'dim {dmax} exceeds the '
+            f'{"fp32" if fp32 else "fp64"} kernel scope {lim}'
+        )
+    for t in DIM_TIERS:
+        if t >= dmax:
+            return t
+    raise AssertionError(dmax)
+
 _CUDA_DIR = os.path.join(os.path.dirname(__file__), 'cuda')
 
 # concatenation order: this IS the include graph (the #include
@@ -102,14 +124,13 @@ def _load_cuda_source():
     return '\n'.join(parts)
 
 
-def _prologue(nt, fp32):
+def _prologue(nt, dim_tier):
     """the compile-time configuration and python-derived constant
     tables, as preprocessor defines prepended to the source"""
-    dim_max = DIM_MAX if fp32 else DIM_MAX_FP64
     return '\n'.join([
         f'#define NTHREADS_H {nt}',
         f'#define NEXPC_H {NEXPC}',
-        f'#define DIM_MAX_H {dim_max}',
+        f'#define DIM_MAX_H {dim_tier}',
         f'#define GMAX_H {GMAX}',
         f'#define EXPVALS_H {_EXPVALS}',
         f'#define EXPVALSF_H {_EXPVALSF}',
@@ -122,25 +143,34 @@ def _prologue(nt, fp32):
 _MODULES = {}
 
 
-def _get_module(fp32, nt):
+def _get_module(fp32, nt, dim_tier):
     nt = int(nt)
     assert nt >= 2 and (nt & (nt - 1)) == 0, 'nt must be power of 2'
-    key = (bool(fp32), nt)
+    key = (bool(fp32), nt, int(dim_tier))
     if key not in _MODULES:
-        src = _prologue(nt, key[0]) + _load_cuda_source()
+        src = _prologue(nt, key[2]) + _load_cuda_source()
         opts = ('-DMODE_FP32',) if key[0] else ()
         _MODULES[key] = cp.RawModule(code=src, options=opts)
     return _MODULES[key]
 
 
-def get_kernel(fp32=False, nt=NT):
-    return _get_module(fp32, nt).get_function('deblend_groups')
+def get_kernel(fp32=False, nt=NT, dim_max=None):
+    """the deblend kernel compiled at the smallest tier covering
+    dim_max (default: the smallest tier — the common case, also
+    what warmup should compile)"""
+    tier = _tier_for(int(dim_max), fp32) if dim_max is not None \
+        else DIM_TIERS[0]
+    return _get_module(fp32, nt, tier).get_function(
+        'deblend_groups')
 
 
-def get_init_sums_kernel(nt=NT):
+def get_init_sums_kernel(nt=NT, dim_max=None):
     """the fp64 per-(group, object) measured-sums kernel used by
     the device-prep flux initialization (see gpu/prep.py)"""
-    return _get_module(False, nt).get_function('init_sums')
+    tier = _tier_for(int(dim_max), False) if dim_max is not None \
+        else DIM_TIERS[0]
+    return _get_module(False, nt, tier).get_function(
+        'init_sums')
 
 
 def _pack_host_impl(debs, with_modes=True):
@@ -312,21 +342,17 @@ def _check_dims(h, fp32):
     """the fp64 module (and init_sums) compiles with the smaller
     DIM_MAX_FP64 phasor tables; reject over-scope dims up front
     rather than corrupting shared memory"""
-    lim = DIM_MAX if fp32 else DIM_MAX_FP64
     dmax = int(np.max(h['dim']))
-    if dmax > lim:
-        raise ValueError(
-            f'dim {dmax} exceeds the '
-            f'{"fp32" if fp32 else "fp64"} kernel scope {lim}'
-        )
+    _tier_for(dmax, fp32)
+    return dmax
 
 
 def to_gpu(h, fp32=False):
     """host pack -> device arrays + scratch/output allocations"""
-    _check_dims(h, fp32)
+    dmax = _check_dims(h, fp32)
     dts = _mode_dtypes(fp32)
     ng = int(h['ng'])
-    packed = {'ng': ng, 'fp32': fp32}
+    packed = {'ng': ng, 'fp32': fp32, 'dimmax': dmax}
     for k, v in h.items():
         if k == 'ng':
             continue
@@ -344,10 +370,10 @@ def to_gpu_multi(small_h, mode_list, fp32=False):
     list of per-submission mode-array dicts: the mode fields (the
     bulk of the bytes) are copied per submission straight into
     device slabs, no host merge"""
-    _check_dims(small_h, fp32)
+    dmax = _check_dims(small_h, fp32)
     dts = _mode_dtypes(fp32)
     ng = int(small_h['ng'])
-    packed = {'ng': ng, 'fp32': fp32}
+    packed = {'ng': ng, 'fp32': fp32, 'dimmax': dmax}
     nms = [int(m['kim'].size) for m in mode_list]
     nm_tot = sum(nms)
     for k, dt in dts.items():
@@ -387,10 +413,10 @@ def to_gpu_device_modes(small_h, mode_dev, moff, fp32=False):
     pack_host_small (merged) pack, mode_dev the assembled device
     mode dict (kdeblend.gpu.prep.assemble_mode_fields), moff the
     host int64 group offsets matching it"""
-    _check_dims(small_h, fp32)
+    dmax = _check_dims(small_h, fp32)
     dts = _mode_dtypes(fp32)
     ng = int(small_h['ng'])
-    packed = {'ng': ng, 'fp32': fp32}
+    packed = {'ng': ng, 'fp32': fp32, 'dimmax': dmax}
     for k, dt in dts.items():
         arr = mode_dev[k]
         assert arr.dtype == dt, (k, arr.dtype, dt)
@@ -410,11 +436,8 @@ def pack_groups(debs, fp32=False):
     return to_gpu(pack_host(debs), fp32=fp32)
 
 
-def launch_gpu(packed, nt=NT):
-    """launch the kernel and synchronize; no output fetch"""
-    kern = get_kernel(fp32=packed.get('fp32', False), nt=nt)
-    p = packed
-    args = (
+def _kernel_args(p):
+    return (
         p['kim'], p['iy'], p['ix'], p['kv'], p['ku'], p['ef2'],
         p['moff'], p['fcomp'], p['foff'],
         p['nobj'], p['dim'], p['df2'], p['drow'], p['dcol'],
@@ -428,8 +451,39 @@ def launch_gpu(packed, nt=NT):
         p['soff'], p['objsums'], p['objcov'],
         p['numiter'], p['converged'], p['nskip'], p['err'],
     )
-    kern((p['ng'],), (int(nt),), args)
-    cp.cuda.Device().synchronize()
+
+
+def launch_gpu(packed, nt=NT):
+    """launch the kernel and synchronize the CURRENT STREAM; no
+    output fetch.  Stream-scoped deliberately: a device-wide
+    synchronize would also wait on concurrent async-lane kernels
+    (deep solo groups run 10+ s on their own stream), spreading
+    their duration onto every batch launched beside them"""
+    kern = get_kernel(fp32=packed.get('fp32', False), nt=nt,
+                      dim_max=packed.get('dimmax'))
+    kern((packed['ng'],), (int(nt),), _kernel_args(packed))
+    cp.cuda.get_current_stream().synchronize()
+
+
+def launch_gpu_async(packed, nt=NT, stream=None):
+    """launch WITHOUT synchronizing, on `stream` (default: the
+    current stream), and return a cupy Event recorded after the
+    kernel: poll event.done and then fetch_out.  For deep solo
+    batches that must not stall the caller's serial loop —
+    NOTE the packed arrays must have been uploaded on the same
+    stream (stream-ordered) or be already valid."""
+    kern = get_kernel(fp32=packed.get('fp32', False), nt=nt,
+                      dim_max=packed.get('dimmax'))
+    ev = cp.cuda.Event()
+    if stream is not None:
+        with stream:
+            kern((packed['ng'],), (int(nt),),
+                 _kernel_args(packed))
+            ev.record(stream)
+    else:
+        kern((packed['ng'],), (int(nt),), _kernel_args(packed))
+        ev.record()
+    return ev
 
 
 def fetch_out(packed):

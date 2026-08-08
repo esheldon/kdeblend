@@ -26,7 +26,7 @@ writeback / install_sum_overrides / result_from_state trio.
 from ._core import (
     get_kernel, get_init_sums_kernel, pack_host, pack_host_small,
     pack_groups, to_gpu, to_gpu_multi, to_gpu_device_modes,
-    launch_gpu, fetch_out, run_gpu, MODE_FIELDS, TYPECODE,
+    launch_gpu, launch_gpu_async, fetch_out, run_gpu, MODE_FIELDS, TYPECODE,
     TYPENAME, GMAX, DIM_MAX, DIM_MAX_FP64, NT,
 )
 from .fit import (

@@ -270,7 +270,10 @@ def prep_groups(reqs, geom_cache, nt=NT,
     sw = np.concatenate(sw).reshape(npair, 3)
 
     esums_d = cp.zeros(max(npair, 1) * 6, dtype=cp.float64)
-    kern = get_init_sums_kernel(nt=nt)
+    kern = get_init_sums_kernel(
+        nt=nt,
+        dim_max=max(r["target_dim"] for r in reqs),
+    )
     if npair:
         kern((npair,), (int(nt),), (
         kim_cat, cp.asarray(moff),
