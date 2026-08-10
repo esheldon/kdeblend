@@ -432,6 +432,55 @@ def test_full_errors_chain_vs_fd(recenter):
         )
 
 
+def test_full_errors_apodized_pair_mc():
+    """monte carlo calibration of the full errors with the
+    production apodization (ap_rad=1.5): the influence kernels
+    carry the mask in pixel space, so a close pair's flux and T
+    pulls must stay calibrated.  Guards the masked-transfer path
+    end to end through the joint chain"""
+    offsets = [(-0.625, 0.0), (0.625, 0.0)]
+    ntrial = 150
+    F = np.zeros((ntrial, 2))
+    Fe = np.zeros((ntrial, 2))
+    T = np.zeros((ntrial, 2))
+    Te = np.zeros((ntrial, 2))
+    ngood = 0
+    for k in range(ntrial):
+        rng = np.random.RandomState(9000 + k * 17)
+        mbobs = make_mbobs(rng, offsets)
+        res = run_deblend(
+            mbobs, offsets, full_errors=True, ap_rad=1.5,
+        )
+        if not res['converged'] or not res['full_errors']:
+            continue
+        ok = True
+        for i in range(2):
+            robj = res['objects'][i]
+            if (
+                robj['deblend_flags'] != 0
+                or not np.isfinite(robj['T_err'])
+                or not np.all(np.isfinite(robj['flux_err']))
+            ):
+                ok = False
+        if not ok:
+            continue
+        for i in range(2):
+            robj = res['objects'][i]
+            F[ngood, i] = robj['flux'][0]
+            Fe[ngood, i] = robj['flux_err'][0]
+            T[ngood, i] = robj['T']
+            Te[ngood, i] = robj['T_err']
+        ngood += 1
+    assert ngood > 0.9 * ntrial
+    F, Fe = F[:ngood], Fe[:ngood]
+    T, Te = T[:ngood], Te[:ngood]
+    for i in range(2):
+        rF = F[:, i].std() / np.sqrt(np.mean(Fe[:, i] ** 2))
+        rT = T[:, i].std() / np.sqrt(np.mean(Te[:, i] ** 2))
+        assert 0.85 < rF < 1.15, (i, rF)
+        assert 0.8 < rT < 1.2, (i, rT)
+
+
 def test_full_errors_gauss_mc():
     """monte carlo calibration of the gauss-estimator entries on
     a single exp object: for a gaussian-weight estimator every

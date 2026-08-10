@@ -181,12 +181,6 @@ def build_deblender(
     mbobs = get_mb_obs(obs)
     nband = len(mbobs)
 
-    if full_errors and ap_rad != 0:
-        raise ValueError(
-            'full_errors requires ap_rad=0: the influence-kernel '
-            'transfer assumes no apodization'
-        )
-
     fwhm_smooth, Tsmooth = _get_smoothing(
         mbobs, fwhm_smooth, smooth_fac, rng,
     )
@@ -383,8 +377,9 @@ def deblend(
         avoid the model-consistency substitution of the
         per-object sandwich, which under-predicts T errors by
         ~12 percent under model mismatch (real morphologies fit
-        with exp).  See full_errors.  Requires ap_rad=0.
-        Default False
+        with exp).  See full_errors; apodization is
+        handled exactly (the mask enters the influence
+        kernels in pixel space).  Default False
     anchor_sigma: float or array, optional
         With full_errors and recentering, the noise of the
         anchor (detection) positions: a scalar sigma in arcsec,

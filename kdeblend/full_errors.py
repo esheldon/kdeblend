@@ -34,8 +34,9 @@ across isolation bins where the per-object path misses by up to
 exp: per-object T_err low by 14 percent, full errors 0.95).
 
 Only objects of type gauss/exp/dev are treated (stars and bdf
-fall back to the per-object errors), and only the ap_rad=0 prep
-(no apodization) supports the influence-kernel transfer.
+fall back to the per-object errors).  Apodized preps are
+handled exactly: the mask enters the influence kernels as a
+pixel-space factor (see ngmix influence_kernels).
 """
 import numpy as np
 
