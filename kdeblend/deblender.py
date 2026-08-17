@@ -408,8 +408,12 @@ def deblend(
             bands), flux_cov (the (nband, nband) cross-band flux
             covariance from the shared family response, what
             honest color errors need; None on the star, bdf-joint
-            and fallback paths), s2n (the flux s/n combined over
-            bands in quadrature), cen, cen_pull.  Also gauss_T, gauss_e1,
+            and fallback paths), s2n (the total flux s/n: the
+            covariance-aware sqrt(F^T C^-1 F) where the
+            cross-band covariance is available, else the
+            independent-band quadrature sum, which those paths'
+            diagonal structure makes exact for stars), cen,
+            cen_pull.  Also gauss_T, gauss_e1,
             gauss_e2 with errors and gauss_e_flags: the
             gauss-estimator shapes from the converged weight, which
             is the adaptive-moments fixed point on the
@@ -1996,12 +2000,11 @@ class _Deblender(object):
 
         sums_i, fs, ws, _, _ = self._get_object_sums(i)
         fvar_raw, fmcov, covj = self._accumulate_error_sums(i)
-        fvar, fam_cov, fcov_raw, gfvar, gfam_cov, fd_var_tot = (
-            self._run_sandwiches(
-                i, sums_i, covj, fs, fvar_raw, fmcov,
-            )
+        (fvar, fam_cov, fcov_raw, gfvar, gfam_cov, gfcov_raw,
+         fd_var_tot) = self._run_sandwiches(
+            i, sums_i, covj, fs, fvar_raw, fmcov,
         )
-        flux_err, s2n = _flux_errors(m['F'], fs, fvar)
+        flux_err, s2n = _flux_errors(m['F'], fs, fvar, fcov=fcov_raw)
 
         res = {
             'type': m['type'],
@@ -2014,7 +2017,9 @@ class _Deblender(object):
             'cen_pull': self.cen_pull[i],
         }
         self._set_shape(res, i, fam_cov)
-        self._set_gauss_entries(res, i, fs, ws, gfvar, gfam_cov)
+        self._set_gauss_entries(
+            res, i, fs, ws, gfvar, gfam_cov, gfcov_raw,
+        )
 
         if m['type'] == 'bdf':
             res['fracdev'] = m['fracdev']
@@ -2098,10 +2103,11 @@ class _Deblender(object):
 
         Returns
         -------
-        fvar, fam_cov, fcov_raw, gfvar, gfam_cov, fd_var_tot;
-        fcov_raw is the full cross-band covariance of the flux
-        sums from the shared family response (None on the star,
-        bdf-joint and fallback paths)
+        fvar, fam_cov, fcov_raw, gfvar, gfam_cov, gfcov_raw,
+        fd_var_tot; fcov_raw is the full cross-band covariance of
+        the flux sums from the shared family response (None on
+        the star, bdf-joint and fallback paths) and gfcov_raw the
+        gauss-estimator analog
         """
         m = self.models[i]
 
@@ -2110,6 +2116,7 @@ class _Deblender(object):
         fcov_raw = None
         gfvar = None
         gfam_cov = None
+        gfcov_raw = None
         fd_var_tot = None
         if m['type'] != 'star' and sums_i[5] > 0:
             if m['type'] == 'gauss':
@@ -2152,10 +2159,11 @@ class _Deblender(object):
                 # the sandwiches coincide
                 gfvar = fvar
                 gfam_cov = fam_cov
+                gfcov_raw = fcov_raw
             else:
                 # gauss-estimator errors under the same weight, for
                 # the low-noise shape entries
-                gfvar, gfam_cov, _ = model_sandwich(
+                gfvar, gfam_cov, gfcov_raw = model_sandwich(
                     'gauss', self.Sw[i] - self.smooth_cov,
                     self.Sw[i], self.Tsmooth,
                     sums_i, covj, fs, fvar_raw, fmcov,
@@ -2163,7 +2171,9 @@ class _Deblender(object):
                 if gfvar is None:
                     gfvar = fvar_raw
                     gfam_cov = None
-        return fvar, fam_cov, fcov_raw, gfvar, gfam_cov, fd_var_tot
+                    gfcov_raw = None
+        return (fvar, fam_cov, fcov_raw, gfvar, gfam_cov,
+                gfcov_raw, fd_var_tot)
 
     def _set_shape(self, res, i, fam_cov):
         """
@@ -2209,7 +2219,8 @@ class _Deblender(object):
             # otherwise defined
             res['e_flags'] |= ngmix.flags.NONPOS_SHAPE_VAR
 
-    def _set_gauss_entries(self, res, i, fs, ws, gfvar, gfam_cov):
+    def _set_gauss_entries(self, res, i, fs, ws, gfvar, gfam_cov,
+                           gfcov_raw):
         """
         gauss-estimator entries from the converged weight.  The
         weight iteration is exactly the adaptive-moments gauss fixed
@@ -2262,7 +2273,7 @@ class _Deblender(object):
             Fg = fs / ws * 4 * np.pi * np.sqrt(det2(self.Sw[i]))
             res['gauss_flux'] = Fg
             res['gauss_flux_err'], res['gauss_s2n'] = _flux_errors(
-                Fg, fs, gfvar,
+                Fg, fs, gfvar, fcov=gfcov_raw,
             )
 
 
@@ -2356,11 +2367,39 @@ def _flux_cov_phys(F, fs, fcov_raw):
     return np.outer(scale, scale) * fcov_raw
 
 
-def _flux_errors(F, fs, fvar):
+def _joint_s2n(fs, fcov):
+    """
+    the covariance-aware total flux s/n sqrt(fs^T C^-1 fs) from
+    the flux sums and their cross-band covariance (the Wald
+    significance of the flux vector).  The statistic is invariant
+    to per-band rescaling, so the raw sums with the raw
+    covariance equal the physical fluxes with the physical
+    covariance.  Returns None when the covariance is not positive
+    definite or the form is not finite; the caller falls back to
+    the independent-band quadrature sum
+    """
+    try:
+        L = np.linalg.cholesky(fcov)
+    except np.linalg.LinAlgError:
+        return None
+    z = np.linalg.solve(L, fs)
+    q = z @ z
+    if not np.isfinite(q):
+        return None
+    return np.sqrt(q)
+
+
+def _flux_errors(F, fs, fvar, fcov=None):
     """
     per-band flux errors and the combined flux s/n from the flux
     sums and their variances.  Bands with no positive variance or a
-    zero flux sum are nan, and the s/n is nan when no band is usable
+    zero flux sum are nan, and the s/n is nan when no band is
+    usable.  With fcov (the cross-band covariance of the flux
+    sums) the total s/n is the joint value sqrt(fs^T C^-1 fs)
+    over the usable bands, pricing the positive cross-band
+    correlations from the shared family response; without it, or
+    when the covariance is not positive definite, the
+    independent-band quadrature sum is used
     """
     flux_err = np.full(F.size, np.nan)
     wgood = (fvar > 0) & (fs != 0)
@@ -2368,9 +2407,15 @@ def _flux_errors(F, fs, fvar):
         F[wgood] / fs[wgood],
     ) * np.sqrt(fvar[wgood])
     if np.any(wgood):
-        s2n = np.sqrt(
-            np.sum(fs[wgood] ** 2 / fvar[wgood]),
-        )
+        s2n = None
+        if fcov is not None:
+            s2n = _joint_s2n(
+                fs[wgood], fcov[np.ix_(wgood, wgood)],
+            )
+        if s2n is None:
+            s2n = np.sqrt(
+                np.sum(fs[wgood] ** 2 / fvar[wgood]),
+            )
     else:
         s2n = np.nan
     return flux_err, s2n

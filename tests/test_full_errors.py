@@ -515,3 +515,38 @@ def test_full_errors_gauss_mc():
     rF = gF[:ngood].std() / np.sqrt(np.mean(gFe[:ngood] ** 2))
     assert 0.8 < rT < 1.2, rT
     assert 0.85 < rF < 1.15, rF
+
+
+def test_covariance_aware_s2n():
+    """
+    the total flux s/n is the joint (Wald) value wherever the
+    cross-band flux covariance is available: on both the
+    per-object and full-errors paths s2n satisfies
+    s2n = sqrt(F^T C^-1 F) with the reported flux_cov, and the
+    positive cross-band correlation from the shared family
+    response puts it below the independent-band quadrature sum.
+    On the full-errors path the gauss entries satisfy the same
+    identity with gauss_flux_cov
+    """
+    rng = np.random.RandomState(31)
+    offsets = [(-0.625, 0.0), (0.625, 0.0)]
+    mbobs = make_mbobs(rng, offsets)
+
+    for kw in ({}, {'full_errors': True}):
+        res = run_deblend(mbobs, offsets, **kw)
+        assert res['converged']
+        for robj in res['objects']:
+            C = robj['flux_cov']
+            assert C is not None
+            assert C[0, 1] > 0
+            F = robj['flux']
+            expected = np.sqrt(F @ np.linalg.solve(C, F))
+            assert np.allclose(robj['s2n'], expected)
+            quad = np.sqrt(np.sum((F / robj['flux_err']) ** 2))
+            assert robj['s2n'] < quad
+
+            gC = robj.get('gauss_flux_cov')
+            if gC is not None:
+                gF = robj['gauss_flux']
+                gexp = np.sqrt(gF @ np.linalg.solve(gC, gF))
+                assert np.allclose(robj['gauss_s2n'], gexp)

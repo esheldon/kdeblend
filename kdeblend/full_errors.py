@@ -83,7 +83,10 @@ def apply_full_errors(deb, mbobs, res, anchor_sigma=0.0):
     res: dict
         The deblend result, modified in place: each object gains
         flux_cov (nband, nband) and has flux_err, s2n, T_err,
-        e1_err and e2_err replaced.  The gauss-estimator entries
+        e1_err and e2_err replaced; s2n is the covariance-aware
+        joint value sqrt(F^T C^-1 F) over the usable bands
+        (quadrature fallback for a non positive definite
+        block).  The gauss-estimator entries
         are replaced too: gauss_T_err, gauss_e1_err and
         gauss_e2_err from the weight (Sw) rows of the state
         covariance, and gauss_flux, gauss_flux_err, gauss_s2n
@@ -125,7 +128,7 @@ def apply_full_errors(deb, mbobs, res, anchor_sigma=0.0):
         deb, mbobs, anchor_sigma=anchor_sigma,
     )
 
-    from .deblender import _shape_errors
+    from .deblender import _shape_errors, _joint_s2n
 
     # the packed family-covariance components map to the
     # (M1, M2, T) basis of the reported structure errors as
@@ -148,9 +151,16 @@ def apply_full_errors(deb, mbobs, res, anchor_sigma=0.0):
         robj['flux_err'] = flux_err
         wgood = var > 0
         if np.any(wgood):
-            robj['s2n'] = np.sqrt(np.sum(
-                robj['flux'][wgood] ** 2 / var[wgood],
-            ))
+            # covariance-aware total s/n; the quadrature sum is
+            # the fallback for a non positive definite block
+            s2n = _joint_s2n(
+                robj['flux'][wgood], fcov[np.ix_(wgood, wgood)],
+            )
+            if s2n is None:
+                s2n = np.sqrt(np.sum(
+                    robj['flux'][wgood] ** 2 / var[wgood],
+                ))
+            robj['s2n'] = s2n
 
         # structure errors from the family-covariance block;
         # replaced only when the full values are usable, so a
@@ -201,9 +211,14 @@ def apply_full_errors(deb, mbobs, res, anchor_sigma=0.0):
             )
             wg = gvar > 0
             if np.any(wg):
-                robj['gauss_s2n'] = np.sqrt(np.sum(
-                    gF[wg] ** 2 / gvar[wg],
-                ))
+                gs2n = _joint_s2n(
+                    gF[wg], gfc[np.ix_(wg, wg)],
+                )
+                if gs2n is None:
+                    gs2n = np.sqrt(np.sum(
+                        gF[wg] ** 2 / gvar[wg],
+                    ))
+                robj['gauss_s2n'] = gs2n
     return True
 
 
