@@ -240,9 +240,7 @@ def test_bigdim_fp32_scope():
     the fp32 kernel: host-pack fp32 fit matches the CPU fitter at
     the class level; the fp64 upload path refuses it"""
     from kdeblend.gpu import (
-        _core, DIM_MAX, DIM_MAX_FP64, pack_host, to_gpu,
-        fit_groups, writeback, install_sum_overrides,
-        result_from_state,
+        DIM_MAX, DIM_MAX_FP64, pack_host, to_gpu, fit_groups,
     )
 
     rng = np.random.RandomState(44)
