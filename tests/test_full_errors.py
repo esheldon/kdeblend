@@ -297,9 +297,11 @@ def test_full_errors_pair(recenter):
         )
 
 
-def test_full_errors_star_fallback():
-    """a group containing a star keeps the per-object errors and
-    reports full_errors False"""
+def test_full_errors_star_member():
+    """a group containing a star applies the full errors: the
+    star row gets the flux entries (its structure entries stand)
+    and the galaxy row gets the full structure errors.  bdf
+    members still fall back"""
     rng = np.random.RandomState(31)
     offsets = [(-0.5, 0.0), (0.5, 0.0)]
     mbobs = make_mbobs(rng, offsets)
@@ -311,7 +313,16 @@ def test_full_errors_star_fallback():
         mbobs, objects, tol=1.0e-6,
         rng=np.random.RandomState(5), full_errors=True,
     )
-    assert res['full_errors'] is False
+    assert res['converged']
+    assert res['full_errors'] is True
+    rgal, rstar = res['objects']
+    assert np.all(np.isfinite(rgal['flux_err']))
+    assert np.isfinite(rgal['T_err'])
+    assert np.all(np.isfinite(rstar['flux_err']))
+    assert rstar['flux_cov'] is not None
+    assert np.isfinite(rstar['s2n'])
+    assert rstar['T'] == 0.0
+    assert not np.isfinite(rstar['T_err'])
 
 
 def test_full_errors_anchor_forms():
@@ -550,3 +561,307 @@ def test_covariance_aware_s2n():
                 gF = robj['gauss_flux']
                 gexp = np.sqrt(gF @ np.linalg.solve(gC, gF))
                 assert np.allclose(robj['gauss_s2n'], gexp)
+
+
+def make_star_mbobs(rng, offsets, fluxes=(400.0, 600.0)):
+    """point-source scene: the psf profile at each offset, per
+    band flux from the fluxes entry"""
+    mbobs = ngmix.MultiBandObsList()
+    cen = (DIM - 1) / 2
+    psf_cen = (PSF_DIM - 1) / 2
+    for band in range(NBAND):
+        psf = galsim.Gaussian(fwhm=PSF_FWHM)
+        psf_im = psf.drawImage(
+            nx=PSF_DIM, ny=PSF_DIM, scale=SCALE,
+        ).array
+        psf_obs = ngmix.Observation(
+            psf_im.copy(),
+            weight=np.ones_like(psf_im) * 1.0e12,
+            jacobian=ngmix.DiagonalJacobian(
+                scale=SCALE, row=psf_cen, col=psf_cen,
+            ),
+        )
+        im = np.zeros((DIM, DIM))
+        for du, dv in offsets:
+            obj = psf.withFlux(fluxes[band])
+            im += obj.drawImage(
+                nx=DIM, ny=DIM, scale=SCALE,
+                offset=(du / SCALE, dv / SCALE),
+            ).array
+        im = im + rng.normal(scale=SIGMAS[band], size=im.shape)
+        obs = ngmix.Observation(
+            im,
+            weight=np.full(im.shape, 1.0 / SIGMAS[band] ** 2),
+            jacobian=ngmix.DiagonalJacobian(
+                scale=SCALE, row=cen, col=cen,
+            ),
+            psf=psf_obs,
+        )
+        ol = ngmix.ObsList()
+        ol.append(obs)
+        mbobs.append(ol)
+    return mbobs
+
+
+def star_objects(offsets, fixcen=None):
+    return [
+        {
+            'v': dv, 'u': du, 'type': 'star',
+            'fixcen': bool(fixcen[k]) if fixcen is not None
+            else False,
+        }
+        for k, (du, dv) in enumerate(offsets)
+    ]
+
+
+def test_full_errors_star_single():
+    """m=1 star anchor: with a frozen weight and no neighbors the
+    per-object flux errors are exact, so the full errors must
+    reproduce them; the cross-band covariance is diagonal (the
+    bands share no state)"""
+    rng = np.random.RandomState(41)
+    offsets = [(0.0, 0.0)]
+    mbobs = make_star_mbobs(rng, offsets)
+
+    res = deblend(
+        mbobs, star_objects(offsets), tol=1.0e-6, maxiter=2000,
+        rng=np.random.RandomState(5),
+    )
+    resg = deblend(
+        mbobs, star_objects(offsets), tol=1.0e-6, maxiter=2000,
+        rng=np.random.RandomState(5), full_errors=True,
+    )
+    assert res['converged']
+    assert resg['converged'] and resg['full_errors']
+
+    r0 = res['objects'][0]
+    rg = resg['objects'][0]
+    assert np.all(np.isfinite(rg['flux_err']))
+    assert np.allclose(rg['flux_err'], r0['flux_err'], rtol=2e-2)
+    assert np.isfinite(rg['s2n'])
+
+    C = rg['flux_cov']
+    assert C is not None and C.shape == (NBAND, NBAND)
+    assert np.allclose(np.diag(C), rg['flux_err'] ** 2, rtol=1e-6)
+    assert abs(C[0, 1]) < 0.05 * np.sqrt(C[0, 0] * C[1, 1])
+
+    # the structure entries stand: a delta function has none
+    assert rg['T'] == 0.0
+    assert not np.isfinite(rg['T_err'])
+
+
+def test_full_errors_star_pair_mc():
+    """a blended star pair: the per-object flux errors treat the
+    neighbor subtraction as deterministic and underpredict; the
+    full errors price the shared-pixel coupling and match the
+    observed scatter, with the expected negative member-member
+    covariance"""
+    from kdeblend.deblender import (
+        _Deblender, _prep_epochs, _get_smoothing,
+    )
+    from kdeblend.full_errors import full_covariance
+
+    offsets = [(-0.25, 0.0), (0.25, 0.0)]
+    ntrial = 150
+
+    fluxes = {0: [[], []], 1: [[], []]}
+    rep_full = None
+    rep_po = None
+    rng = np.random.RandomState(3000)
+    nconv = 0
+    for trial in range(ntrial):
+        mbobs = make_star_mbobs(rng, offsets)
+        resg = deblend(
+            mbobs, star_objects(offsets), tol=1.0e-6,
+            maxiter=2000, rng=np.random.RandomState(5),
+            full_errors=True,
+        )
+        if not (resg['converged'] and resg['full_errors']):
+            continue
+        nconv += 1
+        for i in range(2):
+            for b in range(NBAND):
+                fluxes[i][b].append(
+                    resg['objects'][i]['flux'][b]
+                )
+        if rep_full is None:
+            rep_full = [
+                resg['objects'][i]['flux_err'].copy()
+                for i in range(2)
+            ]
+            res0 = deblend(
+                mbobs, star_objects(offsets), tol=1.0e-6,
+                maxiter=2000, rng=np.random.RandomState(5),
+            )
+            rep_po = [
+                res0['objects'][i]['flux_err'].copy()
+                for i in range(2)
+            ]
+    assert nconv > 0.9 * ntrial
+
+    for i in range(2):
+        for b in range(NBAND):
+            emp = np.std(fluxes[i][b])
+            assert np.abs(rep_full[i][b] / emp - 1) < 0.2, (
+                i, b, rep_full[i][b] / emp,
+            )
+            # the per-object errors underpredict for this tight
+            # pair
+            assert rep_po[i][b] < 0.95 * rep_full[i][b]
+
+    # cross-member covariance: negative (flux splitting), and
+    # matching the observed one
+    rng2 = np.random.RandomState(77)
+    mbobs = make_star_mbobs(rng2, offsets)
+    fwhm_smooth, Tsmooth = _get_smoothing(
+        mbobs, None, 1.05, np.random.RandomState(3),
+    )
+    epochs = _prep_epochs(
+        mbobs, fwhm_smooth=fwhm_smooth, ap_rad=0.0,
+        use_noise_image=False, vcen=0.0, ucen=0.0,
+        store_transfer=True,
+    )
+    deb = _Deblender(
+        [epochs] * 2, NBAND, star_objects(offsets),
+        fwhm_smooth, Tsmooth, 2000, 1.0e-6,
+    )
+    gres = deb.go()
+    assert gres['converged']
+    cov, slices, _ = full_covariance(deb, mbobs)
+    b = 0
+    ia = slices[0] + b
+    ib = slices[1] + b
+    rep_corr = cov[ia, ib] / np.sqrt(cov[ia, ia] * cov[ib, ib])
+    emp_corr = np.corrcoef(fluxes[0][b], fluxes[1][b])[0, 1]
+    assert rep_corr < -0.1
+    assert emp_corr < -0.1
+    assert np.abs(rep_corr - emp_corr) < 0.2
+
+
+def test_full_errors_star_galaxy_mc():
+    """a star blended with a galaxy: both members' full flux
+    errors match the observed scatter, and the star gains a
+    cross-band flux covariance through the galaxy's shared
+    structure response"""
+    star_off = (-0.5, 0.0)
+    gal_off = (0.5, 0.0)
+    ntrial = 150
+
+    def make_scene(rng):
+        # star scene plus a galaxy: reuse the exp machinery from
+        # make_mbobs by adding the images
+        mbobs = make_star_mbobs(rng, [star_off])
+        for band in range(NBAND):
+            obs = mbobs[band][0]
+            psf = galsim.Gaussian(fwhm=PSF_FWHM)
+            gal = galsim.Convolve(
+                galsim.Exponential(
+                    half_light_radius=HLR, flux=FLUXES[band],
+                ),
+                psf,
+            )
+            gim = gal.drawImage(
+                nx=DIM, ny=DIM, scale=SCALE,
+                offset=(gal_off[0] / SCALE, gal_off[1] / SCALE),
+            ).array
+            with obs.writeable():
+                obs.image = obs.image + gim
+        return mbobs
+
+    objects = [
+        {'v': star_off[1], 'u': star_off[0], 'type': 'star'},
+        {'v': gal_off[1], 'u': gal_off[0], 'type': 'exp',
+         'Tguess': 0.3},
+    ]
+
+    fluxes = {0: [[], []], 1: [[], []]}
+    rep_full = None
+    star_fcov = None
+    rng = np.random.RandomState(4000)
+    nconv = 0
+    for trial in range(ntrial):
+        mbobs = make_scene(rng)
+        resg = deblend(
+            mbobs, objects, tol=1.0e-6, maxiter=2000,
+            rng=np.random.RandomState(5), full_errors=True,
+        )
+        if not (resg['converged'] and resg['full_errors']):
+            continue
+        nconv += 1
+        for i in range(2):
+            for b in range(NBAND):
+                fluxes[i][b].append(
+                    resg['objects'][i]['flux'][b]
+                )
+        if rep_full is None:
+            rep_full = [
+                resg['objects'][i]['flux_err'].copy()
+                for i in range(2)
+            ]
+            star_fcov = resg['objects'][0]['flux_cov'].copy()
+    assert nconv > 0.85 * ntrial
+
+    for i in range(2):
+        for b in range(NBAND):
+            emp = np.std(fluxes[i][b])
+            assert np.abs(rep_full[i][b] / emp - 1) < 0.25, (
+                i, b, rep_full[i][b] / emp,
+            )
+
+    # the star's cross-band covariance is filled and physical
+    assert star_fcov is not None
+    rho = star_fcov[0, 1] / np.sqrt(
+        star_fcov[0, 0] * star_fcov[1, 1],
+    )
+    assert -0.9 < rho < 0.9
+    emp_rho = np.corrcoef(fluxes[0][0], fluxes[0][1])[0, 1]
+    assert np.abs(rho - emp_rho) < 0.25
+
+
+def test_full_errors_star_chain_fd_fixcen():
+    """chain vs FD equivalence on a star-bearing family with a
+    fixcen member under recentering: the fixcen center rows are
+    pinned (no singular I - J), and the two constructions agree"""
+    from kdeblend.deblender import (
+        _Deblender, _prep_epochs, _get_smoothing,
+    )
+    from kdeblend.full_errors import full_covariance
+
+    offsets = [(-0.4, 0.0), (0.4, 0.0)]
+    rng = np.random.RandomState(88)
+    mbobs = make_star_mbobs(rng, offsets)
+
+    fwhm_smooth, Tsmooth = _get_smoothing(
+        mbobs, None, 1.05, np.random.RandomState(3),
+    )
+    epochs = _prep_epochs(
+        mbobs, fwhm_smooth=fwhm_smooth, ap_rad=0.0,
+        use_noise_image=False, vcen=0.0, ucen=0.0,
+        store_transfer=True,
+    )
+    deb = _Deblender(
+        [epochs] * 2, NBAND,
+        star_objects(offsets, fixcen=[False, True]),
+        fwhm_smooth, Tsmooth, 2000, 1.0e-6,
+        recenter=True, cen_sigma0=0.1,
+    )
+    gres = deb.go()
+    assert gres['converged']
+
+    cov_c, slices, _ = full_covariance(deb, mbobs, use_chain=True)
+    cov_f, _, _ = full_covariance(deb, mbobs, use_chain=False)
+
+    assert np.all(np.isfinite(cov_c))
+    assert np.all(np.isfinite(cov_f))
+    da = np.sqrt(np.diag(cov_c))
+    db = np.sqrt(np.diag(cov_f))
+    wpos = (da > 0) & (db > 0)
+    assert np.allclose(da[wpos], db[wpos], rtol=2e-2)
+
+    # the fixcen member's center variance is pinned to zero;
+    # the free member's is positive
+    icen1 = slices[1] + NBAND
+    assert np.allclose(cov_c[icen1:icen1 + 2, icen1:icen1 + 2],
+                       0.0, atol=1e-12)
+    icen0 = slices[0] + NBAND
+    assert cov_c[icen0, icen0] > 0

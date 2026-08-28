@@ -56,7 +56,8 @@ from ngmix.moments import fwhm_to_T
 from ngmix.prepsfadmom.prep import choose_fwhm_smooth, prep_epoch
 from ngmix.prepsfadmom import get_phase_angles, deweight
 from ngmix.prepsfadmom.errors import (
-    model_sandwich, bdf_joint_sandwich, _mbasis_cov,
+    model_sandwich, bdf_joint_sandwich, joint_flux_s2n,
+    _mbasis_cov,
 )
 from ngmix.prepsfadmom.prepsfadmom_nb import admom_ksums, admom_finalize
 from ngmix.fastexp_nb import FASTEXP_MAX_CHI2
@@ -367,9 +368,15 @@ def deblend(
         update and remains exact.
     full_errors: bool, optional
         If True and the deblend converged (all members
-        gauss/exp/dev), replace the per-object flux and
+        gauss/exp/dev/star), replace the per-object flux and
         structure errors with the full (fixed-point) values and
-        fill flux_cov -- a full accounting of the errors.  For
+        fill flux_cov -- a full accounting of the errors.  Star
+        members get the flux entries only (flux_err, flux_cov,
+        s2n): a delta function has no structure errors, but its
+        fluxes gain the cross-member response through shared
+        pixels that the per-object path treats as deterministic,
+        the dominant blending term in crowded stellar fields.
+        For
         blend members this prices the neighbor-noise coupling
         the per-object sandwiches neglect (fluxes low by 10-30
         percent at 2 arcsec, T by 35 percent in tight blends);
@@ -2367,26 +2374,10 @@ def _flux_cov_phys(F, fs, fcov_raw):
     return np.outer(scale, scale) * fcov_raw
 
 
-def _joint_s2n(fs, fcov):
-    """
-    the covariance-aware total flux s/n sqrt(fs^T C^-1 fs) from
-    the flux sums and their cross-band covariance (the Wald
-    significance of the flux vector).  The statistic is invariant
-    to per-band rescaling, so the raw sums with the raw
-    covariance equal the physical fluxes with the physical
-    covariance.  Returns None when the covariance is not positive
-    definite or the form is not finite; the caller falls back to
-    the independent-band quadrature sum
-    """
-    try:
-        L = np.linalg.cholesky(fcov)
-    except np.linalg.LinAlgError:
-        return None
-    z = np.linalg.solve(L, fs)
-    q = z @ z
-    if not np.isfinite(q):
-        return None
-    return np.sqrt(q)
+# the covariance-aware total flux s/n, shared with the ngmix
+# prepsfadmom fitters; kdeblend/full_errors.py imports it from
+# here
+_joint_s2n = joint_flux_s2n
 
 
 def _flux_errors(F, fs, fvar, fcov=None):
