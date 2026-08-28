@@ -78,20 +78,34 @@ DEFAULT_TOL = 1.0e-8
 # under the smoothing alone is valid under every object's weight
 ZERO_WEIGHT = np.zeros((2, 2))
 
-# deblend_flags bits: RESTARTED marks an object whose structure was
-# restarted from the compact delta state after repeated failed
-# updates; DEBLENDED_AS_PSF marks permanent demotion to a fixed
-# point source after a restarted object failed again.
-# EXTERNALS_SUBTRACTED is set by drivers that refit a group with
-# fixed external models (the directed external subtraction scheme);
-# it is defined here so all deblend_flags bits share one registry
-DEBLENDED_AS_PSF = 2**0
-RESTARTED = 2**1
-EXTERNALS_SUBTRACTED = 2**2
+# deblend_flags bits, see flags.py (the one registry, in the
+# ngmix.flags convention).  EXTERNALS_SUBTRACTED is set by drivers
+# that refit a group with fixed external models (the directed
+# external subtraction scheme)
+from .flags import (  # noqa: E402, F401
+    DEBLENDED_AS_PSF, RESTARTED, EXTERNALS_SUBTRACTED, WEIGHT_BOUNDED,
+)
 
 # consecutive failed structure updates on one object before
 # intervening
 NFAIL_LIMIT = 10
+
+# the largest weight an object may take, as the sigma of the weight
+# in units of the smallest dimension of its stamp.  A weight of that
+# size is flat over the stamp (exp(-0.5) at the edge), so its moments
+# measure the stamp contents rather than the object; reaching it is
+# the signature of a runaway, where unmasked flux under the weight (a
+# pedestal, a neighbor's unmodeled wings) grows the measured moments
+# with the weight and the deweight step grows the weight in turn,
+# until within a few sweeps it is numerically singular.  Such a step
+# is rejected like any failed structure update: the object holds its
+# structure (the flux is still updated) and the consecutive-failure
+# containment restarts and, if needed, demotes it.  A transient
+# excursion, e.g. while a bright neighbor is still poorly modeled,
+# resumes when the corrected sums admit a bounded weight again.
+# Objects that ever hit the bound carry WEIGHT_BOUNDED in their
+# deblend_flags
+MAX_WEIGHT_SIGMA_FAC = 0.5
 
 # update the bdf flux split every this many sweeps: the split
 # varies slowly compared to the structure, so intermediate sweeps
@@ -411,7 +425,9 @@ def deblend(
             failed updates; DEBLENDED_AS_PSF when the object was
             demoted to a fixed point source, in which case type
             reports 'star' and the flux is the compact
-            matched-aperture flux), flux and flux_err (arrays over
+            matched-aperture flux; WEIGHT_BOUNDED when a weight
+            update was rejected by the stamp-size bound, see
+            MAX_WEIGHT_SIGMA_FAC), flux and flux_err (arrays over
             bands), flux_cov (the (nband, nband) cross-band flux
             covariance from the shared family response, what
             honest color errors need; None on the star, bdf-joint
@@ -587,6 +603,13 @@ def _prep_epochs(
             )
             ep['vcen'] = vcen
             ep['ucen'] = ucen
+            # the weight bound for objects measured on this stamp,
+            # in the jacobian (sky) units of the weight matrices
+            sigma_max = (
+                MAX_WEIGHT_SIGMA_FAC * min(tobs.image.shape)
+                * tobs.jacobian.scale
+            )
+            ep['Tw_max'] = 2 * sigma_max ** 2
             epochs.append(ep)
     return epochs
 
@@ -725,6 +748,15 @@ class _Deblender(object):
         self.nfail = np.zeros(self.nobj, dtype='i4')
         self.nrestart = np.zeros(self.nobj, dtype='i4')
         self.dbflags = np.zeros(self.nobj, dtype='i4')
+
+        # per-object weight bound, the tightest over its epochs (see
+        # MAX_WEIGHT_SIGMA_FAC), and the count of rejections by it;
+        # epochs prepared elsewhere without the entry are unbounded
+        self.Tw_max = np.array([
+            min(ep.get('Tw_max', np.inf) for ep in epochs)
+            for epochs in self.epochs_per_obj
+        ])
+        self.nbound = np.zeros(self.nobj, dtype='i4')
 
         if not self._defer_flux_init:
             self._init_fluxes()
@@ -1134,12 +1166,23 @@ class _Deblender(object):
         """
         the deweight update of object i's weight from the measured
         moment sums (single gaussian, all object types), or None if
-        the sums do not admit one
+        the sums do not admit one or the new weight exceeds the
+        stamp bound (a runaway, see MAX_WEIGHT_SIGMA_FAC)
         """
         if sums[5] > 0 and sums[4] > 0:
             newSw, flags = deweight(_moment_matrix(sums), self.Sw[i])
             if flags == 0:
-                return newSw
+                Tw = newSw[0, 0] + newSw[1, 1]
+                if Tw <= self.Tw_max[i]:
+                    return newSw
+                # a runaway; rejected like any failed structure
+                # update, so the object holds its structure and the
+                # consecutive-failure containment takes over.
+                # Escalating immediately instead was tried and made
+                # a bright group fail to converge without helping
+                # the wings-driven cases
+                self.nbound[i] += 1
+                self.dbflags[i] |= WEIGHT_BOUNDED
         return None
 
     def _skip_structure_update(self, i, fs, ws, fs_pred):
