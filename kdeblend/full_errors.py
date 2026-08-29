@@ -405,6 +405,14 @@ def _fd_dFdS(deb, snap, x0, caches, Ds, theta0s, slices, pers,
             for a in range(6):
                 col = (i * nep + iep) * 6 + a
                 h = dsteps[col]
+                if h == 0:
+                    # a zero-variance sum (every live pixel has a
+                    # zero influence kernel, e.g. an epoch whose
+                    # positive-weight pixels are all apodized to
+                    # zero): its covS row and column are exactly
+                    # zero, so the response column is irrelevant;
+                    # leave it zero rather than form 0/0
+                    continue
                 d = np.zeros(6)
                 d[a] = h
                 pp = _make_patched(
@@ -965,6 +973,11 @@ def _chain_pieces(deb, snap, x0, caches, Ds, theta0s, slices,
             for a in range(6):
                 col = (i * nep + iep) * 6 + a
                 h = dsteps[col]
+                if h == 0:
+                    # zero-variance sum: covS row and column are
+                    # exactly zero, so the column is irrelevant;
+                    # see the matching guard in _fd_dFdS
+                    continue
                 d = np.zeros(6)
                 d[a] = h
                 patched_p = _make_patched(

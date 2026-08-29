@@ -614,6 +614,47 @@ def star_objects(offsets, fixcen=None):
     ]
 
 
+def test_full_errors_dead_epoch():
+    """an epoch whose positive-weight pixels all lie where the
+    apodization mask is exactly zero has exactly-zero covS
+    diagonal entries; the FD-fallback steps h = DS_FAC*sqrt(diag)
+    must skip those columns rather than form 0/0, which poisoned
+    the whole blend covariance with NaN.  The dead band reports
+    flux_err = nan (the no-valid-error convention) and the live
+    band is priced normally"""
+    import warnings
+
+    rng = np.random.RandomState(41)
+    offsets = [(0.0, 0.0)]
+    mbobs = make_star_mbobs(rng, offsets)
+
+    # kill band 1 except the outermost 1-pixel frame, where the
+    # ap_rad=1.5 apodization mask is exactly zero: the
+    # observation is accepted (some weights > 0) but every
+    # influence kernel is zero on the live pixels
+    obs = mbobs[1][0]
+    with obs.writeable():
+        obs.weight[1:-1, 1:-1] = 0.0
+
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            'error', message='invalid value', category=RuntimeWarning,
+        )
+        res = deblend(
+            mbobs, star_objects(offsets), tol=1.0e-6,
+            maxiter=2000, rng=np.random.RandomState(5),
+            ap_rad=1.5, full_errors=True,
+        )
+
+    assert res['converged'] and res['full_errors']
+    robj = res['objects'][0]
+    assert np.all(np.isfinite(robj['flux_cov']))
+    assert np.isfinite(robj['flux_err'][0])
+    assert robj['flux_err'][0] > 0
+    assert np.isnan(robj['flux_err'][1])
+    assert np.isfinite(robj['s2n'])
+
+
 def test_full_errors_star_single():
     """m=1 star anchor: with a frozen weight and no neighbors the
     per-object flux errors are exact, so the full errors must
