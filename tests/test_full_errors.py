@@ -295,6 +295,20 @@ def test_full_errors_pair(recenter):
             res['objects'][i]['gauss_T_err']
             > res0['objects'][i]['gauss_T_err']
         )
+        # the flags describe the reported errors in both modes:
+        # e_flags == 0 iff the shape and its errors are usable
+        for r in (res0, res):
+            robj = r['objects'][i]
+            assert (robj['e_flags'] == 0) == (
+                np.isfinite(robj['e1'])
+                and np.isfinite(robj['e1_err'])
+                and np.isfinite(robj['e2_err'])
+            )
+            assert (robj['gauss_e_flags'] == 0) == (
+                np.isfinite(robj['gauss_e1'])
+                and np.isfinite(robj['gauss_e1_err'])
+                and np.isfinite(robj['gauss_e2_err'])
+            )
 
 
 def test_full_errors_star_member():

@@ -139,6 +139,8 @@ def apply_full_errors(deb, mbobs, res, anchor_sigma=0.0):
         deb, mbobs, anchor_sigma=anchor_sigma,
     )
 
+    from ngmix.flags import NONPOS_SHAPE_VAR
+
     from .deblender import _shape_errors, _joint_s2n
 
     # the packed family-covariance components map to the
@@ -198,6 +200,14 @@ def apply_full_errors(deb, mbobs, res, anchor_sigma=0.0):
                 if eflags == 0:
                     robj['e1_err'] = e1e
                     robj['e2_err'] = e2e
+                    # e_flags describes the reported errors:
+                    # these replace the per-object sandwich
+                    # values, so a shape-variance failure there
+                    # no longer applies.  NONPOS_SIZE cannot be
+                    # set on this branch (it requires the shape
+                    # itself usable), so this restores
+                    # e_flags == 0 iff shape and errors usable
+                    robj['e_flags'] &= ~NONPOS_SHAPE_VAR
 
         # gauss-estimator structure errors from the weight rows:
         # the gauss family is the weight minus the constant
@@ -218,6 +228,7 @@ def apply_full_errors(deb, mbobs, res, anchor_sigma=0.0):
                 if eflags == 0:
                     robj['gauss_e1_err'] = e1e
                     robj['gauss_e2_err'] = e2e
+                    robj['gauss_e_flags'] &= ~NONPOS_SHAPE_VAR
 
         gF = extras['gauss_flux'][i]
         gfc = extras['gauss_flux_cov'][i]
