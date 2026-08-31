@@ -33,9 +33,16 @@ across isolation bins where the per-object path misses by up to
 2x, and calibrated under model mismatch (dev truth fit with
 exp: per-object T_err low by 14 percent, full errors 0.95).
 
-Only objects of type gauss/exp/dev are treated (stars and bdf
-fall back to the per-object errors), and only the ap_rad=0 prep
-(no apodization) supports the influence-kernel transfer.
+Objects of type gauss/exp/dev/star are treated (bdf falls back
+to the per-object errors).  Star members take the per-object
+micro-FD fallback for their update derivatives (the analytic
+algebra covers the weight-adaptive types) and get the flux
+entries only: flux_err, flux_cov and s2n gain the cross-member
+response through shared pixels, the dominant blending term in
+crowded stellar fields, while the structure entries are not
+defined for a delta function.  Apodized preps are
+handled exactly: the mask enters the influence kernels as a
+pixel-space factor (see ngmix influence_kernels).
 """
 import numpy as np
 
@@ -47,7 +54,7 @@ from ngmix.prepsfadmom.full_errors import (
 from ngmix.prepsfadmom.prepsfadmom import get_phase_angles
 from ngmix.prepsfadmom.prepsfadmom_nb import admom_ksums
 
-SUPPORTED_TYPES = ('gauss', 'exp', 'dev')
+SUPPORTED_TYPES = ('gauss', 'exp', 'dev', 'star')
 
 # central difference steps: the packed state is normalized to
 # O(1); the sum steps are scaled to the noise
@@ -82,11 +89,19 @@ def apply_full_errors(deb, mbobs, res, anchor_sigma=0.0):
     res: dict
         The deblend result, modified in place: each object gains
         flux_cov (nband, nband) and has flux_err, s2n, T_err,
-        e1_err and e2_err replaced.  The gauss-estimator entries
+        e1_err and e2_err replaced; s2n is the covariance-aware
+        joint value sqrt(F^T C^-1 F) over the usable bands
+        (quadrature fallback for a non positive definite
+        block).  The gauss-estimator entries
         are replaced too: gauss_T_err, gauss_e1_err and
         gauss_e2_err from the weight (Sw) rows of the state
         covariance, and gauss_flux, gauss_flux_err, gauss_s2n
         plus the new gauss_flux_cov from the flux response.
+        Star members get the flux entries only (flux_err,
+        flux_cov, s2n): no structure or gauss entries exist for
+        a delta function, but the fluxes gain the cross-member
+        response through shared pixels that the per-object path
+        treats as deterministic.
         Singles are treated too: the m=1 machinery solves the
         same estimating equations but differentiates the actual
         update map at the actual data, with no model-consistency
@@ -124,7 +139,9 @@ def apply_full_errors(deb, mbobs, res, anchor_sigma=0.0):
         deb, mbobs, anchor_sigma=anchor_sigma,
     )
 
-    from .deblender import _shape_errors
+    from ngmix.flags import NONPOS_SHAPE_VAR
+
+    from .deblender import _shape_errors, _joint_s2n
 
     # the packed family-covariance components map to the
     # (M1, M2, T) basis of the reported structure errors as
@@ -147,9 +164,24 @@ def apply_full_errors(deb, mbobs, res, anchor_sigma=0.0):
         robj['flux_err'] = flux_err
         wgood = var > 0
         if np.any(wgood):
-            robj['s2n'] = np.sqrt(np.sum(
-                robj['flux'][wgood] ** 2 / var[wgood],
-            ))
+            # covariance-aware total s/n; the quadrature sum is
+            # the fallback for a non positive definite block
+            s2n = _joint_s2n(
+                robj['flux'][wgood], fcov[np.ix_(wgood, wgood)],
+            )
+            if s2n is None:
+                s2n = np.sqrt(np.sum(
+                    robj['flux'][wgood] ** 2 / var[wgood],
+                ))
+            robj['s2n'] = s2n
+
+        if deb.models[i]['type'] == 'star':
+            # a delta function has no structure or weight state:
+            # the packed block ends at the (optional) center
+            # columns, and the structure offsets below would read
+            # the next object's block.  The per-object structure
+            # entries (T = 0, flagged shapes) stand
+            continue
 
         # structure errors from the family-covariance block;
         # replaced only when the full values are usable, so a
@@ -168,6 +200,14 @@ def apply_full_errors(deb, mbobs, res, anchor_sigma=0.0):
                 if eflags == 0:
                     robj['e1_err'] = e1e
                     robj['e2_err'] = e2e
+                    # e_flags describes the reported errors:
+                    # these replace the per-object sandwich
+                    # values, so a shape-variance failure there
+                    # no longer applies.  NONPOS_SIZE cannot be
+                    # set on this branch (it requires the shape
+                    # itself usable), so this restores
+                    # e_flags == 0 iff shape and errors usable
+                    robj['e_flags'] &= ~NONPOS_SHAPE_VAR
 
         # gauss-estimator structure errors from the weight rows:
         # the gauss family is the weight minus the constant
@@ -188,6 +228,7 @@ def apply_full_errors(deb, mbobs, res, anchor_sigma=0.0):
                 if eflags == 0:
                     robj['gauss_e1_err'] = e1e
                     robj['gauss_e2_err'] = e2e
+                    robj['gauss_e_flags'] &= ~NONPOS_SHAPE_VAR
 
         gF = extras['gauss_flux'][i]
         gfc = extras['gauss_flux_cov'][i]
@@ -200,9 +241,14 @@ def apply_full_errors(deb, mbobs, res, anchor_sigma=0.0):
             )
             wg = gvar > 0
             if np.any(wg):
-                robj['gauss_s2n'] = np.sqrt(np.sum(
-                    gF[wg] ** 2 / gvar[wg],
-                ))
+                gs2n = _joint_s2n(
+                    gF[wg], gfc[np.ix_(wg, wg)],
+                )
+                if gs2n is None:
+                    gs2n = np.sqrt(np.sum(
+                        gF[wg] ** 2 / gvar[wg],
+                    ))
+                robj['gauss_s2n'] = gs2n
     return True
 
 
@@ -294,6 +340,21 @@ def _full_covariance(deb, mbobs, anchor_sigma, use_chain):
         dFda = None
         dNS, _ = _model_sum_derivs(deb, cols)
 
+    if deb.recenter and np.any(deb.fixcen):
+        # a fixed center is pinned to its injected anchor: its
+        # packed offset is constant, so its update rows are zero.
+        # The FD paths instead see the unpack/repack identity
+        # (the update skips the center, leaving the perturbed
+        # state in place), which would make I - J singular; the
+        # analytic algebra (_phi_healthy) already uses the
+        # pinned convention.  Applies to every fixcen object on
+        # the fallback paths -- all stars, and weight-adaptive
+        # members on guarded branches
+        for i in range(nobj):
+            if deb.fixcen[i]:
+                icen = slices[i] + deb.nband
+                J[icen:icen + 2, :] = 0.0
+
     M = np.eye(npars) - J
     Tx = np.linalg.solve(M, dFdS)
     cov_norm = Tx @ covS @ Tx.T
@@ -355,6 +416,14 @@ def _fd_dFdS(deb, snap, x0, caches, Ds, theta0s, slices, pers,
             for a in range(6):
                 col = (i * nep + iep) * 6 + a
                 h = dsteps[col]
+                if h == 0:
+                    # a zero-variance sum (every live pixel has a
+                    # zero influence kernel, e.g. an epoch whose
+                    # positive-weight pixels are all apodized to
+                    # zero): its covS row and column are exactly
+                    # zero, so the response column is irrelevant;
+                    # leave it zero rather than form 0/0
+                    continue
                 d = np.zeros(6)
                 d[a] = h
                 pp = _make_patched(
@@ -915,6 +984,11 @@ def _chain_pieces(deb, snap, x0, caches, Ds, theta0s, slices,
             for a in range(6):
                 col = (i * nep + iep) * 6 + a
                 h = dsteps[col]
+                if h == 0:
+                    # zero-variance sum: covS row and column are
+                    # exactly zero, so the column is irrelevant;
+                    # see the matching guard in _fd_dFdS
+                    continue
                 d = np.zeros(6)
                 d[a] = h
                 patched_p = _make_patched(

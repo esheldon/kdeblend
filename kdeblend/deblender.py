@@ -56,7 +56,8 @@ from ngmix.moments import fwhm_to_T
 from ngmix.prepsfadmom.prep import choose_fwhm_smooth, prep_epoch
 from ngmix.prepsfadmom import get_phase_angles, deweight
 from ngmix.prepsfadmom.errors import (
-    model_sandwich, bdf_joint_sandwich, _mbasis_cov,
+    model_sandwich, bdf_joint_sandwich, joint_flux_s2n,
+    _mbasis_cov,
 )
 from ngmix.prepsfadmom.prepsfadmom_nb import admom_ksums, admom_finalize
 from ngmix.fastexp_nb import FASTEXP_MAX_CHI2
@@ -77,20 +78,34 @@ DEFAULT_TOL = 1.0e-8
 # under the smoothing alone is valid under every object's weight
 ZERO_WEIGHT = np.zeros((2, 2))
 
-# deblend_flags bits: RESTARTED marks an object whose structure was
-# restarted from the compact delta state after repeated failed
-# updates; DEBLENDED_AS_PSF marks permanent demotion to a fixed
-# point source after a restarted object failed again.
-# EXTERNALS_SUBTRACTED is set by drivers that refit a group with
-# fixed external models (the directed external subtraction scheme);
-# it is defined here so all deblend_flags bits share one registry
-DEBLENDED_AS_PSF = 2**0
-RESTARTED = 2**1
-EXTERNALS_SUBTRACTED = 2**2
+# deblend_flags bits, see flags.py (the one registry, in the
+# ngmix.flags convention).  EXTERNALS_SUBTRACTED is set by drivers
+# that refit a group with fixed external models (the directed
+# external subtraction scheme)
+from .flags import (  # noqa: E402, F401
+    DEBLENDED_AS_PSF, RESTARTED, EXTERNALS_SUBTRACTED, WEIGHT_BOUNDED,
+)
 
 # consecutive failed structure updates on one object before
 # intervening
 NFAIL_LIMIT = 10
+
+# the largest weight an object may take, as the sigma of the weight
+# in units of the smallest dimension of its stamp.  A weight of that
+# size is flat over the stamp (exp(-0.5) at the edge), so its moments
+# measure the stamp contents rather than the object; reaching it is
+# the signature of a runaway, where unmasked flux under the weight (a
+# pedestal, a neighbor's unmodeled wings) grows the measured moments
+# with the weight and the deweight step grows the weight in turn,
+# until within a few sweeps it is numerically singular.  Such a step
+# is rejected like any failed structure update: the object holds its
+# structure (the flux is still updated) and the consecutive-failure
+# containment restarts and, if needed, demotes it.  A transient
+# excursion, e.g. while a bright neighbor is still poorly modeled,
+# resumes when the corrected sums admit a bounded weight again.
+# Objects that ever hit the bound carry WEIGHT_BOUNDED in their
+# deblend_flags
+MAX_WEIGHT_SIGMA_FAC = 0.5
 
 # update the bdf flux split every this many sweeps: the split
 # varies slowly compared to the structure, so intermediate sweeps
@@ -152,6 +167,9 @@ def build_deblender(
     flux_tol=None,
     cen_tol=None,
     full_errors=False,
+    epochs=None,
+    measured_init_sums5=None,
+    defer_flux_init=False,
 ):
     """
     prep the epochs and construct the deblender without running
@@ -160,6 +178,14 @@ def build_deblender(
     deblend so external harnesses (e.g. the port differential
     rig) can drive the exact production construction and access
     the deblender state directly.
+
+    epochs, optional, is a caller-prepared epoch list (with vcen/
+    ucen stamped) that replaces the internal _prep_epochs; the
+    device-prep path uses it with stub epochs whose array entries
+    live on the gpu (kim et al None), together with
+    measured_init_sums5, the per (object, band) measured flux
+    sums admom_ksums would have produced for the flux
+    initialization (see _Deblender._init_fluxes).
 
     Returns
     -------
@@ -170,21 +196,16 @@ def build_deblender(
     mbobs = get_mb_obs(obs)
     nband = len(mbobs)
 
-    if full_errors and ap_rad != 0:
-        raise ValueError(
-            'full_errors requires ap_rad=0: the influence-kernel '
-            'transfer assumes no apodization'
-        )
-
     fwhm_smooth, Tsmooth = _get_smoothing(
         mbobs, fwhm_smooth, smooth_fac, rng,
     )
 
-    epochs = _prep_epochs(
-        mbobs, fwhm_smooth=fwhm_smooth, ap_rad=ap_rad,
-        use_noise_image=use_noise_image, vcen=0.0, ucen=0.0,
-        store_transfer=full_errors,
-    )
+    if epochs is None:
+        epochs = _prep_epochs(
+            mbobs, fwhm_smooth=fwhm_smooth, ap_rad=ap_rad,
+            use_noise_image=use_noise_image, vcen=0.0, ucen=0.0,
+            store_transfer=full_errors,
+        )
 
     epochs_per_obj = [epochs] * len(objects)
     deb = _Deblender(
@@ -193,6 +214,8 @@ def build_deblender(
         recenter=recenter, cen_sigma0=cen_sigma0,
         e_sigma0=e_sigma0,
         flux_tol=flux_tol, cen_tol=cen_tol,
+        measured_init_sums5=measured_init_sums5,
+        defer_flux_init=defer_flux_init,
     )
     return deb, mbobs
 
@@ -359,9 +382,15 @@ def deblend(
         update and remains exact.
     full_errors: bool, optional
         If True and the deblend converged (all members
-        gauss/exp/dev), replace the per-object flux and
+        gauss/exp/dev/star), replace the per-object flux and
         structure errors with the full (fixed-point) values and
-        fill flux_cov -- a full accounting of the errors.  For
+        fill flux_cov -- a full accounting of the errors.  Star
+        members get the flux entries only (flux_err, flux_cov,
+        s2n): a delta function has no structure errors, but its
+        fluxes gain the cross-member response through shared
+        pixels that the per-object path treats as deterministic,
+        the dominant blending term in crowded stellar fields.
+        For
         blend members this prices the neighbor-noise coupling
         the per-object sandwiches neglect (fluxes low by 10-30
         percent at 2 arcsec, T by 35 percent in tight blends);
@@ -369,8 +398,9 @@ def deblend(
         avoid the model-consistency substitution of the
         per-object sandwich, which under-predicts T errors by
         ~12 percent under model mismatch (real morphologies fit
-        with exp).  See full_errors.  Requires ap_rad=0.
-        Default False
+        with exp).  See full_errors; apodization is
+        handled exactly (the mask enters the influence
+        kernels in pixel space).  Default False
     anchor_sigma: float or array, optional
         With full_errors and recentering, the noise of the
         anchor (detection) positions: a scalar sigma in arcsec,
@@ -395,12 +425,18 @@ def deblend(
             failed updates; DEBLENDED_AS_PSF when the object was
             demoted to a fixed point source, in which case type
             reports 'star' and the flux is the compact
-            matched-aperture flux), flux and flux_err (arrays over
+            matched-aperture flux; WEIGHT_BOUNDED when a weight
+            update was rejected by the stamp-size bound, see
+            MAX_WEIGHT_SIGMA_FAC), flux and flux_err (arrays over
             bands), flux_cov (the (nband, nband) cross-band flux
             covariance from the shared family response, what
             honest color errors need; None on the star, bdf-joint
-            and fallback paths), s2n (the flux s/n combined over
-            bands in quadrature), cen, cen_pull.  Also gauss_T, gauss_e1,
+            and fallback paths), s2n (the total flux s/n: the
+            covariance-aware sqrt(F^T C^-1 F) where the
+            cross-band covariance is available, else the
+            independent-band quadrature sum, which those paths'
+            diagonal structure makes exact for stars), cen,
+            cen_pull.  Also gauss_T, gauss_e1,
             gauss_e2 with errors and gauss_e_flags: the
             gauss-estimator shapes from the converged weight, which
             is the adaptive-moments fixed point on the
@@ -567,6 +603,13 @@ def _prep_epochs(
             )
             ep['vcen'] = vcen
             ep['ucen'] = ucen
+            # the weight bound for objects measured on this stamp,
+            # in the jacobian (sky) units of the weight matrices
+            sigma_max = (
+                MAX_WEIGHT_SIGMA_FAC * min(tobs.image.shape)
+                * tobs.jacobian.scale
+            )
+            ep['Tw_max'] = 2 * sigma_max ** 2
             epochs.append(ep)
     return epochs
 
@@ -615,9 +658,21 @@ class _Deblender(object):
         maxiter, tol, fixed_models=None, recenter=False,
         cen_sigma0=DEFAULT_CEN_SIGMA0, e_sigma0=0.0,
         flux_tol=None, cen_tol=None,
+        measured_init_sums5=None, defer_flux_init=False,
     ):
         if len(objects) == 0:
             raise ValueError('no objects sent')
+
+        # per (object, band) measured flux sums for the flux
+        # initialization, replacing the admom_ksums passes when
+        # the epoch mode arrays live elsewhere (the device-prep
+        # path); see _init_fluxes.  With defer_flux_init the
+        # construction stops before _init_fluxes so the caller
+        # can read the guess state (Sw, positions), compute the
+        # measured sums externally, set _measured_init_sums5 and
+        # call _init_fluxes itself.
+        self._measured_init_sums5 = measured_init_sums5
+        self._defer_flux_init = bool(defer_flux_init)
 
         self.recenter = bool(recenter)
         self.cen_sigma0 = cen_sigma0
@@ -694,7 +749,17 @@ class _Deblender(object):
         self.nrestart = np.zeros(self.nobj, dtype='i4')
         self.dbflags = np.zeros(self.nobj, dtype='i4')
 
-        self._init_fluxes()
+        # per-object weight bound, the tightest over its epochs (see
+        # MAX_WEIGHT_SIGMA_FAC), and the count of rejections by it;
+        # epochs prepared elsewhere without the entry are unbounded
+        self.Tw_max = np.array([
+            min(ep.get('Tw_max', np.inf) for ep in epochs)
+            for epochs in self.epochs_per_obj
+        ])
+        self.nbound = np.zeros(self.nobj, dtype='i4')
+
+        if not self._defer_flux_init:
+            self._init_fluxes()
 
     def _init_models(self, objects):
         """
@@ -783,16 +848,26 @@ class _Deblender(object):
                     if ep['band'] != band:
                         continue
                     fac = ep['weight'] * ep['detAtinv']
-                    alpha, beta = get_phase_angles(
-                        ep, vi - ep['vcen'], ui - ep['ucen'],
-                    )
-                    admom_ksums(
-                        ep['kim'], ep['iy'], ep['ix'], ep['dim'],
-                        alpha, beta, ep['kv'], ep['ku'],
-                        Sw[0, 0], Sw[0, 1], Sw[1, 1], ep['df2'],
-                        self.esums,
-                    )
-                    bvec[i] += fac * self.esums[5]
+                    if self._measured_init_sums5 is not None:
+                        # device-prep path: the measured sums were
+                        # computed on the gpu (one epoch per band
+                        # by construction there)
+                        bvec[i] += fac * (
+                            self._measured_init_sums5[i, band]
+                        )
+                    else:
+                        alpha, beta = get_phase_angles(
+                            ep, vi - ep['vcen'], ui - ep['ucen'],
+                        )
+                        admom_ksums(
+                            ep['kim'], ep['iy'], ep['ix'],
+                            ep['dim'],
+                            alpha, beta, ep['kv'], ep['ku'],
+                            Sw[0, 0], Sw[0, 1], Sw[1, 1],
+                            ep['df2'],
+                            self.esums,
+                        )
+                        bvec[i] += fac * self.esums[5]
                     for p, fm in zip(self.fpositions, self.fmodels):
                         bvec[i] -= fac * model_ksums(
                             fm, band, p[0] - vi, p[1] - ui,
@@ -1091,12 +1166,23 @@ class _Deblender(object):
         """
         the deweight update of object i's weight from the measured
         moment sums (single gaussian, all object types), or None if
-        the sums do not admit one
+        the sums do not admit one or the new weight exceeds the
+        stamp bound (a runaway, see MAX_WEIGHT_SIGMA_FAC)
         """
         if sums[5] > 0 and sums[4] > 0:
             newSw, flags = deweight(_moment_matrix(sums), self.Sw[i])
             if flags == 0:
-                return newSw
+                Tw = newSw[0, 0] + newSw[1, 1]
+                if Tw <= self.Tw_max[i]:
+                    return newSw
+                # a runaway; rejected like any failed structure
+                # update, so the object holds its structure and the
+                # consecutive-failure containment takes over.
+                # Escalating immediately instead was tried and made
+                # a bright group fail to converge without helping
+                # the wings-driven cases
+                self.nbound[i] += 1
+                self.dbflags[i] |= WEIGHT_BOUNDED
         return None
 
     def _skip_structure_update(self, i, fs, ws, fs_pred):
@@ -1964,12 +2050,11 @@ class _Deblender(object):
 
         sums_i, fs, ws, _, _ = self._get_object_sums(i)
         fvar_raw, fmcov, covj = self._accumulate_error_sums(i)
-        fvar, fam_cov, fcov_raw, gfvar, gfam_cov, fd_var_tot = (
-            self._run_sandwiches(
-                i, sums_i, covj, fs, fvar_raw, fmcov,
-            )
+        (fvar, fam_cov, fcov_raw, gfvar, gfam_cov, gfcov_raw,
+         fd_var_tot) = self._run_sandwiches(
+            i, sums_i, covj, fs, fvar_raw, fmcov,
         )
-        flux_err, s2n = _flux_errors(m['F'], fs, fvar)
+        flux_err, s2n = _flux_errors(m['F'], fs, fvar, fcov=fcov_raw)
 
         res = {
             'type': m['type'],
@@ -1982,7 +2067,9 @@ class _Deblender(object):
             'cen_pull': self.cen_pull[i],
         }
         self._set_shape(res, i, fam_cov)
-        self._set_gauss_entries(res, i, fs, ws, gfvar, gfam_cov)
+        self._set_gauss_entries(
+            res, i, fs, ws, gfvar, gfam_cov, gfcov_raw,
+        )
 
         if m['type'] == 'bdf':
             res['fracdev'] = m['fracdev']
@@ -2066,10 +2153,11 @@ class _Deblender(object):
 
         Returns
         -------
-        fvar, fam_cov, fcov_raw, gfvar, gfam_cov, fd_var_tot;
-        fcov_raw is the full cross-band covariance of the flux
-        sums from the shared family response (None on the star,
-        bdf-joint and fallback paths)
+        fvar, fam_cov, fcov_raw, gfvar, gfam_cov, gfcov_raw,
+        fd_var_tot; fcov_raw is the full cross-band covariance of
+        the flux sums from the shared family response (None on
+        the star, bdf-joint and fallback paths) and gfcov_raw the
+        gauss-estimator analog
         """
         m = self.models[i]
 
@@ -2078,6 +2166,7 @@ class _Deblender(object):
         fcov_raw = None
         gfvar = None
         gfam_cov = None
+        gfcov_raw = None
         fd_var_tot = None
         if m['type'] != 'star' and sums_i[5] > 0:
             if m['type'] == 'gauss':
@@ -2120,10 +2209,11 @@ class _Deblender(object):
                 # the sandwiches coincide
                 gfvar = fvar
                 gfam_cov = fam_cov
+                gfcov_raw = fcov_raw
             else:
                 # gauss-estimator errors under the same weight, for
                 # the low-noise shape entries
-                gfvar, gfam_cov, _ = model_sandwich(
+                gfvar, gfam_cov, gfcov_raw = model_sandwich(
                     'gauss', self.Sw[i] - self.smooth_cov,
                     self.Sw[i], self.Tsmooth,
                     sums_i, covj, fs, fvar_raw, fmcov,
@@ -2131,7 +2221,9 @@ class _Deblender(object):
                 if gfvar is None:
                     gfvar = fvar_raw
                     gfam_cov = None
-        return fvar, fam_cov, fcov_raw, gfvar, gfam_cov, fd_var_tot
+                    gfcov_raw = None
+        return (fvar, fam_cov, fcov_raw, gfvar, gfam_cov,
+                gfcov_raw, fd_var_tot)
 
     def _set_shape(self, res, i, fam_cov):
         """
@@ -2177,7 +2269,8 @@ class _Deblender(object):
             # otherwise defined
             res['e_flags'] |= ngmix.flags.NONPOS_SHAPE_VAR
 
-    def _set_gauss_entries(self, res, i, fs, ws, gfvar, gfam_cov):
+    def _set_gauss_entries(self, res, i, fs, ws, gfvar, gfam_cov,
+                           gfcov_raw):
         """
         gauss-estimator entries from the converged weight.  The
         weight iteration is exactly the adaptive-moments gauss fixed
@@ -2230,7 +2323,7 @@ class _Deblender(object):
             Fg = fs / ws * 4 * np.pi * np.sqrt(det2(self.Sw[i]))
             res['gauss_flux'] = Fg
             res['gauss_flux_err'], res['gauss_s2n'] = _flux_errors(
-                Fg, fs, gfvar,
+                Fg, fs, gfvar, fcov=gfcov_raw,
             )
 
 
@@ -2324,11 +2417,23 @@ def _flux_cov_phys(F, fs, fcov_raw):
     return np.outer(scale, scale) * fcov_raw
 
 
-def _flux_errors(F, fs, fvar):
+# the covariance-aware total flux s/n, shared with the ngmix
+# prepsfadmom fitters; kdeblend/full_errors.py imports it from
+# here
+_joint_s2n = joint_flux_s2n
+
+
+def _flux_errors(F, fs, fvar, fcov=None):
     """
     per-band flux errors and the combined flux s/n from the flux
     sums and their variances.  Bands with no positive variance or a
-    zero flux sum are nan, and the s/n is nan when no band is usable
+    zero flux sum are nan, and the s/n is nan when no band is
+    usable.  With fcov (the cross-band covariance of the flux
+    sums) the total s/n is the joint value sqrt(fs^T C^-1 fs)
+    over the usable bands, pricing the positive cross-band
+    correlations from the shared family response; without it, or
+    when the covariance is not positive definite, the
+    independent-band quadrature sum is used
     """
     flux_err = np.full(F.size, np.nan)
     wgood = (fvar > 0) & (fs != 0)
@@ -2336,9 +2441,15 @@ def _flux_errors(F, fs, fvar):
         F[wgood] / fs[wgood],
     ) * np.sqrt(fvar[wgood])
     if np.any(wgood):
-        s2n = np.sqrt(
-            np.sum(fs[wgood] ** 2 / fvar[wgood]),
-        )
+        s2n = None
+        if fcov is not None:
+            s2n = _joint_s2n(
+                fs[wgood], fcov[np.ix_(wgood, wgood)],
+            )
+        if s2n is None:
+            s2n = np.sqrt(
+                np.sum(fs[wgood] ** 2 / fvar[wgood]),
+            )
     else:
         s2n = np.nan
     return flux_err, s2n

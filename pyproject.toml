@@ -12,11 +12,17 @@ requires-python = ">=3.8"
 dependencies = ["numpy", "ngmix"]
 dynamic = ["version"]
 
+[project.optional-dependencies]
+gpu = ["cupy"]
+
 [project.urls]
 Homepage = "https://github.com/esheldon/kdeblend"
 
 [tool.setuptools.packages.find]
 include = ["kdeblend*"]
+
+[tool.setuptools.package-data]
+"kdeblend.gpu" = ["cuda/*.cu", "cuda/*.cuh"]
 
 [tool.setuptools.dynamic]
 version = {attr = "kdeblend._version.__version__"}
