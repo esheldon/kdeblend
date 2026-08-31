@@ -37,7 +37,9 @@ Notable iteration properties, established with the prototype tests:
   contamination driving weight runaways is minimized), and if that
   also fails it is demoted to a fixed point source and marked
   DEBLENDED_AS_PSF in deblend_flags.  The group-level nskip limit
-  remains only as a backstop.
+  remains only as a backstop: when it trips, iteration stops early
+  and every object of the group is marked SKIP_LIMIT in
+  deblend_flags, with converged False in the result.
 - The exp/dev family state is the covariance matrix, not clipped
   (T, e1, e2) parameters, exactly as in ngmix PAdmomFitter._run_admom_mixture:
   proposed steps are damped against the model validity criterion
@@ -84,6 +86,7 @@ ZERO_WEIGHT = np.zeros((2, 2))
 # external subtraction scheme)
 from .flags import (  # noqa: E402, F401
     DEBLENDED_AS_PSF, RESTARTED, EXTERNALS_SUBTRACTED, WEIGHT_BOUNDED,
+    SKIP_LIMIT,
 )
 
 # consecutive failed structure updates on one object before
@@ -449,7 +452,10 @@ def deblend(
             analogs, for selection studies
         fwhm_smooth, Tsmooth: the smoothing used
         numiter: number of sweeps
-        nskip: total number of skipped structure updates
+        nskip: total number of skipped structure updates.  Past the
+            backstop limit (100 per object) the group stops early
+            with converged False and SKIP_LIMIT set in every
+            object's deblend_flags
     """
     deb, mbobs = build_deblender(
         obs, objects,
@@ -715,6 +721,7 @@ class _Deblender(object):
         )
 
         self.nskip = 0
+        self.skip_limit_hit = False
         # windowed per-object change maxima and constrained-step
         # (rejected or boundary-damped) counts for the
         # non-contraction demotion
@@ -896,6 +903,13 @@ class _Deblender(object):
         for it in range(self.maxiter):
             self.isweep = it
             changes = self._sweep()
+            if self.skip_limit_hit:
+                # the backstop on total skipped structure updates:
+                # stop iterating and flag the whole group rather
+                # than raising; the state is whatever the sweeps
+                # reached, converged stays False
+                self.dbflags |= SKIP_LIMIT
+                break
             if self._converged(changes):
                 converged = True
                 break
@@ -1686,12 +1700,17 @@ class _Deblender(object):
     def _count_skip(self, i):
         """
         count a skipped structure update against the group-level
-        backstop limit
+        backstop limit.  When the limit trips, the current sweep
+        finishes and go() stops the group, marking every object
+        SKIP_LIMIT (matching the GPU kernel, which sets its stop
+        bit and err flag at the same threshold)
         """
         self.nskip += 1
-        if self.nskip > 100 * self.nobj:
-            raise RuntimeError(
-                f'too many failed structure updates, object {i}'
+        if self.nskip > 100 * self.nobj and not self.skip_limit_hit:
+            self.skip_limit_hit = True
+            print(
+                f'too many failed structure updates (object {i}); '
+                'stopping the group and flagging SKIP_LIMIT'
             )
 
     def _contain_failure(self, i, force=False):
