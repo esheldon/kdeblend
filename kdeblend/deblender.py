@@ -67,6 +67,12 @@ from ngmix.prepsfadmom.models import (
 )
 from ngmix.prepsfadmom.models_nb import gauss_comps_ksums
 
+from .ladder import (
+    band_comps, ladder_rung_covs, ladder_exp_fracs,
+    solve_group_amps, LADDER_RUNGS, LADDER_SOLVE_EVERY,
+    LADDER_WARMUP,
+)
+
 DEFAULT_TGUESS = 0.5
 # past ~500 sweeps the surviving groups almost never converge
 # (valid-step limit cycles; measured on 2000 wldb fields), so the
@@ -252,7 +258,8 @@ def deblend(
                 fixed center, as offsets from the image jacobian
                 centers in sky coordinates
             type: str, optional
-                'gauss' (default), 'star', 'exp', 'dev' or 'bdf'.
+                'gauss' (default), 'star', 'exp', 'dev', 'bdf'
+                or 'ladder'.
                 Stars are pre-psf delta functions with only their
                 fluxes fit.  The 'bdf' type is the composite exp
                 plus dev model (shared center and ellipticity, dev
@@ -260,7 +267,13 @@ def deblend(
                 split fracdev is fit from a two-aperture solve
                 (the adaptive weight and the smoothing weight)
                 interleaved with the structure updates, optionally
-                regularized.
+                regularized.  The 'ladder' type is the
+                free-amplitude concentric gaussian ladder:
+                per-band amplitudes on fixed rung multiples of
+                the adaptive frame, fit by a scene-wide
+                regularized linear solve interleaved with the
+                sweeps (see kdeblend.ladder); its weight/shape
+                iteration is the data-driven gauss path.
             TdByTe: float
                 the dev to exp size ratio; required for 'bdf'
                 objects (per object, mirroring the ngmix model
@@ -688,6 +701,10 @@ class _Deblender(object):
         self.fd_shrink = [None] * len(objects)
         self.fd_init = [0.5] * len(objects)
         self.bdf_last_dfd = np.zeros(len(objects))
+        # per ladder object: the last scene-wide amp solve's
+        # relative change, carried into the convergence metric
+        # between solves (see _update_gauss)
+        self.ladder_last_da = np.zeros(len(objects))
         self.isweep = 0
 
         self.epochs_per_obj = epochs_per_obj
@@ -816,6 +833,23 @@ class _Deblender(object):
                 m['cov'] = cov_from_e(0.0, 0.0, Tguess)
                 m['fracdev'] = self.fd_init[i]
                 m['TdByTe'] = o['TdByTe']
+            elif otype == 'ladder':
+                self.Sw.append(
+                    np.diag([(Tguess + self.Tsmooth) / 2] * 2),
+                )
+                m['cov_sm'] = self.Sw[-1].copy()
+                m['rungs'] = ladder_rung_covs(
+                    self.Sw[-1], self.Tsmooth,
+                )
+                # the unit-flux exp profile on the rungs; scaled
+                # to the initialized fluxes at the end of
+                # _init_fluxes (which runs exactly once)
+                m['amps'] = np.tile(
+                    ladder_exp_fracs(
+                        m['rungs'], self.Sw[-1], self.Tsmooth,
+                    ),
+                    (self.nband, 1),
+                )
             else:
                 raise ValueError(f"bad object type: '{otype}'")
             self.models.append(m)
@@ -874,7 +908,7 @@ class _Deblender(object):
                             Sw, ep['detAtinv'], self.Tsmooth,
                         )[5]
                     for j in range(nobj):
-                        A[i, j] += fac * model_ksums(
+                        A[i, j] += fac * _any_model_ksums(
                             unit_models[j], band,
                             self.positions[j][0] - vi,
                             self.positions[j][1] - ui,
@@ -883,6 +917,12 @@ class _Deblender(object):
             fsol = np.linalg.solve(A, bvec)
             for i in range(nobj):
                 self.models[i]['F'][band] = fsol[i]
+
+        # ladder amps were unit-flux profiles until here; scale
+        # them to the initialized fluxes
+        for m in self.models:
+            if m['type'] == 'ladder':
+                m['amps'] = m['F'][:, None] * m['amps']
 
     def go(self):
         """
@@ -925,6 +965,15 @@ class _Deblender(object):
             ch = self._update_object(i)
             if ch > self._win_max[i]:
                 self._win_max[i] = ch
+        if (
+            self.isweep >= LADDER_WARMUP
+            and (self.isweep - LADDER_WARMUP)
+            % LADDER_SOLVE_EVERY == 0
+            and any(m['type'] == 'ladder' for m in self.models)
+        ):
+            da = solve_group_amps(self)
+            if da is not None:
+                self._note_change('struct', da)
         return dict(self._sweep_changes)
 
     def _converged(self, changes):
@@ -1051,7 +1100,7 @@ class _Deblender(object):
                 change = self._skip_structure_update(
                     i, fs, ws, fs_pred,
                 )
-            elif m['type'] == 'gauss':
+            elif m['type'] in ('gauss', 'ladder'):
                 change = self._update_gauss(i, newSw, fs, ws)
             else:
                 change = self._update_mixture(
@@ -1193,9 +1242,18 @@ class _Deblender(object):
         """
         m = self.models[i]
         self._count_skip(i)
-        if m['type'] == 'gauss':
+        if m['type'] in ('gauss', 'ladder'):
             newF = _matched_flux(fs, ws, self.Sw[i], m['cov_sm'])
             self._flux_change(i, newF, m['F'])
+            if m['type'] == 'ladder':
+                old = m['F']
+                ratio = np.where(
+                    np.abs(old) > 1.0e-12, newF / old, 1.0,
+                )
+                m['amps'] = (
+                    m['amps']
+                    * np.clip(ratio, -10.0, 10.0)[:, None]
+                )
             m['F'] = newF
         elif np.all(fs_pred != 0):
             newF = m['F'] * fs / fs_pred
@@ -1219,6 +1277,23 @@ class _Deblender(object):
             ),
             self._flux_change(i, newF, m['F']),
         )
+        if m['type'] == 'ladder':
+            # rescale the amp vectors by the per-band flux change
+            # (stale shape, fresh flux; the scene-wide solve
+            # refreshes the shape), track the frame, and carry
+            # the last solve's change so convergence waits for
+            # settled amps
+            old = m['F']
+            ratio = np.where(
+                np.abs(old) > 1.0e-12, newF / old, 1.0,
+            )
+            m['amps'] = (
+                m['amps'] * np.clip(ratio, -10.0, 10.0)[:, None]
+            )
+            m['rungs'] = ladder_rung_covs(newSw, self.Tsmooth)
+            change = max(change, self._note_change(
+                'struct', self.ladder_last_da[i],
+            ))
         m['cov_sm'] = newSw
         m['F'] = newF
         self.nfail[i] = 0
@@ -1736,6 +1811,18 @@ class _Deblender(object):
                     self.bdf_last_dfd[i] = 1.0
             else:
                 m['cov_sm'] = self.smooth_cov.copy()
+                if m['type'] == 'ladder':
+                    m['rungs'] = ladder_rung_covs(
+                        self.smooth_cov, self.Tsmooth,
+                    )
+                    m['amps'] = m['F'][:, None] * np.tile(
+                        ladder_exp_fracs(
+                            m['rungs'], self.smooth_cov,
+                            self.Tsmooth,
+                        ),
+                        (self.nband, 1),
+                    )
+                    self.ladder_last_da[i] = 1.0
             # the restart is a discontinuity in the sweep map
             self.hist = []
             self._reset_change_hist()
@@ -1743,6 +1830,8 @@ class _Deblender(object):
             self.dbflags[i] |= DEBLENDED_AS_PSF
             m['type'] = 'star'
             m.pop('cov', None)
+            m.pop('amps', None)
+            m.pop('rungs', None)
             m['cov_sm'] = self.smooth_cov.copy()
             # the packed state layout changed
             self.hist = []
@@ -1835,7 +1924,14 @@ class _Deblender(object):
                     self.positions[i][0] - v0 + 1.0,
                     self.positions[i][1] - u0 + 1.0,
                 ])
-            if m['type'] == 'gauss':
+            if m['type'] in ('gauss', 'ladder'):
+                # the ladder amps are NOT part of the packed
+                # state: they are the closed-form response to
+                # the weights and data, refreshed by the
+                # scene-wide solve, and extrapolating them only
+                # injects noise the next solve undoes (measured:
+                # a persistent 1e-5..1e-4 struct-change limit
+                # cycle at otherwise converged weights)
                 x.extend([
                     m['cov_sm'][0, 0], m['cov_sm'][0, 1],
                     m['cov_sm'][1, 1],
@@ -1875,7 +1971,7 @@ class _Deblender(object):
                     v0 + x[k] - 1.0, u0 + x[k + 1] - 1.0,
                 )
                 k += 2
-            if m['type'] == 'gauss':
+            if m['type'] in ('gauss', 'ladder'):
                 m['cov_sm'] = np.array([
                     [x[k], x[k + 1]], [x[k + 1], x[k + 2]],
                 ])
@@ -1896,6 +1992,10 @@ class _Deblender(object):
                     [x[k], x[k + 1]], [x[k + 1], x[k + 2]],
                 ])
                 k += 3
+                if m['type'] == 'ladder':
+                    m['rungs'] = ladder_rung_covs(
+                        self.Sw[i], self.Tsmooth,
+                    )
 
     def _state_valid(self):
         """
@@ -1911,8 +2011,11 @@ class _Deblender(object):
                         m, m['cov'], ZERO_WEIGHT,
                         self.Tsmooth):
                     return False
-            elif m['type'] == 'gauss':
+            elif m['type'] in ('gauss', 'ladder'):
                 if det2(m['cov_sm']) <= 0:
+                    return False
+                if m['type'] == 'ladder' and not np.all(
+                        np.isfinite(m['amps'])):
                     return False
             if self.recenter:
                 v0, u0 = self.det_positions[i]
@@ -1988,22 +2091,21 @@ class _Deblender(object):
         for j in range(self.nobj):
             if j == i:
                 continue
-            fracs, So00, So01, So11 = model_comps(
+            Fb, So00, So01, So11 = band_comps(
                 self.models[j], self.Tsmooth,
             )
             ncomps.append((
-                self.positions[j], self.models[j]['F'],
-                fracs, So00, So01, So11,
+                self.positions[j], Fb, So00, So01, So11,
             ))
         for p, fm in zip(self.fpositions, self.fmodels):
-            fracs, So00, So01, So11 = model_comps(fm, self.Tsmooth)
-            ncomps.append((p, fm['F'], fracs, So00, So01, So11))
+            Fb, So00, So01, So11 = band_comps(fm, self.Tsmooth)
+            ncomps.append((p, Fb, So00, So01, So11))
 
         base_nsums = np.zeros((self.nband, 6))
         if ncomps:
-            nSo00 = np.concatenate([c[3] for c in ncomps])
-            nSo01 = np.concatenate([c[4] for c in ncomps])
-            nSo11 = np.concatenate([c[5] for c in ncomps])
+            nSo00 = np.concatenate([c[2] for c in ncomps])
+            nSo01 = np.concatenate([c[3] for c in ncomps])
+            nSo11 = np.concatenate([c[4] for c in ncomps])
             ndv = np.concatenate([
                 np.full(c[2].size, c[0][0] - vi) for c in ncomps
             ])
@@ -2012,7 +2114,7 @@ class _Deblender(object):
             ])
             for band in range(self.nband):
                 nF = np.concatenate([
-                    c[1][band] * c[2] for c in ncomps
+                    c[1][band] for c in ncomps
                 ])
                 gauss_comps_ksums(
                     nF, nSo00, nSo01, nSo11, ndv, ndu,
@@ -2096,6 +2198,12 @@ class _Deblender(object):
                 res['fracdev_gls_err'] = np.nan
                 res['flux_exp'] = np.full(self.nband, np.nan)
                 res['flux_dev'] = np.full(self.nband, np.nan)
+
+        if m['type'] == 'ladder':
+            # the per-band amplitude matrix (nband, K), in flux
+            # units on rungs LADDER_RUNGS x the frame; sum(amps)
+            # is wing-dominated and is not a catalog quantity
+            res['amps'] = m['amps'].copy()
         return res
 
     def _accumulate_error_sums(self, i):
@@ -2169,7 +2277,11 @@ class _Deblender(object):
         gfcov_raw = None
         fd_var_tot = None
         if m['type'] != 'star' and sums_i[5] > 0:
-            if m['type'] == 'gauss':
+            if m['type'] in ('gauss', 'ladder'):
+                # ladder: the per-object errors use the gauss
+                # sandwich under the converged weight (the amps
+                # only do the subtraction here); the ladder-aware
+                # fixed-point errors are the follow-on
                 mtype = 'gauss'
                 Sfam = m['cov_sm'] - self.smooth_cov
             elif m['type'] == 'bdf':
@@ -2242,7 +2354,7 @@ class _Deblender(object):
             res['T'] = 0.0
             shape_ok = False
         else:
-            if m['type'] == 'gauss':
+            if m['type'] in ('gauss', 'ladder'):
                 S = m['cov_sm'] - self.smooth_cov
             else:
                 # the family covariance can scatter out of positive
@@ -2325,6 +2437,25 @@ class _Deblender(object):
             res['gauss_flux_err'], res['gauss_s2n'] = _flux_errors(
                 Fg, fs, gfvar, fcov=gfcov_raw,
             )
+
+
+def _any_model_ksums(model, band, dv, du, Sw, detAtinv, Tsmooth):
+    """
+    model_ksums extended with the ladder type, whose per-band
+    amplitudes replace the flux-times-fractions scaling
+    """
+    if model['type'] == 'ladder':
+        S00, S01, S11 = model['rungs']
+        F = model['amps'][band]
+        n = F.size
+        sums = np.zeros(6)
+        gauss_comps_ksums(
+            F, S00, S01, S11,
+            np.full(n, float(dv)), np.full(n, float(du)),
+            Sw[0, 0], Sw[0, 1], Sw[1, 1], float(detAtinv), sums,
+        )
+        return sums
+    return model_ksums(model, band, dv, du, Sw, detAtinv, Tsmooth)
 
 
 def _convert_fixed_models(fixed_models, nband, Tsmooth):

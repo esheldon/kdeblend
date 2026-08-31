@@ -69,7 +69,8 @@ MUTABLE_ATTRS = (
     '_fscales', '_win_max', '_win_nfail', '_prev_win_max',
     '_prev_win_nfail', '_change_hist', 'hist', 'nskip', 'nfail',
     'nrestart', 'isweep', 'dbflags', 'bdf_info', 'bdf_last_dfd',
-    '_cen_sigma_sweep', '_bdf_noise_cache',
+    '_cen_sigma_sweep', '_bdf_noise_cache', 'ladder_last_da',
+    '_ladder_sig_cache',
 )
 
 
@@ -129,6 +130,13 @@ def apply_full_errors(deb, mbobs, res, anchor_sigma=0.0):
     deblend is not eligible (unconverged, unsupported member
     types) and the per-object errors were left in place
     """
+    if any(mo['type'] == 'ladder' for mo in deb.models):
+        # the fixed-point machinery does not yet differentiate
+        # the ladder amp solve; ladder groups keep the
+        # per-object errors (as bdf did before its joint
+        # sandwich)
+        return None
+
     if not res.get('converged', False):
         return False
     for m in deb.models:
