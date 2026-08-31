@@ -21,10 +21,11 @@ DIM = 64
 def make_profile(comp):
     """
     galsim pre-psf profile from a component dict with entries
-    kind ('gauss', 'star', 'exp', 'dev'), flux, v, u and
+    kind ('gauss', 'star', 'exp', 'dev', 'sersic'), flux, v, u and
     shape/size pars (e1, e2, T for gauss; e1, e2, hlr for exp; e1,
     e2, T for dev, rendered as the exact ngmix 10-gaussian
-    expansion)
+    expansion; e1, e2, hlr, n for sersic, the true galsim profile,
+    which no model type can represent exactly)
     """
     if comp['kind'] == 'star':
         p = galsim.DeltaFunction(gsparams=GSPARAMS) * comp['flux']
@@ -50,6 +51,11 @@ def make_profile(comp):
                 * (comp['flux'] * frac)
             )
         p = galsim.Add(parts)
+    elif comp['kind'] == 'sersic':
+        p = galsim.Sersic(
+            n=comp['n'], half_light_radius=comp['hlr'],
+            gsparams=GSPARAMS,
+        ).shear(e1=comp['e1'], e2=comp['e2']) * comp['flux']
     else:
         raise ValueError(f"bad kind {comp['kind']}")
 
