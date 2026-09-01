@@ -16,9 +16,9 @@
   the amps join the state vector, the solve matrix is the
   closed-form response.  sum(amps) is never reported; totals
   come from the tau-dial (free core, prior-completed wings).
-  Re-measure tight-blend totals after integration: the
-  standalone frames came from gauss-corrected fits and swell
-  under bright wings.
+  (Tight-blend totals re-measured after integration: the
+  standalone frame swelling was a harness artifact; see the
+  remaining-slices note below.)
   Slice 1 landed (2026-08-31, branch ladder): the 'ladder'
   type in deblender.py + kdeblend/ladder.py -- gauss-path
   weight update, scene-wide amp solve every 2 sweeps (4
@@ -46,10 +46,98 @@
   shapes are the data-driven gauss estimator, and the
   inconsistency only enters neighbors' shape channels at the
   1e-3 x leakage level.
-  Remaining slices: ladder-aware full errors (currently
-  per-object via the gauss proxy; ladder groups return None
-  from apply_full_errors), derived flux functionals,
-  fixed-external and gpu support, field-scale validation.
+  Ladder-aware full errors (2026-08-31): the amps stay out of
+  the state and are the closed-form response amps(x, S_ap,
+  S_T) to the state, the aperture flux sums (new data modes,
+  extra influence-kernel members of the same covariance
+  construction) and the T-row moment sum.  One primitive --
+  re-solve the amps from the linearized rows (dsums_dtheta at
+  the aperture weights, chain factor the aperture multiple)
+  at a perturbed state or data, recompute the neighbor sums --
+  feeds the existing B_i for both J (replacing the model-sum
+  micro-FD for ladder groups) and the new dFdS columns; the
+  ladder's own update algebra is the gauss branch of
+  _phi_healthy; the FD referee path re-solves inside
+  _jacobi_block.  Validated: chain vs FD to 1 percent on
+  diagonals for ladder+gauss and ladder+ladder pairs, and MC
+  calibration of flux/T/e1 errors within the ensemble
+  precision for a single and a pair (tests/test_ladder_errors.py).
+  Finding on the way: the per-sweep amp rescale by the flux
+  update (stale shape, fresh flux) drives overlapping ladders
+  into a flux-trading limit cycle under noise (equal pair at
+  1.25 arcsec unconverged at 600 sweeps; 29 without it, same
+  fixed point) and made the amps depend on the flux history --
+  removed; the amps now change only at the solve, exactly what
+  the error model assumes.  Cost levers landed (2026-08-31): a batched closed-form
+  kernel (gauss_pairs_sums: one call for all template, prior
+  and others-subtraction entries; the 86k per-entry calls were
+  pure Python overhead) and the analytic data-mode response
+  (the rows enter the solve linearly, so d(amps)/d(row) is a
+  column of A^-1 Mw^T/sigma; the neighbor sums respond through
+  the unit rung sums).  Full errors 812 -> 335 ms pair, 227 ->
+  146 single (exp 53 / 27); fit 100 -> 70 ms pair.  Then the
+  flux-only aperture rows (_flux_kernel_and_dtheta: the flux
+  row of moment_kernels and dsums_dtheta from one evaluation
+  of the shared ingredients, exact against ngmix in the unit
+  test) for the aperture members: full errors now add 143 ms
+  on the pair (exp 38) and 69 ms on a single (exp 20); total
+  fit+errors 213 / 84 ms vs exp 55 / 28.  The state-column
+  response stays FD (32 re-solves, 40 ms total).
+  Error-speed todo (pair, full_covariance 134 ms vs exp 35,
+  profiled 2026-08-31): (1) Cov(S) 59 ms (exp 20): the 48
+  aperture members triple the influence-kernel irfft2 count;
+  batch the irfft2s in ngmix influence_kernels, and/or a
+  k-space Gram fast path (G sqrt(ef2) products) exact for
+  uniform weight maps without apodization; (2) _ladder_setup
+  44 ms: _ingredients recomputes the phase and quadratic for
+  each of the 12 apertures of an object, which share both --
+  a shared-quadratic aperture routine (~34 -> 15 ms), plus the
+  uncached exact variances (~10 ms); (3) the FD state-column
+  response, 39 ms, replaced by the analytic d(amps)/dx
+  (template and prior derivatives wrt the frame, most algebra,
+  largest single item); (4) skip the prior recomputation in
+  re-solves whose perturbed column is not that object's
+  weight (~10 ms).  Projected floor ~60-70 ms, ~2x exp, which
+  is itself Cov(S)-dominated (see the legacy cost item).  The
+  fit's own 70 ms (12 aperture passes per ladder object every
+  2 sweeps) is now the larger cost: the fused J-aperture
+  admom_ksums kernel.
+  The anchor response of ladder groups does not re-solve the
+  amps (second order; open).
+  Derived flux functionals (2026-08-31): ladder results carry
+  total_flux (sum(amps) of a second joint solve of the same
+  rows with the LADDER_TAU_TOTAL=0.3 prior), fixed_flux (the
+  star-normalized model flux under a fixed LADDER_FIXED_FWHM=2
+  gaussian in the smoothed plane, exact from the mixture) and
+  gradient (fixed minus adaptive color per adjacent band pair,
+  mag), with errors from the full errors: the direct data
+  channel analytic through each solve's matrix, the state
+  channel by FD of the re-solve chained through Tx, the
+  gradient from the fixed response and the flux rows of Tx.
+  MC calibration (N=60, err/emp): total 1.02-1.08, fixed
+  0.94-1.07, gradient 1.09-1.10, alongside flux/T/e1 at
+  0.92-1.15; the total recovers an exp truth to 1 percent on
+  a single (694/1009 for 700/1000).  Errors now add 185 ms on
+  the pair (78 single); the functional FD channel (2 tau x 2 x
+  npars re-solves, ~40 ms) could share the subtraction
+  re-solves of _ladder_derivs.
+  Remaining slices, in priority order: field-scale wldb validation
+  against exp (needs the simcoadd-mdet driver to accept the
+  type; run once with the complete contract; the gate for the
+  exp/dev/bdf deletion decision, which also makes the bdf items
+  below moot -- decide, do not do them); fixed-external and
+  gpu support (the fused J-aperture admom_ksums kernel serves
+  both the fit cost and the gpu port); the analytic
+  state-column amp response.  (The tight-blend totals
+  re-measurement is done, 2026-08-31: in the integrated
+  deblender the 10:1 wings-on-compact faint member at d=1
+  reads a total of -9.7 percent, not the +140-220 percent of
+  the standalone harness whose frames came from
+  gauss-corrected fits and swelled under the wings; the bright
+  member -3.8 percent with its adaptive flux at -35.  The
+  tau-dial total equals the adaptive flux times the fitted
+  shape's aperture completion to 3 decimals in every case,
+  see the LADDER_TAU_TOTAL comment.)
 
 DONE (2026-08-31): ladder experimental phase (branch ladder,
 experiments/*.py, seven studies).  Findings and decisions:

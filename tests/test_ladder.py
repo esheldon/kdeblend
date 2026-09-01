@@ -268,3 +268,31 @@ def test_ladder_consistency_rows():
         off = mismatch_T(obs, False)
         assert on < 1.0e-4
         assert on < off / 2
+
+
+def test_ladder_derived_values():
+    """the derived functionals on an isolated exp truth: the
+    fixed-aperture flux equals the direct star-normalized data
+    measurement, the total flux recovers the true total, and a
+    gradient-free two-band truth gives a zero gradient"""
+    from kdeblend.ladder import ladder_fixed_weight
+
+    comps = [dict(kind='exp', hlr=0.6, flux=3.0, e1=0.05, e2=-0.02,
+                  v=0.0, u=0.0)]
+    mbobs = make_blend_mbobs([comps, comps], [0.8, 0.9], dim=128)
+    deb, _ = build_deblender(
+        mbobs, [dict(v=0.0, u=0.0, type='ladder', Tguess=0.6)],
+    )
+    res = deb.go()
+    assert res['converged']
+    o = res['objects'][0]
+    assert o['total_flux'].shape == (2,)
+    assert np.all(np.abs(o['total_flux'] / 3.0 - 1) < 0.03)
+
+    W2, s_star = ladder_fixed_weight(deb.Tsmooth)
+    for ep in deb.epochs_per_obj[0]:
+        direct = _data_flux_sum(ep, 0.0, 0.0, W2) / s_star
+        assert abs(o['fixed_flux'][ep['band']] / direct - 1) < 5.0e-3
+    assert o['gradient'].shape == (1,)
+    assert abs(o['gradient'][0]) < 2.0e-3
+    assert np.all(np.isnan(o['total_flux_err']))

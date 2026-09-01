@@ -69,8 +69,8 @@ from ngmix.prepsfadmom.models_nb import gauss_comps_ksums
 
 from .ladder import (
     band_comps, ladder_rung_covs, ladder_exp_fracs,
-    solve_group_amps, LADDER_RUNGS, LADDER_SOLVE_EVERY,
-    LADDER_WARMUP,
+    solve_group_amps, ladder_derived, color_gradient,
+    LADDER_RUNGS, LADDER_SOLVE_EVERY, LADDER_WARMUP,
 )
 
 DEFAULT_TGUESS = 0.5
@@ -460,6 +460,16 @@ def deblend(
             come from the family models.  gauss_flux,
             gauss_flux_err and gauss_s2n are the gauss-aperture
             analogs, for selection studies
+            Ladder objects also carry amps (the per-band
+            amplitude matrix), total_flux (the tau-dial total:
+            free core, prior-completed wings), fixed_flux (the
+            star-normalized flux under a fixed
+            LADDER_FIXED_FWHM gaussian aperture in the smoothed
+            plane, exact from the mixture) and gradient (the
+            fixed-aperture minus adaptive-aperture color per
+            adjacent band pair, in magnitudes), with
+            total_flux_err, fixed_flux_err and gradient_err
+            from the full errors (nan otherwise)
         fwhm_smooth, Tsmooth: the smoothing used
         numiter: number of sweeps
         nskip: total number of skipped structure updates
@@ -943,6 +953,14 @@ class _Deblender(object):
                 self._check_noncontraction()
             self._extrapolate()
 
+        # the derived flux functionals of the ladder objects are
+        # a group computation at the converged state
+        self._ladder_derived = (
+            ladder_derived(self)
+            if any(m['type'] == 'ladder' for m in self.models)
+            else {}
+        )
+
         return {
             'converged': converged,
             'objects': [
@@ -1245,15 +1263,6 @@ class _Deblender(object):
         if m['type'] in ('gauss', 'ladder'):
             newF = _matched_flux(fs, ws, self.Sw[i], m['cov_sm'])
             self._flux_change(i, newF, m['F'])
-            if m['type'] == 'ladder':
-                old = m['F']
-                ratio = np.where(
-                    np.abs(old) > 1.0e-12, newF / old, 1.0,
-                )
-                m['amps'] = (
-                    m['amps']
-                    * np.clip(ratio, -10.0, 10.0)[:, None]
-                )
             m['F'] = newF
         elif np.all(fs_pred != 0):
             newF = m['F'] * fs / fs_pred
@@ -1278,18 +1287,16 @@ class _Deblender(object):
             self._flux_change(i, newF, m['F']),
         )
         if m['type'] == 'ladder':
-            # rescale the amp vectors by the per-band flux change
-            # (stale shape, fresh flux; the scene-wide solve
-            # refreshes the shape), track the frame, and carry
-            # the last solve's change so convergence waits for
-            # settled amps
-            old = m['F']
-            ratio = np.where(
-                np.abs(old) > 1.0e-12, newF / old, 1.0,
-            )
-            m['amps'] = (
-                m['amps'] * np.clip(ratio, -10.0, 10.0)[:, None]
-            )
+            # track the frame and carry the last solve's change
+            # so convergence waits for settled amps.  The amps
+            # themselves change only at the scene-wide solve: a
+            # per-sweep rescale by the flux change (stale shape,
+            # fresh flux) was tried and drives overlapping
+            # ladders into a flux-trading limit cycle (noisy
+            # equal pair at 1.25 arcsec: unconverged at 600
+            # sweeps vs 29 without it), and it made the amps
+            # depend on the flux history, a hidden state the
+            # fixed-point errors could not see
             m['rungs'] = ladder_rung_covs(newSw, self.Tsmooth)
             change = max(change, self._note_change(
                 'struct', self.ladder_last_da[i],
@@ -2202,8 +2209,24 @@ class _Deblender(object):
         if m['type'] == 'ladder':
             # the per-band amplitude matrix (nband, K), in flux
             # units on rungs LADDER_RUNGS x the frame; sum(amps)
-            # is wing-dominated and is not a catalog quantity
+            # is wing-dominated and is not a catalog quantity.
+            # The derived functionals: the tau-dial total flux,
+            # the star-normalized fixed-aperture flux and the
+            # color gradient (fixed minus adaptive color, per
+            # adjacent band pair); their errors come from the
+            # full errors (nan otherwise)
             res['amps'] = m['amps'].copy()
+            der = getattr(self, '_ladder_derived', None)
+            if der is None or i not in der:
+                der = ladder_derived(self)
+            res['total_flux'] = der[i]['total_flux'].copy()
+            res['fixed_flux'] = der[i]['fixed_flux'].copy()
+            res['gradient'] = color_gradient(res['fixed_flux'], m['F'])
+            res['total_flux_err'] = np.full(self.nband, np.nan)
+            res['fixed_flux_err'] = np.full(self.nband, np.nan)
+            res['gradient_err'] = np.full(
+                max(self.nband - 1, 0), np.nan,
+            )
         return res
 
     def _accumulate_error_sums(self, i):
