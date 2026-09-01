@@ -240,3 +240,60 @@ def test_ladder_state_response_matches_fd(types):
         assert np.all(np.abs(a - f) < 1.0e-3 * scale), name
     for name in ('f0_fixed', 'f0_total'):
         assert np.allclose(ls_an[name], ls_fd[name], rtol=1e-10)
+
+
+def test_cov_sums_subsampled_matches_full_grid(monkeypatch):
+    """the influence kernels built on the coarser exact grids
+    (every s-th mode, KERNEL_SUBSAMPLE) give the same Cov(S) as
+    the full padded grid"""
+    import kdeblend.full_errors as FE
+
+    rng = np.random.RandomState(7)
+    mbobs = make_mbobs(rng, OFFSETS)
+    deb, _ = build_deblender(
+        mbobs, _objects(('ladder', 'gauss')), tol=1.0e-6,
+        maxiter=2000, full_errors=True,
+    )
+    assert deb.go()['converged']
+    obs_flat = [o for ol in mbobs for o in ol]
+    epochs = deb.epochs_per_obj[0]
+    # the test stamps must actually allow a coarser grid
+    assert FE._subsample_factor(
+        epochs[0]['dim'], obs_flat[0].image.shape, 20.0,
+    ) >= 2
+    L = FE._ladder_setup(deb, epochs)
+    c_sub = FE._cov_sums(deb, obs_flat, epochs, L)
+    monkeypatch.setattr(FE, 'KERNEL_SUBSAMPLE', False)
+    c_full = FE._cov_sums(deb, obs_flat, epochs, L)
+    sc = np.sqrt(np.outer(np.diag(c_full), np.diag(c_full)))
+    assert np.all(np.abs(c_sub - c_full) < 1.0e-5 * sc)
+    assert np.allclose(np.diag(c_sub), np.diag(c_full), rtol=1.0e-6)
+
+
+@pytest.mark.parametrize('types', [
+    ('ladder', 'gauss'), ('ladder', 'ladder', 'gauss'),
+])
+def test_model_sum_derivs_pairwise_matches_full(types):
+    """the pairwise model-sum derivatives (FD on the perturbed
+    object's own pair term) equal the full-set referee"""
+    import kdeblend.full_errors as FE
+
+    offsets = OFFSETS + [(0.0, 0.7)]
+    offsets = offsets[:len(types)]
+    rng = np.random.RandomState(11)
+    mbobs = make_mbobs(rng, offsets)
+    deb, _ = build_deblender(
+        mbobs, _objects(types, offsets), tol=1.0e-6, maxiter=2000,
+        full_errors=True,
+    )
+    assert deb.go()['converged']
+    cols = FE._column_map(deb)
+    dA, pA = FE._model_sum_derivs_pairwise(deb, cols)
+    dB, pB = FE._model_sum_derivs_full(deb, cols)
+    assert set(dA) == set(dB)
+    assert set(pA) == set(pB)
+    scale = max(np.abs(v).max() for v in dB.values())
+    for key in dB:
+        assert np.allclose(dA[key], dB[key], rtol=1.0e-7, atol=1.0e-7 * scale), key
+    for key in pB:
+        assert np.allclose(pA[key], pB[key], rtol=1.0e-9, atol=0)

@@ -54,6 +54,7 @@ from ngmix.prepsfadmom.full_errors import (
 )
 from ngmix.prepsfadmom.prepsfadmom import get_phase_angles
 from ngmix.prepsfadmom.prepsfadmom_nb import admom_ksums
+from ngmix.prepsfadmom.models_nb import gauss_comps_ksums
 
 import functools
 
@@ -1430,13 +1431,89 @@ def _data_esums(deb, i, ep):
 # same result
 _KERNEL_CHUNK = 16
 
+# the fit's epochs are padded 4x (ngmix prep_epoch pad_factor),
+# and the influence kernels inherit that grid although they are
+# compact: a box of 4 sigma + 2 psf fwhm around the object holds
+# > 99.99 percent of every row's energy (39-member wldb group).
+# Keeping every s-th mode builds the kernel on a (dim/s)^2 grid,
+# periodized with period dim/s, which is the exact kernel on the
+# image wherever no wrapped copy reaches it: dim/s >= image size
+# + the kernel extent.  Measured on that group at s=2: kernel
+# relative error 5e-7 median, Cov(S) entries within 3e-6 of the
+# full grid, irfft2 5x faster; rows whose extent does not allow
+# it (the ladder's widest apertures on large objects) stay on
+# the full grid, so the construction is exact by construction.
+# Extent per row: KERNEL_EXTENT_SIGMA sigma + KERNEL_EXTENT_FWHM
+# smoothing fwhm, conservative (5 sigma alone holds 99.998)
+KERNEL_SUBSAMPLE = True
+KERNEL_EXTENT_SIGMA = 5.0
+KERNEL_EXTENT_FWHM = 3.0
+_SUBSAMPLE_FACTORS = (8, 6, 5, 4, 3, 2)
 
-def _influence_kernels_chunked(ep, G, shape):
-    parts = [
-        influence_kernels(ep, G[i0:i0 + _KERNEL_CHUNK], shape)
-        for i0 in range(0, G.shape[0], _KERNEL_CHUNK)
-    ]
-    return np.concatenate(parts, axis=0)
+
+def _kernels_subsampled(ep, G, shape, s):
+    """influence_kernels on the (dim/s)^2 grid from every s-th
+    mode; equals the full-grid kernel periodized with period
+    dim/s, restricted to the image, with the apodization mask
+    applied as in ngmix"""
+    dim = ep['dim']
+    iy, ix = ep['iy'], ep['ix']
+    D = dim // s
+    keep = (iy % s == 0) & (ix % s == 0)
+    A = G[:, keep] * ep['ktransfer'][keep]
+    jy, jx = iy[keep] // s, ix[keep] // s
+    half = D // 2 + 1
+    C = np.zeros((G.shape[0], D, half), dtype=complex)
+    C[:, jy, jx] = 0.5 * A
+    sc = (jx == 0) | (jx == D // 2)
+    if np.any(sc):
+        np.add.at(
+            C, (slice(None), (D - jy[sc]) % D, jx[sc]),
+            0.5 * np.conj(A[:, sc]),
+        )
+    h = np.fft.irfft2(np.conj(C), s=(D, D), axes=(-2, -1))
+    ny, nx = shape
+    h = h[:, :ny, :nx] * (D ** 2 * s ** 2)
+    ap_rad = float(ep.get('ap_rad', 0.0))
+    if ap_rad > 0:
+        from ngmix.prepsfmom import _build_square_apodization_mask
+        mask = np.ones(shape)
+        _build_square_apodization_mask(ap_rad, mask)
+        h = h * mask
+    return h
+
+
+def _subsample_factor(dim, shape, extent):
+    """the largest factor whose grid clears the image plus the
+    kernel extent (pixels); 1 when none does"""
+    need = max(shape) + extent
+    for s in _SUBSAMPLE_FACTORS:
+        if dim % s == 0 and dim // s >= need:
+            return s
+    return 1
+
+
+def _influence_kernels_chunked(ep, G, shape, extents=None):
+    """the real-space kernels of the rows of G in chunks (the
+    full-grid arrays of a large group are GBs); with extents
+    (pixels per row) each row uses the coarsest exact grid"""
+    nrows = G.shape[0]
+    if extents is None or not KERNEL_SUBSAMPLE:
+        fac = np.ones(nrows, dtype=np.int64)
+    else:
+        fac = np.array([
+            _subsample_factor(ep['dim'], shape, e) for e in extents
+        ])
+    out = np.empty((nrows,) + tuple(shape))
+    for s in np.unique(fac):
+        rows = np.flatnonzero(fac == s)
+        for i0 in range(0, rows.size, _KERNEL_CHUNK):
+            r = rows[i0:i0 + _KERNEL_CHUNK]
+            if s == 1:
+                out[r] = influence_kernels(ep, G[r], shape)
+            else:
+                out[r] = _kernels_subsampled(ep, G[r], shape, s)
+    return out
 
 
 def _cov_sums(deb, obs_flat, epochs, L=None):
@@ -1468,15 +1545,24 @@ def _cov_sums(deb, obs_flat, epochs, L=None):
         # the covariance needs
         parts = []
         pend = []
+        pext = []
         npend = 0
+        scale = obs.jacobian.get_scale()
+        pad = KERNEL_EXTENT_FWHM * 2.3548 * np.sqrt(deb.Tsmooth / 2) / scale
+
+        def extent(W):
+            sig = np.sqrt(0.5 * (W[0, 0] + W[1, 1])) / scale
+            return KERNEL_EXTENT_SIGMA * sig + pad
 
         def flush():
             parts.append(
                 _influence_kernels_chunked(
                     ep, np.vstack(pend), obs.image.shape,
+                    extents=np.concatenate(pext),
                 )
             )
             pend.clear()
+            pext.clear()
 
         for i in range(nobj):
             pend.append(moment_kernels(
@@ -1484,6 +1570,7 @@ def _cov_sums(deb, obs_flat, epochs, L=None):
                 deb.positions[i][0] - ep['vcen'],
                 deb.positions[i][1] - ep['ucen'],
             ))
+            pext.append(np.full(6, extent(deb.Sw[i])))
             npend += 6
             if npend >= _KERNEL_CHUNK:
                 flush()
@@ -1494,6 +1581,9 @@ def _cov_sums(deb, obs_flat, epochs, L=None):
                 ep, L['Sws0'][io], v0 - ep['vcen'], u0 - ep['ucen'],
             )
             pend.append(G)
+            pext.append(np.array([
+                extent(af * L['Sws0'][io]) for af in LADDER_AP_FACS
+            ]))
             npend += nap
             if npend >= _KERNEL_CHUNK:
                 flush()
@@ -1664,12 +1754,171 @@ def _covkey(m):
 _SYM = [(0, 0), (0, 1), (1, 1)]
 
 
+# the model-sum derivatives: the pairwise form differences only
+# the perturbed object's own term of each neighbor sum (the sums
+# are additive, so the difference of the full sets is the
+# difference of the pair, exactly), O(nobj^2) small kernel calls
+# per group instead of O(nobj^3) model expansions -- on a
+# 39-member field band_comps was called 2.2 million times, 15-18
+# s for either model.  The full-set form is kept as the referee
+MODEL_SUM_DERIVS_PAIRWISE = True
+
+
 def _model_sum_derivs(deb, cols):
+    if MODEL_SUM_DERIVS_PAIRWISE:
+        return _model_sum_derivs_pairwise(deb, cols)
+    return _model_sum_derivs_full(deb, cols)
+
+
+def _pair_sums(deb, i, j, Sw=None):
+    """the sums of model j alone under object i's weight (or the
+    given weight), at detAtinv=1: one term of _get_neighbor_sums"""
+    from .ladder import band_comps
+    vi, ui = deb.positions[i]
+    if Sw is None:
+        Sw = deb.Sw[i]
+    Fb, So00, So01, So11 = band_comps(deb.models[j], deb.Tsmooth)
+    pj = deb.positions[j]
+    dv = np.full(So00.size, pj[0] - vi)
+    du = np.full(So00.size, pj[1] - ui)
+    out = np.zeros((deb.nband, 6))
+    for band in range(deb.nband):
+        gauss_comps_ksums(
+            np.ascontiguousarray(Fb[band]), So00, So01, So11, dv, du,
+            Sw[0, 0], Sw[0, 1], Sw[1, 1], 1.0, out[band],
+        )
+    return out
+
+
+def _model_sum_derivs_pairwise(deb, cols):
+    """_model_sum_derivs_full with the FD taken on the perturbed
+    object's own pair term wherever it is a neighbor; the full
+    set only under the object's own weight or center"""
+    nobj = deb.nobj
+    nband = deb.nband
+    Tw = deb.Sw[0][0, 0] + deb.Sw[0][1, 1]
+    h_cov = 1.0e-6 * max(Tw, 0.1)
+    h_pos = 1.0e-6
+
+    dNS = {}
+    dPS = {}
+
+    def ns(i, Sw=None):
+        return deb._get_neighbor_sums(i, Sw=Sw)
+
+    def pair(i, k):
+        return _pair_sums(deb, i, k)
+
+    for ic, (k, kind, sub) in enumerate(cols):
+        m = deb.models[k]
+        if kind == 'sw':
+            r, c = _SYM[sub]
+            swp = deb.Sw[k].copy()
+            swm = deb.Sw[k].copy()
+            swp[r, c] += h_cov
+            swp[c, r] = swp[r, c]
+            swm[r, c] -= h_cov
+            swm[c, r] = swm[r, c]
+            if m['type'] == 'ladder':
+                rungs0 = m['rungs']
+                m['rungs'] = ladder_rung_covs(swp, deb.Tsmooth)
+                nsp = [ns(k, Sw=swp) if i == k else pair(i, k)
+                       for i in range(nobj)]
+                m['rungs'] = ladder_rung_covs(swm, deb.Tsmooth)
+                nsm = [ns(k, Sw=swm) if i == k else pair(i, k)
+                       for i in range(nobj)]
+                m['rungs'] = rungs0
+                for i in range(nobj):
+                    d = (nsp[i] - nsm[i]) / (2 * h_cov)
+                    if np.any(d != 0):
+                        dNS[(i, ic)] = d
+            else:
+                dNS[(k, ic)] = (
+                    ns(k, Sw=swp) - ns(k, Sw=swm)
+                ) / (2 * h_cov)
+            if m['type'] in ('exp', 'dev', 'bdf'):
+                sw0 = deb.Sw[k]
+                deb.Sw[k] = swp
+                psp = deb._get_predicted_sums(k)
+                deb.Sw[k] = swm
+                psm = deb._get_predicted_sums(k)
+                deb.Sw[k] = sw0
+                dPS[(k, ic)] = (psp - psm) / (2 * h_cov)
+        elif kind == 'cen':
+            pos0 = deb.positions[k]
+            for i in range(nobj):
+                pp = list(pos0)
+                pp[sub] += h_pos
+                deb.positions[k] = tuple(pp)
+                nsp = ns(k) if i == k else pair(i, k)
+                pp[sub] -= 2 * h_pos
+                deb.positions[k] = tuple(pp)
+                nsm = ns(k) if i == k else pair(i, k)
+                deb.positions[k] = pos0
+                d = (nsp - nsm) / (2 * h_pos)
+                if np.any(d != 0):
+                    dNS[(i, ic)] = d
+        elif kind == 'F':
+            F0 = m['F'].copy()
+            for i in range(nobj):
+                if i == k:
+                    continue
+                if m['type'] == 'ladder':
+                    # the ladder's sums are its amps, not F
+                    dNS[(i, ic)] = np.zeros((nband, 6))
+                    continue
+                m['F'] = F0.copy()
+                m['F'][sub] += 1.0
+                nsp = pair(i, k)
+                m['F'] = F0.copy()
+                m['F'][sub] -= 1.0
+                nsm = pair(i, k)
+                m['F'] = F0
+                dNS[(i, ic)] = (nsp - nsm) / 2.0
+            if m['type'] in ('exp', 'dev', 'bdf'):
+                m['F'] = F0.copy()
+                m['F'][sub] += 1.0
+                psp = deb._get_predicted_sums(k)
+                m['F'] = F0.copy()
+                m['F'][sub] -= 1.0
+                psm = deb._get_predicted_sums(k)
+                m['F'] = F0
+                dPS[(k, ic)] = (psp - psm) / 2.0
+        elif kind == 'cov':
+            key = _covkey(m)
+            r, c = _SYM[sub]
+            cov0 = m[key].copy()
+            covp = cov0.copy()
+            covp[r, c] += h_cov
+            covp[c, r] = covp[r, c]
+            covm = cov0.copy()
+            covm[r, c] -= h_cov
+            covm[c, r] = covm[r, c]
+            for i in range(nobj):
+                if i == k:
+                    continue
+                m[key] = covp
+                nsp = pair(i, k)
+                m[key] = covm
+                nsm = pair(i, k)
+                m[key] = cov0
+                dNS[(i, ic)] = (nsp - nsm) / (2 * h_cov)
+            if m['type'] in ('exp', 'dev', 'bdf'):
+                m[key] = covp
+                psp = deb._get_predicted_sums(k)
+                m[key] = covm
+                psm = deb._get_predicted_sums(k)
+                m[key] = cov0
+                dPS[(k, ic)] = (psp - psm) / (2 * h_cov)
+    return dNS, dPS
+
+
+def _model_sum_derivs_full(deb, cols):
     """closed-form model-sum derivatives by micro central FD on
     the (cheap, analytic) neighbor and predicted sum functions:
     dNS[(i, col)] and dPS[(i, col)] as (nband, 6) arrays per
     affected object, in physical units per unit physical change
-    of the column quantity"""
+    of the column quantity.  The referee of the pairwise form"""
     nobj = deb.nobj
     Tw = deb.Sw[0][0, 0] + deb.Sw[0][1, 1]
     h_cov = 1.0e-6 * max(Tw, 0.1)

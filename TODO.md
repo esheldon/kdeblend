@@ -426,6 +426,49 @@
   stamp, neighbors entering through the closed-form sums,
   which are grid-free) -- an architectural change shared by
   both models; short of that, (2) and (3) above.
+  Correction (2026-09-01): stamps are out for the fit -- the
+  data sums truncate bright neighbors at stamp edges and the
+  edge rings through the deconvolution, which is why the
+  group-replace cutout won -- and the ladder rows are data
+  under apertures too.  The error stage is different in kind:
+  the influence kernels are functions of the weights and psf
+  only.  Prototype on the 39-member group (332 rows/epoch,
+  image 187x205 on a 820^2 fft grid, i.e. 16x padding): a box
+  of 4 sigma + 2 fwhm holds >= 99.993 percent of every row's
+  energy (5 sigma + 3 fwhm 99.998), truncating to it perturbs
+  Cov(S) by <= 1.6e-3 in correlation units; 41-53 percent of
+  row pairs overlap in a group that dense.  Building the
+  kernels from every s-th mode (a (dim/s)^2 grid, the kernel
+  periodized with period dim/s) is exact on the image whenever
+  dim/s >= image + extent: s=2 gives kernel errors 5e-7
+  median, Cov(S) within 3e-6, irfft2 5x faster; s=4 (grid =
+  image) fails for members within ~16 px of the cutout edge
+  (they sit as close as 14 px), as the wrap condition says.
+  Landed: KERNEL_SUBSAMPLE in full_errors -- per row the
+  largest divisor of dim whose grid clears image + extent (5
+  sigma + 3 smoothing fwhm), the widest ladder apertures on
+  large objects staying on the full grid; unit test against
+  the full grid at 1e-5; the 25 error tests pass 20 percent
+  faster.  Fields (three types): the 39-member field exp 132
+  -> 115 s, ladder 245 -> 221; typical exp 16.1 -> 15.6,
+  ladder 20.2 -> 19.1.  The sweeps' cutout-area cost is
+  untouched by this (and cannot be, per the fit finding).
+  (2) landed (2026-09-01, MODEL_SUM_DERIVS_PAIRWISE): the
+  model-sum derivatives take their micro-FD on the perturbed
+  object's own pair term wherever it is a neighbor (the sums
+  are additive, so the full-set difference is the pair
+  difference exactly); the full set only under the object's
+  own weight or center.  O(nobj^2) small kernel calls per group
+  instead of O(nobj^3) model expansions; the full-set form is
+  kept as the referee (_model_sum_derivs_full) and the
+  equivalence test holds to 1e-7 on mixed two- and
+  three-member groups.  Fields (three types): the 39-member
+  field exp 114 -> 104 s, ladder 221 -> 211; typical unchanged;
+  catalogs identical except error columns at <= 1.4e-5 (the
+  full-set form's FD cancellation noise).  Today's two
+  error-stage changes together: that field exp 132 -> 104,
+  ladder 245 -> 211.  The remaining tail cost is the sweeps
+  (67 / 160 s there) -- the grind.
   Idea, for later (2026-09-01): the light the uncapped total
   absorbs is itself a measurement -- per object and band, the
   light in the 4-32 x Sw annuli that neither the object's inner
