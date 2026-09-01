@@ -357,6 +357,75 @@
   included) needs more still.  Note for Stage C: bootstrap
   over files needs many small files, and the per-object
   pairing is what makes the difference measurable.
+  Cost at Stage B scale (2026-09-01, three metacal types): the
+  queue throughput gave 69 vs 47 s per field, ladder vs exp
+  (1.5x, 20 concurrent pinned processes), against 1.3x in the
+  pilot.  Typical fields (max group 4-9) are 1.3x whole
+  pipeline including the ~7-8 s per-process numba compile
+  (15.4/23.7/14.2 -> 19.9/31.0/18.2 s); a field profile (202
+  groups) compile-free is 1.46x: sim 5.3 and metacal 4.2 s
+  shared, deblend 19.3 vs 12.0 (sweeps 5.4 vs 4.4, full errors
+  9.6 vs 4.3, of which Cov(S) 5.1 vs 2.3 -- the influence
+  kernel irfft2 count scales with the 2.3x rows; now the top
+  ladder lever, the k-space Gram fast path).  The run-level
+  1.5x is the group-size tail: a field with a 39-object group
+  runs 124 vs 239 s (1.9x) and costs 6-10 typical fields; 37 of
+  100 files had a group > 10 (objects: p50/90/99/max group
+  size 1/5/17/39; 0.7 percent in groups of 20-40).  The
+  large-group cost is the production lever for both models.
+  Ladder kernels now @njit(cache=True) (the compile was half of
+  a single-field timing; ngmix's prepsfadmom kernels are not
+  cached either).  Profile of that 39-object field (deblend
+  138 s exp / 260 ladder): sweeps 67 / 160 -- both grind to
+  the 500-sweep cap on the big group (5.1k sweeps, 40k / 52k
+  object updates; _get_object_sums 55 / 87 s) and the ladder
+  adds 2.4k joint solves at 21 ms each, all in
+  ladder_measure_rows (57 s: the fused pass re-measures every
+  member's rows although only a few still move -- the rows are
+  data-only, so a per-object cache keyed on the aperture state
+  is exact and would remove most of it); full errors 66 / 95:
+  Cov(S) 33 / 50 (irfft2 20 / 31 s: ~32 ms per 16-row batch on
+  the big cutout; the k-space Gram is the alternative there),
+  _model_sum_derivs 18 / 15 (band_comps called 2.2M times: the
+  per-call np.full/np.outer overhead, a vectorized group-level
+  ns() would remove it for both models), _jacobi_block 5 / 11.
+  Ranked: (1) per-object row cache in ladder_measure_rows
+  (ladder only), (2) group-level vectorized model sums in
+  _model_sum_derivs (both), (3) Cov(S) Gram path for large
+  groups (both), (4) the 500-sweep grind itself (both).
+  (1) landed (2026-09-01, LADDER_ROW_CACHE): a member whose
+  position and weight are bit-identical to its last
+  measurement reuses its rows (data-only, the neighbor
+  subtraction is applied after), exact.  The choice of exact
+  equality is measured: member motion between successive
+  solves is bimodal -- on the 39-member grind 29 percent of
+  member-solves are frozen below 1e-12 and the rest move by
+  more than 1e-3 (a large-amplitude limit cycle, not a slow
+  contraction); small groups 10 percent frozen, 30 below 1e-6,
+  64 below 1e-3 -- so a tolerance up to 1e-9 adds no hits, and
+  anything larger would inject discontinuities against
+  DEFAULT_TOL = 1e-8 (the rho-capped projected residual treats
+  any jump above ~1e-11 as non-convergence).  The FD referees
+  never call ladder_measure_rows, so the cache cannot touch a
+  derivative.  Measured (A/B, three types, catalogs identical to 1e-9 in
+  every column): the 39-member field 245 -> 240 s (2 percent),
+  a typical field 18.8 -> 18.8.  The frozen-member statistics
+  above came from the noshear pass (12 solves of the big
+  group); over all three types the frozen fraction is 17
+  percent on the 39-member group (82 percent move by more
+  than 1e-3), 7 on 6-19, 9 below 6.  Kept (exact, free).
+  What the numbers actually say about the big-group cost: the
+  group ran only ~85 solves across the three types, yet
+  ladder_measure_rows took ~40 s of them -- ~0.5 s per solve,
+  ~4 ms per member-epoch pass against 0.2 on a typical field:
+  every per-object k-space pass runs over the whole group
+  cutout's modes (a 600^2 padded grid is ~20x a stamp), and
+  the same holds for the gauss loop's _get_object_sums (55 /
+  87 s here, both models).  The structural large-group lever
+  is per-object sub-grids (each member's sums on its own
+  stamp, neighbors entering through the closed-form sums,
+  which are grid-free) -- an architectural change shared by
+  both models; short of that, (2) and (3) above.
   Idea, for later (2026-09-01): the light the uncapped total
   absorbs is itself a measurement -- per object and band, the
   light in the 4-32 x Sw annuli that neither the object's inner

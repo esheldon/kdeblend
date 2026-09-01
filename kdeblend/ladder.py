@@ -90,6 +90,15 @@ LADDER_WARMUP = 3
 # weights barely move; a final solve at the converged state
 # keeps the reported amps exact
 LADDER_GATE_TOL = 1.0e-4
+# per-object row cache in ladder_measure_rows: a member whose
+# position and weight are bit-identical to its last measurement
+# reuses its rows (they are data-only; the neighbor subtraction is
+# applied afterwards), exact by construction.  Measured motion
+# between solves is bimodal -- frozen (< 1e-12) or > 1e-3 in a
+# grinding group -- so no tolerance would add hits without adding
+# discontinuities against DEFAULT_TOL; hit rate 10 percent on
+# small groups, 29 on a 39-member grind
+LADDER_ROW_CACHE = True
 # Measured dead end, do not revisit: an adaptive cadence that
 # doubled the solve interval (up to 16 sweeps) after solves whose
 # model change was below 1e-3 cut the solves by 22 percent on a
@@ -181,7 +190,7 @@ def ladder_rung_covs(Sw, Tsmooth):
     )
 
 
-@njit
+@njit(cache=True)
 def gauss_pairs_sums(So00, So01, So11, dv, du, sw00, sw01, sw11, out):
     """
     per-pair moment sums [v, u, M1, M2, T, flux] of unit-flux
@@ -231,7 +240,7 @@ def gauss_pairs_sums(So00, So01, So11, dv, du, sw00, sw01, sw11, out):
         out[k, 5] = sflux
 
 
-@njit
+@njit(cache=True)
 def gauss_grid_sums(S00, S01, S11, W00, W01, W11, DV, DU, out):
     """
     the moment sums [v, u, M1, M2, T, flux] of every unit-flux
@@ -445,7 +454,7 @@ def _nrows():
     return LADDER_AP_FACS.size, nmom, LADDER_AP_FACS.size + nmom
 
 
-@njit
+@njit(cache=True)
 def ladder_apsums(kim, iy, ix, dim, alpha, beta, kv, ku,
                   w00, w01, w11, df2, err_fac2, need_var,
                   flux, sums1, var):
@@ -592,10 +601,15 @@ def ladder_measure_rows(deb, idx, aps, Sws, Tws, use_cache=True):
     nband = deb.nband
     nlad = len(idx)
     cache = None
+    rcache = None
     if use_cache:
         cache = getattr(deb, '_ladder_sig_cache', None)
         if cache is None:
             cache = deb._ladder_sig_cache = {}
+        if LADDER_ROW_CACHE:
+            rcache = getattr(deb, '_ladder_row_cache', None)
+            if rcache is None:
+                rcache = deb._ladder_row_cache = {}
     flux = np.zeros(nap)
     sums1 = np.zeros(6)
     vraw = np.zeros(nap + 1)
@@ -613,6 +627,14 @@ def ladder_measure_rows(deb, idx, aps, Sws, Tws, use_cache=True):
             ent is None or ent[1].shape != (nrows, nband)
             or abs(ent[0] / Tws[io] - 1) > 0.1
         )
+        key = (vi, ui, Sw[0, 0], Sw[0, 1], Sw[1, 1])
+        rent = rcache.get(i) if rcache is not None else None
+        if rent is not None and rent[0] == key and not need_var:
+            d[io] = rent[1]
+            wsum[io] = rent[2]
+            var[io] = ent[1]
+            raw.append(rent[3])
+            continue
         for iep, ep in enumerate(epochs):
             band = ep['band']
             fac = ep['weight'] * ep['detAtinv']
@@ -640,6 +662,8 @@ def ladder_measure_rows(deb, idx, aps, Sws, Tws, use_cache=True):
                 cache[i] = (Tws[io], var[io].copy())
         else:
             var[io] = ent[1]
+        if rcache is not None:
+            rcache[i] = (key, d[io].copy(), wsum[io].copy(), rawi)
         raw.append(rawi)
     return d, var, wsum, raw
 

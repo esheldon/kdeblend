@@ -92,7 +92,7 @@ MUTABLE_ATTRS = (
     'nrestart', 'isweep', 'dbflags', 'bdf_info', 'bdf_last_dfd',
     '_cen_sigma_sweep', '_bdf_noise_cache', 'ladder_last_da',
     '_ladder_sig_cache', '_ladder_last_x', '_ladder_next',
-    '_ladder_prior_cache',
+    '_ladder_prior_cache', '_ladder_row_cache',
 )
 
 
