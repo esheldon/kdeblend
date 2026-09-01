@@ -263,9 +263,109 @@
   ms per object-epoch, ~5x a single admom_ksums pass for eight
   apertures plus the moment sums) is the floor, and the gpu
   port's kernel.
-  Remaining slices, in priority order: field-scale wldb validation
-  against exp with truth matching and doshear (run once with
-  the complete contract; the gate for the exp/dev/bdf deletion
+  Stage A memory (2026-09-01): Cov(S) built a group's influence
+  kernels in one ngmix call, (nrows, dim, dim) on the padded fft
+  grid plus the complex half plane, nrows = 6 nobj + 8 nlad per
+  epoch; one wldb field reached 33 GB RSS (the other nine jobs
+  4-7 GB).  Two fixes, both exact: _influence_kernels_chunked
+  (16 rows per call, the same stacked real-space kernels) took
+  that field to 19 GB; the rest was _ladder_setup holding every
+  ladder object's (8, nmodes) complex kernel rows per epoch for
+  the whole computation, plus _cov_sums stacking all rows into
+  one (nrows, nmodes) complex array -- now _cov_sums rebuilds
+  the dyadic kernels where it consumes them and streams the
+  rows through the chunked builder.  That field (an 85-object
+  group, heavy_field.py): ladder 2.4 GB, exp 0.7, wall 5:54 vs
+  5:16 (noshear only).
+  Total-flux background pickup (2026-09-01): in the
+  truth-matched fields the ladder total ran +3-4 percent high on
+  isolated bright small objects (exp model within 1) and +12-30
+  in blends.  Noiselessly the total is exact (gauss/exp/dev
+  1.0000, n=2 0.9995, n=4 0.952, wings past the largest rung)
+  and a uniform background of 2 percent of the flux inside r=2
+  arcsec raises it 14-37 percent through the a=32 aperture row
+  (~100 arcsec^2 of whatever is unmodelled: undetected galaxies,
+  sky residuals); the prior width does nothing there, the outer
+  rows are many sigma on a bright object.  Lever added,
+  LADDER_TOTAL_MAX_AP (largest aperture factor kept in the total
+  solve; outer rows deweighted relative to noise and signal so
+  the exp-projection prior completes beyond; default None,
+  unchanged): at s2n ~100 the background response drops 2x at 8
+  and 3x at 4, costing 1-3 percent on wide exp and up to 5 on
+  n=4 wings.  Noiselessly any cap is ill-posed (the prior never
+  engages against 1e18 row weights; the outer rungs become an
+  extrapolation), so the cap only means something with real
+  noise, and the noiseless derived-values test keeps cap None.
+  Scan on 10 shared wldb fields (tauscan/, ~170 isolated and
+  ~300 blended matches, same seeds): cap 4 takes the isolated
+  total from +2.6/+4.6/+3.8/+1.9 percent (s2n 10-20/20-50/
+  50-100/100+) to +1.1/+2.2/+2.2/+0.2 (exp model +1.6/-0.8/
+  +0.4/-0.3), by size tracks the exp model within 2 percent
+  and reads 1.007 where exp reads 0.964 (T > 1.2, the wings),
+  cuts the low-s2n scatter 0.24 -> 0.14, halves the blended
+  excess (+15/+13 -> +8/+8; exp +13/+4) and pulls 0.8-2.1 vs
+  the exp model's 1.2-4.1; tau 0.1 adds nothing.  Adopted:
+  LADDER_TOTAL_MAX_AP = 4, threaded through the full errors
+  (var_total frozen in _ladder_setup, pieces_total in
+  _ladder_rows_at, per-tau pieces in the analytic state
+  response, per-functional assembly in the covariances); the
+  chain-vs-FD, calibration and driver tests pass under it.
+  Stage A (2026-09-01, truthphot-ladder-vs-exp, 10 jobs = 200
+  wldb gri fields, exp and ladder on the same fields and fit
+  seeds, noshear+1p, truth-matched, 18.3k matches each): health
+  ladder flags==0 0.970 vs exp 0.966, deblend_flags==0 0.959 vs
+  0.948, star demotions 459 vs 728.  Adaptive gauss flux (the
+  same quantity for both): isolated identical (bias -0.2/-1.2/
+  -2.7/-4.0 percent by s2n 10-20/20-50/50-100/100+ vs exp
+  -0.5/-0.9/-2.8/-4.0, the aperture capture; scatter equal to 2
+  percent; pulls 1.11/1.45/2.42/9.7 vs 1.12/1.53/2.64/10.6 --
+  the high-s2n pulls are the capture-vs-total population
+  scatter, not noise); bright neighbor (>= 1x within 15 px):
+  +4.3/+0.5/-1.1 vs exp +11.1/+4.4/+0.5 percent with scatter
+  0.26 vs 0.30 at s2n 10-20.  Colors g-r, r-i: medians within
+  0.005 mag for both everywhere; bright-neighbor r-i at s2n
+  10-20 +0.003 vs +0.013; isolated scatter 3-8 percent larger
+  for the ladder (0.135 vs 0.131, 0.065 vs 0.060 mag: the
+  per-band amps' freedom), bright-neighbor scatter smaller
+  (0.164 vs 0.171, 0.162 vs 0.174); pulls 1.0-1.1 isolated for
+  both, 1.2 vs 1.4 bright-neighbor.  The run's total_flux
+  column is the uncapped solve (+7.4/+7.6/+5.0/+2.4 percent
+  isolated, see above); the capped numbers are the scan's.
+  Stage B (doshear differential m) and C (production scale)
+  remain.
+  Idea, for later (2026-09-01): the light the uncapped total
+  absorbs is itself a measurement -- per object and band, the
+  light in the 4-32 x Sw annuli that neither the object's inner
+  profile nor the neighbor models explain (undetected galaxies,
+  sky residuals, neighbor-model wings, psf-wing errors).  Uses:
+  (1) an unrecognized-blend covariate for shear, sum(amps)
+  uncapped minus capped, or the outer rows minus the capped
+  model's prediction, measured on the sheared images too so a
+  cut on it is a selection response, not a hidden bias; its
+  per-band values give the color of the excess (a companion at
+  another redshift, the photo-z blending failure); (2) a
+  constant-surface-brightness nuisance column per band per
+  group in the solve (row response b sum(W), growing with
+  aperture area while any rung's fraction saturates: the c=25.6
+  rung goes 0.24 -> 0.56 from a=8 to a=32, a constant 1 -> 4),
+  which keeps the wings data-driven where cap 4 exp-completes
+  them (dev-like galaxies) -- the principled version of the
+  cap; (3) aggregated sky-residual / diffuse-light maps; (4) a
+  group-level model-incompleteness flag.  Caveats: per object
+  it is noisy (the a=32 row has ~6x the a=1 noise; uncapped
+  minus capped scatters ~0.2 of the flux at s2n 10-20 against
+  a few percent signal), and the flux rows cannot tell a
+  uniform residual from an off-center companion from a
+  neighbor's wing (outer-aperture moment rows from the fused
+  pass would partly break that).  All linear functionals of
+  measured rows, so errors come from the same chain.  Cheapest
+  test: match objects across the tauscan capped/uncapped
+  variants and correlate the excess with the truth catalog's
+  undetected neighbors in the annulus.
+  Remaining slices, in priority order: Stage B/C of the wldb
+  validation against exp (doshear differential m, then
+  production scale, with the capped total; Stage A photometry
+  is done above; the gate for the exp/dev/bdf deletion
   decision, which also makes the bdf items below moot -- decide,
   do not do them); gpu support
   (the fused J-aperture admom_ksums kernel serves both the fit

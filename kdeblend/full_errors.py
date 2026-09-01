@@ -61,6 +61,7 @@ from .ladder import (
     ladder_context, ladder_measure_rows, ladder_subtract_others,
     ladder_template, ladder_solve_rows, ladder_write_amps,
     ladder_assemble, ladder_solve_pieces, ladder_neighbor_unit_sums,
+    ladder_total_var,
     ladder_prior, ladder_fixed_weight, ladder_fixed_flux,
     ladder_fixed_fluxes, ladder_fixed_units, ladder_context,
     ladder_template, ladder_subtract_others, ladder_exp_fracs,
@@ -545,23 +546,23 @@ def _ladder_setup(deb, epochs):
     )
     nap = LADDER_AP_FACS.size
     Dap = []
-    Gap = []
     for io, i in enumerate(idx):
         v0, u0 = deb.positions[i]
         Dio = [[] for _ in range(nap)]
-        Gio = [[] for _ in range(nap)]
         for ep in epochs:
-            G, D = _flux_kernels_and_dtheta_dyadic(
+            # the kernel rows themselves are not kept: (8, nmodes)
+            # complex per object-epoch is GBs on a large group;
+            # _cov_sums rebuilds them where they are consumed
+            _, D = _flux_kernels_and_dtheta_dyadic(
                 ep, Sws[io], v0 - ep['vcen'], u0 - ep['ucen'],
             )
             for j in range(nap):
                 Dio[j].append(D[j])
-                Gio[j].append(G[j])
         Dap.append(Dio)
-        Gap.append(Gio)
     return {
         'idx': idx, 'nap': nap, 'var': var, 'wsum': wsum,
-        'raw': raw, 'Dap': Dap, 'Gap': Gap, 'aps0': aps,
+        'var_total': ladder_total_var(d, var),
+        'raw': raw, 'Dap': Dap, 'aps0': aps, 'Sws0': Sws,
     }
 
 
@@ -607,15 +608,32 @@ def _ladder_rows_at(deb, L, caches, Ds, theta0s, dap, dT):
     pieces = ladder_assemble(
         deb, idx, L['var'], L['wsum'], Sws, Fhat, Mt,
     )
+    if L['var_total'] is L['var']:
+        pieces_total = pieces
+    else:
+        # the total-flux solve sees the capped rows (frozen
+        # weights, like the others)
+        pieces_total = ladder_assemble(
+            deb, idx, L['var_total'], L['wsum'], Sws, Fhat, Mt,
+        )
     return {'Sws': Sws, 'Fhat': Fhat, 'd': d, 'Mt': Mt,
-            'pieces': pieces}
+            'pieces': pieces, 'pieces_total': pieces_total}
+
+
+def _pieces_for(ctx, tau0):
+    """the assembled pieces of the solve at prior width tau0:
+    the total-flux solve (tau0 == LADDER_TAU_TOTAL) has its own,
+    from the capped rows"""
+    if tau0 is not None and tau0 == LADDER_TAU_TOTAL:
+        return ctx['pieces_total']
+    return ctx['pieces']
 
 
 def _ladder_solve_at(deb, L, ctx, tau0=None):
     """the amps from the rows of _ladder_rows_at at the given
     prior width; the tau-independent assembly is shared"""
     new_full = ladder_solve_pieces(
-        deb, L['idx'], ctx['d'], ctx['pieces'], tau0=tau0,
+        deb, L['idx'], ctx['d'], _pieces_for(ctx, tau0), tau0=tau0,
     )
     if new_full is None:
         raise LadderResolveError('ladder re-solve failed')
@@ -732,15 +750,17 @@ def _ladder_state_response(deb, snap, x0, L, caches, Ds, theta0s,
     ctx = _ladder_rows_at(deb, L, caches, Ds, theta0s, {}, {})
     d0 = ctx['d']
     Mt = ctx['Mt']
-    A0, Mws, sigs, css, a0 = ctx['pieces']
+    _, _, _, css, a0 = ctx['pieces']
+    pieces_of = {tau: _pieces_for(ctx, tau) for tau in taus}
     Sws = ctx['Sws']
     aps = [[af * Sws[io] for af in LADDER_AP_FACS] for io in range(nlad)]
     Ainv = {}
     X = {}
     amps = {}
     for tau in taus:
+        A0 = pieces_of[tau][0]
         Ainv[tau] = np.linalg.inv(A0 + np.eye(N) / tau ** 2)
-        full = ladder_solve_pieces(deb, idx, d0, ctx['pieces'], tau0=tau)
+        full = ladder_solve_pieces(deb, idx, d0, pieces_of[tau], tau0=tau)
         if full is None:
             raise LadderResolveError('ladder solve failed')
         amps[tau] = full
@@ -772,8 +792,8 @@ def _ladder_state_response(deb, snap, x0, L, caches, Ds, theta0s,
             dAX = np.zeros(N)
             for b in range(nband):
                 sl = slice(b * Z, (b + 1) * Z)
-                Mw = Mws[b]
-                sig = sigs[b]
+                Mw = pieces_of[tau][1][b]
+                sig = pieces_of[tau][2][b]
                 dMw = (
                     ((dMt * rows_b[b][:, None]) / sig[:, None])
                     * css[b][None, :]
@@ -1091,11 +1111,12 @@ def _ladder_functional_covs(deb, snap, x0, L, caches, Ds, theta0s,
         'total': np.zeros((nlad, nband, nS)),
     }
     from .ladder import LADDER_TAU0
-    A0, Mws, sigs, css, _ = ladder_assemble(
-        deb, idx, L['var'], L['wsum'], Sws, Fhat, Mt,
-    )
-    for which, tau in (('fixed', LADDER_TAU0),
-                       ('total', LADDER_TAU_TOTAL)):
+    for which, tau, var_w in (('fixed', LADDER_TAU0, L['var']),
+                              ('total', LADDER_TAU_TOTAL,
+                               L['var_total'])):
+        A0, Mws, sigs, css, _ = ladder_assemble(
+            deb, idx, var_w, L['wsum'], Sws, Fhat, Mt,
+        )
         Ainv = np.linalg.inv(A0 + np.eye(nband * Z) / tau ** 2)
         R = [
             Ainv[:, b * Z:(b + 1) * Z] @ (Mws[b].T / sigs[b][None, :])
@@ -1401,6 +1422,23 @@ def _data_esums(deb, i, ep):
     return sums
 
 
+# rows per influence-kernel call: the kernels are built on the
+# padded fft grid, (rows, dim, dim) plus the complex half plane,
+# so a large group with the ladder's aperture members (6 + 8 per
+# object per epoch) would take tens of GB in one call (measured
+# 33 GB on a wldb field); chunking bounds it at ~0.5 GB with the
+# same result
+_KERNEL_CHUNK = 16
+
+
+def _influence_kernels_chunked(ep, G, shape):
+    parts = [
+        influence_kernels(ep, G[i0:i0 + _KERNEL_CHUNK], shape)
+        for i0 in range(0, G.shape[0], _KERNEL_CHUNK)
+    ]
+    return np.concatenate(parts, axis=0)
+
+
 def _cov_sums(deb, obs_flat, epochs, L=None):
     """the covariance of the stacked data sums: the 6 moment
     sums per object per epoch, followed (for ladder groups) by
@@ -1424,20 +1462,48 @@ def _cov_sums(deb, obs_flat, epochs, L=None):
 
     for iep, ep in enumerate(epochs):
         obs = obs_flat[iep]
-        Gs = [
-            moment_kernels(
+        # the rows stream through the kernel builder in chunks:
+        # the full (nrows, nmodes) complex stack of a large group
+        # is GBs, the real-space kernels (nrows, ny, nx) are what
+        # the covariance needs
+        parts = []
+        pend = []
+        npend = 0
+
+        def flush():
+            parts.append(
+                _influence_kernels_chunked(
+                    ep, np.vstack(pend), obs.image.shape,
+                )
+            )
+            pend.clear()
+
+        for i in range(nobj):
+            pend.append(moment_kernels(
                 ep, deb.Sw[i],
                 deb.positions[i][0] - ep['vcen'],
                 deb.positions[i][1] - ep['ucen'],
+            ))
+            npend += 6
+            if npend >= _KERNEL_CHUNK:
+                flush()
+                npend = 0
+        for io, i in enumerate(lidx):
+            v0, u0 = deb.positions[i]
+            G, _ = _flux_kernels_and_dtheta_dyadic(
+                ep, L['Sws0'][io], v0 - ep['vcen'], u0 - ep['ucen'],
             )
-            for i in range(nobj)
-        ]
-        for io in range(nlad):
-            for j in range(nap):
-                Gs.append(L['Gap'][io][j][iep][None, :])
-        G = np.vstack(Gs)
-        hs = influence_kernels(ep, G, obs.image.shape)
+            pend.append(G)
+            npend += nap
+            if npend >= _KERNEL_CHUNK:
+                flush()
+                npend = 0
+        if pend:
+            flush()
+        hs = np.concatenate(parts, axis=0)
+        del parts
         cb = sums_cov(hs, obs.weight)
+        del hs
         rows = []
         for i in range(nobj):
             rows += [

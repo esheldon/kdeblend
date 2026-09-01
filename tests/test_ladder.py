@@ -273,12 +273,17 @@ def test_ladder_consistency_rows():
         assert on < off
 
 
-def test_ladder_derived_values():
+def test_ladder_derived_values(monkeypatch):
     """the derived functionals on an isolated exp truth: the
     fixed-aperture flux equals the direct star-normalized data
     measurement, the total flux recovers the true total, and a
-    gradient-free two-band truth gives a zero gradient"""
+    gradient-free two-band truth gives a zero gradient.  The
+    rows are noiseless, which never engages the prior, so the
+    total solve's aperture cap (an ill-posed extrapolation
+    without noise, see LADDER_TOTAL_MAX_AP) is off here"""
+    import kdeblend.ladder as L
     from kdeblend.ladder import ladder_fixed_weight
+    monkeypatch.setattr(L, 'LADDER_TOTAL_MAX_AP', None)
 
     comps = [dict(kind='exp', hlr=0.6, flux=3.0, e1=0.05, e2=-0.02,
                   v=0.0, u=0.0)]

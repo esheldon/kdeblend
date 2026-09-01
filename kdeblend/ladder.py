@@ -120,6 +120,24 @@ LADDER_BASE_FLOOR = 0.1
 # star-normalized (exact from the ladder mixture; the fixed
 # aperture is uniform across objects and psf-model calibratable)
 LADDER_TAU_TOTAL = 0.3
+# the largest aperture factor (of LADDER_AP_FACS) whose flux row
+# informs the total-flux solve; None keeps all.  The outer
+# apertures integrate ~100 arcsec^2 of whatever is not modelled
+# (undetected galaxies, sky residuals): a uniform background of 2
+# percent of the flux inside r=2 arcsec raises sum(amps) by 14-37
+# percent through the a=32 row, measured noiselessly, and the
+# wldb fields show +3-4 percent on isolated bright objects.  With
+# the cap the prior (exp projection) completes beyond it: on 10
+# wldb fields the cap at 4 (weight sigma twice the object's)
+# takes the isolated excess to 0-2 percent (tracking the exp
+# model within 2 at every size and recovering the largest
+# galaxies where exp reads 0.96), cuts the low-s2n scatter 40
+# percent and halves the blended excess; the unit check at s2n
+# ~100 costs 1-3 percent on wide pure-exp profiles and 5 on n=4
+# wings.  Noiseless rows never engage the prior, so with a cap
+# the outer rungs become an ill-posed extrapolation there: the
+# cap only means something with real noise
+LADDER_TOTAL_MAX_AP = 4.0
 LADDER_FIXED_FWHM = 2.0
 
 # consistency row: the T sum under each ladder object's own
@@ -982,6 +1000,22 @@ def ladder_fixed_flux(amps, rungs, W2, s_star):
     return (amps @ u) / s_star
 
 
+def ladder_total_var(d, var):
+    """
+    the row variances of the total-flux solve: the aperture rows
+    beyond LADDER_TOTAL_MAX_AP deweighted relative to noise and
+    signal so the prior completes them (the row layout is shared
+    with the subtraction solve, so the rows stay in place); var
+    itself when there is no cap.  d, var: (nlad, nrows, nband)
+    """
+    if LADDER_TOTAL_MAX_AP is None:
+        return var
+    var = var.copy()
+    drop = np.flatnonzero(LADDER_AP_FACS > LADDER_TOTAL_MAX_AP)
+    var[:, drop, :] = 1.0e12 * (var[:, drop, :] + d[:, drop, :] ** 2)
+    return var
+
+
 def ladder_derived(deb):
     """
     the derived flux functionals of every ladder object at the
@@ -1005,7 +1039,8 @@ def ladder_derived(deb):
     ladder_subtract_others(deb, idx, aps, Sws, wsum, d)
     Mt = ladder_template(deb, idx, aps, Sws)
     tot = ladder_solve_rows(
-        deb, idx, d, var, wsum, Sws, Fhat, Mt, tau0=LADDER_TAU_TOTAL,
+        deb, idx, d, ladder_total_var(d, var), wsum, Sws, Fhat, Mt,
+        tau0=LADDER_TAU_TOTAL,
     )
     W2, s_star = ladder_fixed_weight(deb.Tsmooth)
     for io, i in enumerate(idx):
