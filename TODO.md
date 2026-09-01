@@ -187,6 +187,82 @@
   would remove it), Cov(S) 8 s (batched irfft2 / Gram fast
   path); fit: sweeps 24 s vs exp 12 (solve gating on the
   weight change for the grinders).
+  Solve gating (2026-08-31): the solve is skipped when no
+  packed-state component moved by more than 1e-4 (normalized)
+  since the last solve, with the carried change retired and a
+  final solve at the converged state; results identical to
+  3e-5 in flux and 2e-5 in amps, fast groups skip a quarter of
+  their solves, and no lag is introduced (it fires only on a
+  static state).  It cannot touch the slow groups, which hold
+  76 percent of the solves and keep moving > 1e-4 per two
+  sweeps; an adaptive backoff of the cadence for them was
+  measured and rejected (see LADDER_GATE_TOL).  Fit floor now:
+  sweeps 23 s vs exp 12, of which the solves 13 s at ~2.7 ms
+  each (~4700 per field); the remaining fit lever is per-solve
+  cost (numba assembly, cached prior/template between the two
+  bands), not solve count.
+  Error levers (2026-08-31): the tau-independent assembly shared
+  by the subtraction and total solves (ladder_assemble without
+  the lam0 diagonal, ladder_solve_pieces adds it), the prior
+  center cached against the weight (exact match in the error
+  evaluations so the sw-column derivatives stay exact, 1e-3
+  relative in the fit), single-batch prior and fixed-flux
+  kernels, and the fused dyadic kernel rows and derivatives
+  for the aperture members (_flux_kernels_and_dtheta_dyadic,
+  exact against the per-aperture route).  One field: errors
+  29 -> 23 s (state loop 14 -> 10, setup 2.6 -> 1.1), sweeps
+  23 -> 21, mdet 59 s vs exp 32 (1.85x).  The error floor is
+  now the FD state loop (10 s, ~1.1 ms per evaluation: rows +
+  template + assembly 0.6, two solves 0.2, neighbor sums 0.25,
+  save/restore 0.25) and Cov(S) 7.4 s (FFT-bound in the
+  batched ngmix influence kernels; the a=1 aperture member
+  duplicates the own flux row, ~10 percent).  The analytic
+  state response (d(amps)/d(x) from the template and prior
+  derivatives with respect to the frame) is the remaining
+  structural lever for the state loop.
+  Analytic state response (2026-08-31, _ladder_state_response):
+  the amps' response to every packed state column through the
+  solve chain dX = A^-1 (d rhs - dA X) at both prior widths,
+  with the template, prior and subtracted-row derivatives from
+  central micro-FD on the batched closed-form kernels (the
+  _model_sum_derivs pattern), the data-row derivatives from
+  the analytic kernel derivatives, the fixed-amps direct part
+  of the neighbor sums from _model_sum_derivs (which now
+  refreshes a ladder object's rungs with its weight column),
+  and the amps channel through the unit rung sums; the fixed
+  and total functionals likewise.  The FD state loop stays as
+  the referee: agreement to 1e-3 on every derivative for the
+  ladder+gauss and ladder+ladder pairs
+  (test_ladder_state_response_matches_fd), chain vs the FD
+  referee to 1e-4 on the covariance diagonals.  One field:
+  errors 23 -> 15.4 s (state loop 10 -> 2.2), mdet 51 s vs exp
+  32: 1.6x (3.4x at the pilot).  Remaining error floor: Cov(S)
+  7.3 s (FFT-bound), the mode/functional/gauss-flux pieces
+  ~4 s; fit sweeps 21 s vs 12.
+  Pilot rerun (2026-08-31, par2, same 20 fields and seeds, all
+  levers landed): cpu ratio of sums 1.30 (2.29 at the first
+  pilot), per-job median 1.28, range 1.18-1.54 across the ten
+  jobs (the exp baseline reproduces, 1099 vs 1097 s); the
+  single-field profiles used seed 5003 throughout, a
+  blend-heavier field than the median, and excluded the
+  per-job startup, hence their 1.6x.  Health unchanged: flags0
+  0.975 vs 0.970, deblend_flags 6.2 vs 7.5 percent, demoted 85
+  vs 125, sweeps p90 141 vs 202.
+  Per-solve cost (2026-09-01): kept -- the grid kernel
+  (gauss_grid_sums: weights x components with per-pair offsets,
+  no caller-side broadcasting; the template 170 -> 60 us, and
+  every other batched closed-form call), and the fit-side prior
+  cache tolerance 1e-2 (projections per solve 1.07 -> 0.83).
+  Measured neutral or worse and reverted: one table
+  exponential per aperture in the fused pass instead of the
+  exact-root dyadic chain (~10 percent slower: the per-aperture
+  branch costs more than the straight-line chain), and a
+  jitted assembly (the 200 us is array handling around the
+  call, not arithmetic).  Per solve 1.27 -> 1.06 ms on a
+  median field; the fused data pass (0.62 ms per solve, ~0.2
+  ms per object-epoch, ~5x a single admom_ksums pass for eight
+  apertures plus the moment sums) is the floor, and the gpu
+  port's kernel.
   Remaining slices, in priority order: field-scale wldb validation
   against exp with truth matching and doshear (run once with
   the complete contract; the gate for the exp/dev/bdf deletion

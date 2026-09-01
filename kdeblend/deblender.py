@@ -71,6 +71,7 @@ from .ladder import (
     band_comps, ladder_rung_covs, ladder_exp_fracs,
     solve_group_amps, ladder_derived, color_gradient,
     LADDER_RUNGS, LADDER_SOLVE_EVERY, LADDER_WARMUP,
+    LADDER_GATE_TOL,
 )
 
 DEFAULT_TGUESS = 0.5
@@ -715,6 +716,10 @@ class _Deblender(object):
         # relative change, carried into the convergence metric
         # between solves (see _update_gauss)
         self.ladder_last_da = np.zeros(len(objects))
+        # the packed state at the last amp solve, for the gate,
+        # and the next sweep to solve at
+        self._ladder_last_x = None
+        self._ladder_next = LADDER_WARMUP
         self.isweep = 0
 
         self.epochs_per_obj = epochs_per_obj
@@ -953,13 +958,14 @@ class _Deblender(object):
                 self._check_noncontraction()
             self._extrapolate()
 
-        # the derived flux functionals of the ladder objects are
-        # a group computation at the converged state
-        self._ladder_derived = (
-            ladder_derived(self)
-            if any(m['type'] == 'ladder' for m in self.models)
-            else {}
-        )
+        # the final amp solve at the converged state (the gate can
+        # leave the last solve a few sweeps behind) and the
+        # derived flux functionals, a group computation
+        if any(m['type'] == 'ladder' for m in self.models):
+            solve_group_amps(self)
+            self._ladder_derived = ladder_derived(self)
+        else:
+            self._ladder_derived = {}
 
         return {
             'converged': converged,
@@ -984,14 +990,28 @@ class _Deblender(object):
             if ch > self._win_max[i]:
                 self._win_max[i] = ch
         if (
-            self.isweep >= LADDER_WARMUP
-            and (self.isweep - LADDER_WARMUP)
-            % LADDER_SOLVE_EVERY == 0
+            self.isweep >= self._ladder_next
             and any(m['type'] == 'ladder' for m in self.models)
         ):
-            da = solve_group_amps(self)
-            if da is not None:
-                self._note_change('struct', da)
+            x = self._pack_state()
+            xl = self._ladder_last_x
+            if (
+                xl is None or xl.size != x.size
+                or np.abs(x - xl).max() > LADDER_GATE_TOL
+            ):
+                da = solve_group_amps(self)
+                if da is not None:
+                    self._note_change('struct', da)
+                    self._ladder_last_x = x
+                self._ladder_next = self.isweep + LADDER_SOLVE_EVERY
+            else:
+                # the state has not moved enough since the last
+                # solve to change the amps: the carried change
+                # is retired so it cannot hold up convergence
+                for i, m in enumerate(self.models):
+                    if m['type'] == 'ladder':
+                        self.ladder_last_da[i] = 0.0
+                self._ladder_next = self.isweep + LADDER_SOLVE_EVERY
         return dict(self._sweep_changes)
 
     def _converged(self, changes):
@@ -1805,6 +1825,8 @@ class _Deblender(object):
         self.nfail[i] = 0
         m = self.models[i]
         self.Sw[i] = self.smooth_cov.copy()
+        # the amps must follow the intervention promptly
+        self._ladder_next = self.isweep + 1
         if self.recenter:
             # the wandering center may be part of the runaway
             self.positions[i] = self.det_positions[i]

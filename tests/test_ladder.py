@@ -331,3 +331,47 @@ def test_ladder_fixed_external():
         res2['objects'][0]['flux'], res['objects'][1]['flux'],
         rtol=1.0e-4,
     )
+
+
+def test_ladder_apsums_matches_passes():
+    """the fused data pass equals the separate admom_finalize
+    passes per aperture (sums and variances) and under the
+    weight itself, with the same table exponential"""
+    from ngmix.prepsfadmom.prepsfadmom_nb import admom_finalize
+    from kdeblend.ladder import ladder_apsums, LADDER_AP_FACS
+
+    comp = dict(kind='sersic', n=3.0, hlr=0.8, flux=1.0, e1=0.05,
+                e2=-0.02, v=0.0, u=0.0)
+    obs = make_blend_obs([comp], 0.8, dim=128)
+    deb, _ = build_deblender(
+        obs, [dict(v=0.0, u=0.0, type='gauss', Tguess=0.5)],
+    )
+    deb.go()
+    ep = deb.epochs_per_obj[0][0]
+    Sw = np.asarray(deb.Sw[0]) + np.array([[0.0, 0.02], [0.02, 0.0]])
+    a, b = get_phase_angles(ep, 0.0, 0.0)
+    nap = LADDER_AP_FACS.size
+    flux = np.zeros(nap)
+    s1 = np.zeros(6)
+    vr = np.zeros(nap + 1)
+    ladder_apsums(
+        ep['kim'], ep['iy'], ep['ix'], ep['dim'], a, b, ep['kv'],
+        ep['ku'], Sw[0, 0], Sw[0, 1], Sw[1, 1], ep['df2'],
+        ep['err_fac2'], True, flux, s1, vr,
+    )
+    for j, af in enumerate(LADDER_AP_FACS):
+        W = af * Sw
+        ref = np.zeros(6)
+        cov = np.zeros((6, 6))
+        admom_finalize(
+            ep['kim'], ep['iy'], ep['ix'], ep['dim'], a, b, ep['kv'],
+            ep['ku'], W[0, 0], W[0, 1], W[1, 1], ep['df2'],
+            ep['err_fac2'], ref, cov,
+        )
+        # the fused pass is exact; the separate passes carry the
+        # table exponential's 2e-6
+        assert abs(flux[j] / ref[5] - 1) < 1.0e-5
+        assert abs(vr[j] / cov[5, 5] - 1) < 1.0e-5
+        if af == 1.0:
+            assert np.allclose(s1, ref, rtol=1.0e-5)
+            assert abs(vr[nap] / cov[4, 4] - 1) < 1.0e-5

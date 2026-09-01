@@ -40,7 +40,11 @@ def test_ladder_errors_chain_vs_fd(types):
     cov_f, _, ex_f = full_covariance(deb, mbobs, use_chain=False)
     dd = np.sqrt(np.diag(cov_c) / np.diag(cov_f))
     assert np.all(np.abs(dd - 1) < 1.0e-2), dd
-    assert np.allclose(cov_c, cov_f, rtol=3.0e-2, atol=0)
+    # off-diagonal entries relative to their natural scale
+    # sqrt(C_ii C_jj): a pure relative test fails on near-zero
+    # entries at rounding level
+    sc = np.sqrt(np.outer(np.diag(cov_f), np.diag(cov_f)))
+    assert np.all(np.abs(cov_c - cov_f) < 3.0e-2 * sc)
     for gc, gf in zip(ex_c['gauss_flux_cov'], ex_f['gauss_flux_cov']):
         assert np.allclose(
             np.sqrt(np.diag(gc)), np.sqrt(np.diag(gf)), rtol=1.0e-2,
@@ -151,3 +155,88 @@ def test_flux_kernel_and_dtheta_matches_ngmix():
         Dref = dsums_dtheta(ep, W, v0, u0)[5]
         assert np.allclose(G, Gref, rtol=1.0e-12, atol=0)
         assert np.allclose(D, Dref, rtol=1.0e-10, atol=0)
+
+
+def test_flux_kernels_dyadic_match_per_aperture():
+    """the fused dyadic aperture kernels and derivatives equal the
+    per-aperture routine (hence the ngmix flux rows) for all
+    eight apertures"""
+    from kdeblend.full_errors import (
+        _flux_kernel_and_dtheta, _flux_kernels_and_dtheta_dyadic,
+    )
+    from kdeblend.ladder import LADDER_AP_FACS
+
+    rng = np.random.RandomState(5)
+    mbobs = make_mbobs(rng, OFFSETS)
+    deb, _ = build_deblender(
+        mbobs, _objects(('ladder', 'gauss')), tol=1.0e-6,
+        maxiter=2000, full_errors=True,
+    )
+    deb.go()
+    Sw = np.asarray(deb.Sw[0]) + np.array([[0.0, 0.03], [0.03, 0.0]])
+    for ep in deb.epochs_per_obj[0]:
+        v0 = deb.positions[0][0] - ep['vcen']
+        u0 = deb.positions[0][1] - ep['ucen']
+        G, D = _flux_kernels_and_dtheta_dyadic(ep, Sw, v0, u0)
+        for j, af in enumerate(LADDER_AP_FACS):
+            Gj, Dj = _flux_kernel_and_dtheta(ep, af * Sw, v0, u0)
+            assert np.allclose(G[j], Gj, rtol=1.0e-10, atol=1e-300)
+            assert np.allclose(D[j], Dj, rtol=1.0e-8, atol=0)
+
+
+@pytest.mark.parametrize('types', [
+    ('ladder', 'gauss'), ('ladder', 'ladder'),
+])
+def test_ladder_state_response_matches_fd(types):
+    """the analytic state response (solve chain with micro-FD
+    leaves) reproduces the finite-difference state loop: the
+    neighbor-sum derivatives and the derived-functional
+    responses"""
+    from kdeblend import full_errors as fe
+    from kdeblend.ladder import ladder_fixed_weight
+
+    rng = np.random.RandomState(31)
+    mbobs = make_mbobs(rng, OFFSETS)
+    deb, _ = build_deblender(
+        mbobs, _objects(types), tol=1.0e-6, maxiter=2000,
+        full_errors=True,
+    )
+    res = deb.go()
+    assert res['converged']
+    epochs = deb.epochs_per_obj[0]
+    caches = [[fe._data_esums(deb, i, ep) for ep in epochs]
+              for i in range(deb.nobj)]
+    from ngmix.prepsfadmom.full_errors import dsums_dtheta
+    Ds = [[dsums_dtheta(ep, deb.Sw[i], deb.positions[i][0] - ep['vcen'],
+                        deb.positions[i][1] - ep['ucen'])
+           for ep in epochs] for i in range(deb.nobj)]
+    theta0s = [fe._theta_of(deb, i) for i in range(deb.nobj)]
+    L = fe._ladder_setup(deb, epochs)
+    fe._ladder_resolve(deb, L, caches, Ds, theta0s, {}, {})
+    W2, s_star = ladder_fixed_weight(deb.Tsmooth)
+    snap = fe._save_state(deb)
+    x0 = deb._pack_state()
+    cols = fe._column_map(deb)
+
+    dNS_fd, ls_fd = fe._ladder_state_derivs(
+        deb, snap, x0, L, caches, Ds, theta0s, cols, W2, s_star,
+    )
+    dNS_direct, _ = fe._model_sum_derivs(deb, cols)
+    dNS_an, ls_an = fe._ladder_state_response(
+        deb, snap, x0, L, caches, Ds, theta0s, cols, W2, s_star,
+        dNS_direct,
+    )
+    # neighbor-sum derivatives: compare on the union of keys, in
+    # units of the largest entry per column
+    keys = set(dNS_fd) | set(dNS_an)
+    for key in keys:
+        a = dNS_an.get(key, np.zeros((deb.nband, 6)))
+        f = dNS_fd.get(key, np.zeros((deb.nband, 6)))
+        scale = max(np.abs(f).max(), np.abs(a).max(), 1e-30)
+        assert np.abs(a - f).max() < 1.0e-3 * scale, (key, a, f)
+    for name in ('G_fixed', 'G_total'):
+        a, f = ls_an[name], ls_fd[name]
+        scale = np.abs(f).max(axis=2, keepdims=True) + 1e-30
+        assert np.all(np.abs(a - f) < 1.0e-3 * scale), name
+    for name in ('f0_fixed', 'f0_total'):
+        assert np.allclose(ls_an[name], ls_fd[name], rtol=1e-10)

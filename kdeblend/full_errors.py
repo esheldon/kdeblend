@@ -50,7 +50,7 @@ from ngmix.prepsfadmom.full_errors import (
     moment_kernels, dsums_dtheta, influence_kernels, sums_cov,
     sym3_mat as _sym3_mat,
     dw_derivs as _dw_derivs,
-    _ingredients,
+    _ingredients, WK_CHI2_MAX,
 )
 from ngmix.prepsfadmom.prepsfadmom import get_phase_angles
 from ngmix.prepsfadmom.prepsfadmom_nb import admom_ksums
@@ -60,8 +60,11 @@ import functools
 from .ladder import (
     ladder_context, ladder_measure_rows, ladder_subtract_others,
     ladder_template, ladder_solve_rows, ladder_write_amps,
-    ladder_assemble, ladder_neighbor_unit_sums, ladder_prior,
-    ladder_fixed_weight, ladder_fixed_flux,
+    ladder_assemble, ladder_solve_pieces, ladder_neighbor_unit_sums,
+    ladder_prior, ladder_fixed_weight, ladder_fixed_flux,
+    ladder_fixed_fluxes, ladder_fixed_units, ladder_context,
+    ladder_template, ladder_subtract_others, ladder_exp_fracs,
+    ladder_rung_covs, pairs_sums, LADDER_TAU0,
     LADDER_AP_FACS, LADDER_RUNGS, LADDER_MOMENT_ROWS, _MOM_IDX,
     LADDER_TAU_TOTAL,
 )
@@ -87,7 +90,8 @@ MUTABLE_ATTRS = (
     '_prev_win_nfail', '_change_hist', 'hist', 'nskip', 'nfail',
     'nrestart', 'isweep', 'dbflags', 'bdf_info', 'bdf_last_dfd',
     '_cen_sigma_sweep', '_bdf_noise_cache', 'ladder_last_da',
-    '_ladder_sig_cache',
+    '_ladder_sig_cache', '_ladder_last_x', '_ladder_next',
+    '_ladder_prior_cache',
 )
 
 
@@ -471,6 +475,55 @@ def _flux_kernel_and_dtheta(ep, W, v0, u0):
     return base, D
 
 
+def _flux_kernels_and_dtheta_dyadic(ep, Sw, v0, u0):
+    """
+    _flux_kernel_and_dtheta for the eight dyadic apertures
+    a Sw, a = LADDER_AP_FACS, from one evaluation of the shared
+    ingredients: the phase and the quadratic form are common,
+    the a=1 weight is one exact exponential and the others its
+    square roots and squares, each with the same cutoff the
+    per-aperture route applies.  Returns G (8, nmodes) and
+    D (8, 5), the flux-sum derivatives with respect to each
+    aperture's own covariance components and the center
+    """
+    alpha, beta = get_phase_angles(ep, v0, u0)
+    dim = ep['dim']
+    iy = ep['iy'].astype(np.int64)
+    ix = ep['ix'].astype(np.int64)
+    kv, ku, kim = ep['kv'], ep['ku'], ep['kim']
+    Sv = Sw[0, 0] * kv + Sw[0, 1] * ku
+    Su = Sw[0, 1] * kv + Sw[1, 1] * ku
+    chi2 = kv * Sv + ku * Su
+    yf = np.where(iy < (dim + 1) // 2, iy, iy - dim)
+    xf = np.where(ix < (dim + 1) // 2, ix, ix - dim)
+    pd = np.exp(2j * np.pi / dim * (alpha * yf + beta * xf)) * ep['df2']
+    w1 = np.exp(-0.5 * chi2)
+    wh = np.sqrt(w1)
+    ws = [np.sqrt(wh), wh, w1]
+    w = w1
+    for _ in range(5):
+        w = w * w
+        ws.append(w)
+    dchi = (kv * kv, 2 * kv * ku, ku * ku)
+    a0, b0 = alpha, beta
+    av, bv = get_phase_angles(ep, v0 + 1.0, u0)
+    au, bu = get_phase_angles(ep, v0, u0 + 1.0)
+    nap = LADDER_AP_FACS.size
+    G = np.empty((nap, kim.size), dtype=complex)
+    D = np.zeros((nap, 5))
+    for j, af in enumerate(LADDER_AP_FACS):
+        wa = np.where(af * chi2 < WK_CHI2_MAX, ws[j], 0.0)
+        base = wa * pd
+        G[j] = base
+        for wq in range(3):
+            D[j, wq] = ((-0.5 * dchi[wq] * base) @ kim).real
+        dSa = ((2j * np.pi / dim) * yf * base @ kim).real
+        dSb = ((2j * np.pi / dim) * xf * base @ kim).real
+        D[j, 3] = dSa * (av - a0) + dSb * (bv - b0)
+        D[j, 4] = dSa * (au - a0) + dSb * (bu - b0)
+    return G, D
+
+
 def _ladder_setup(deb, epochs):
     """
     the ladder error context at the solution.  The amps are not
@@ -495,19 +548,15 @@ def _ladder_setup(deb, epochs):
     Gap = []
     for io, i in enumerate(idx):
         v0, u0 = deb.positions[i]
-        Dio = []
-        Gio = []
-        for j in range(nap):
-            Dj = []
-            Gj = []
-            for ep in epochs:
-                G, D = _flux_kernel_and_dtheta(
-                    ep, aps[io][j], v0 - ep['vcen'], u0 - ep['ucen'],
-                )
-                Dj.append(D)
-                Gj.append(G)
-            Dio.append(Dj)
-            Gio.append(Gj)
+        Dio = [[] for _ in range(nap)]
+        Gio = [[] for _ in range(nap)]
+        for ep in epochs:
+            G, D = _flux_kernels_and_dtheta_dyadic(
+                ep, Sws[io], v0 - ep['vcen'], u0 - ep['ucen'],
+            )
+            for j in range(nap):
+                Dio[j].append(D[j])
+                Gio[j].append(G[j])
         Dap.append(Dio)
         Gap.append(Gio)
     return {
@@ -553,16 +602,20 @@ def _ladder_rows_at(deb, L, caches, Ds, theta0s, dap, dT):
                 d[io, nap + r, band] += fac * s
     ladder_subtract_others(deb, idx, aps, Sws, L['wsum'], d)
     Mt = ladder_template(deb, idx, aps, Sws)
-    a0 = ladder_prior(deb, idx, Sws)
-    return {'Sws': Sws, 'Fhat': Fhat, 'd': d, 'Mt': Mt, 'a0': a0}
+    if not (np.all(np.isfinite(d)) and np.all(np.isfinite(Mt))):
+        raise LadderResolveError('non-finite ladder rows')
+    pieces = ladder_assemble(
+        deb, idx, L['var'], L['wsum'], Sws, Fhat, Mt,
+    )
+    return {'Sws': Sws, 'Fhat': Fhat, 'd': d, 'Mt': Mt,
+            'pieces': pieces}
 
 
 def _ladder_solve_at(deb, L, ctx, tau0=None):
     """the amps from the rows of _ladder_rows_at at the given
-    prior width"""
-    new_full = ladder_solve_rows(
-        deb, L['idx'], ctx['d'], L['var'], L['wsum'], ctx['Sws'],
-        ctx['Fhat'], ctx['Mt'], tau0=tau0, a0=ctx['a0'],
+    prior width; the tau-independent assembly is shared"""
+    new_full = ladder_solve_pieces(
+        deb, L['idx'], ctx['d'], ctx['pieces'], tau0=tau0,
     )
     if new_full is None:
         raise LadderResolveError('ladder re-solve failed')
@@ -611,13 +664,7 @@ def _ladder_state_derivs(deb, snap, x0, L, caches, Ds, theta0s,
         ladder_write_amps(deb, idx, asub)
         ns = [deb._get_neighbor_sums(i) for i in range(nobj)]
         atot = _ladder_solve_at(deb, L, ctx, LADDER_TAU_TOTAL)
-        fixed = np.array([
-            ladder_fixed_flux(
-                asub[:, io * K:(io + 1) * K],
-                deb.models[i]['rungs'], W2, s_star,
-            )
-            for io, i in enumerate(idx)
-        ])
+        fixed = ladder_fixed_fluxes(deb, idx, asub, W2, s_star)
         total = np.array([
             atot[:, io * K:(io + 1) * K].sum(axis=1)
             for io in range(nlad)
@@ -648,8 +695,279 @@ def _ladder_state_derivs(deb, snap, x0, L, caches, Ds, theta0s,
     }
 
 
+def _ladder_state_response(deb, snap, x0, L, caches, Ds, theta0s,
+                           cols, W2, s_star, dNS_direct):
+    """
+    the analytic state response of the ladder: for every packed
+    state column, the amps' response through the solve chain
+    dX = A^-1 (d rhs - dA X) at both prior widths, with the
+    template, prior and subtracted-row derivatives from central
+    micro-FD on the batched closed-form kernels and the data-row
+    derivatives from the analytic kernel derivatives; then the
+    neighbor sums (the fixed-amps direct part dNS_direct plus the
+    amps channel through the unit rung sums) and the derived
+    functionals.  Returns dNS (physical units per unit physical
+    change) and the lstate dict of _ladder_state_derivs, of
+    which this is the fast replacement (that FD loop stays as
+    the referee)
+    """
+    _restore_state(deb, snap)
+    idx = L['idx']
+    nap = L['nap']
+    nobj = deb.nobj
+    nlad = len(idx)
+    K = LADDER_RUNGS.size
+    nband = deb.nband
+    npars = x0.size
+    scales = deb.scales
+    nmom = len(_MOM_IDX) if LADDER_MOMENT_ROWS else 0
+    nrows = nap + nmom
+    Z = nlad * K
+    N = nband * Z
+    wsum = L['wsum']
+    lad_of = {i: io for io, i in enumerate(idx)}
+    taus = (LADDER_TAU0, LADDER_TAU_TOTAL)
+
+    # the solution: rows, template, pieces, amps at both widths
+    ctx = _ladder_rows_at(deb, L, caches, Ds, theta0s, {}, {})
+    d0 = ctx['d']
+    Mt = ctx['Mt']
+    A0, Mws, sigs, css, a0 = ctx['pieces']
+    Sws = ctx['Sws']
+    aps = [[af * Sws[io] for af in LADDER_AP_FACS] for io in range(nlad)]
+    Ainv = {}
+    X = {}
+    amps = {}
+    for tau in taus:
+        Ainv[tau] = np.linalg.inv(A0 + np.eye(N) / tau ** 2)
+        full = ladder_solve_pieces(deb, idx, d0, ctx['pieces'], tau0=tau)
+        if full is None:
+            raise LadderResolveError('ladder solve failed')
+        amps[tau] = full
+        X[tau] = np.concatenate([full[b] / css[b] for b in range(nband)])
+    U = ladder_neighbor_unit_sums(deb, idx)      # (nobj, nlad, K, 6)
+    u_fix = ladder_fixed_units(deb, idx, W2, s_star)   # (nlad, K)
+    rows_b = [np.repeat(wsum[:, b], nrows) for b in range(nband)]
+    f0_fixed = ladder_fixed_fluxes(deb, idx, amps[LADDER_TAU0], W2, s_star)
+    f0_total = np.array([
+        amps[LADDER_TAU_TOTAL][:, io * K:(io + 1) * K].sum(axis=1)
+        for io in range(nlad)
+    ])
+
+    def others_rows():
+        """the subtracted rows (minus the others' contribution)
+        at the current in-place state"""
+        dd = np.zeros((nlad, nrows, nband))
+        ladder_subtract_others(deb, idx, aps, Sws, wsum, dd)
+        return dd
+
+    def chain(dMt, dd, da0, dcss):
+        """the amps' response at both widths for the given
+        derivatives of the template, rows, prior and column
+        scales"""
+        out = {}
+        for tau in taus:
+            lam0 = 1.0 / tau ** 2
+            drhs = np.zeros(N)
+            dAX = np.zeros(N)
+            for b in range(nband):
+                sl = slice(b * Z, (b + 1) * Z)
+                Mw = Mws[b]
+                sig = sigs[b]
+                dMw = (
+                    ((dMt * rows_b[b][:, None]) / sig[:, None])
+                    * css[b][None, :]
+                    + ((Mt * rows_b[b][:, None]) / sig[:, None])
+                    * dcss[b][None, :]
+                )
+                db = d0[:, :, b].reshape(-1) / sig
+                ddb = dd[:, :, b].reshape(-1) / sig
+                xb = X[tau][sl]
+                drhs[sl] = dMw.T @ db + Mw.T @ ddb + lam0 * da0
+                dAX[sl] = dMw.T @ (Mw @ xb) + Mw.T @ (dMw @ xb)
+            dX = Ainv[tau] @ (drhs - dAX)
+            out[tau] = np.stack([
+                dX[b * Z:(b + 1) * Z] * css[b]
+                + X[tau][b * Z:(b + 1) * Z] * dcss[b]
+                for b in range(nband)
+            ])
+        return out
+
+    Tw0 = deb.Sw[0][0, 0] + deb.Sw[0][1, 1]
+    h_cov = 1.0e-6 * max(Tw0, 0.1)
+    h_pos = 1.0e-6
+    zero_css = [np.zeros(Z) for _ in range(nband)]
+    dNS = {}
+    G_fixed = np.zeros((nlad, nband, npars))
+    G_total = np.zeros((nlad, nband, npars))
+
+    for ic, (k, kind, sub) in enumerate(cols):
+        m = deb.models[k]
+        dMt = None
+        dd = np.zeros((nlad, nrows, nband))
+        da0 = np.zeros(Z)
+        dcss = zero_css
+        du_fix = None
+        if k in lad_of:
+            io = lad_of[k]
+            blk = slice(io * K, (io + 1) * K)
+            if kind == 'F':
+                F = m['F'][sub]
+                if abs(F) > 1.0e-12:
+                    dcss = [np.zeros(Z) for _ in range(nband)]
+                    dcss[sub][blk] = np.sign(F)
+                else:
+                    continue
+            elif kind == 'cov':
+                # cov_sm enters nothing of the ladder
+                continue
+            elif kind == 'sw':
+                r, c = _SYM[sub]
+                Sw0 = deb.Sw[k]
+                rungs0 = m['rungs']
+                Mts = []
+                a0s = []
+                dds = []
+                us = []
+                for sgn in (1.0, -1.0):
+                    Swp = Sw0.copy()
+                    Swp[r, c] += sgn * h_cov
+                    Swp[c, r] = Swp[r, c]
+                    deb.Sw[k] = Swp
+                    m['rungs'] = ladder_rung_covs(Swp, deb.Tsmooth)
+                    Sws[io] = Swp
+                    aps[io] = [af * Swp for af in LADDER_AP_FACS]
+                    Mts.append(ladder_template(deb, idx, aps, Sws))
+                    a0s.append(ladder_exp_fracs(
+                        m['rungs'], Swp, deb.Tsmooth,
+                    ))
+                    dds.append(others_rows())
+                    S00, S01, S11 = m['rungs']
+                    us.append(pairs_sums(
+                        S00, S01, S11, 0.0, 0.0,
+                        W2[0, 0], W2[0, 1], W2[1, 1],
+                    )[..., 5] / s_star)
+                deb.Sw[k] = Sw0
+                m['rungs'] = rungs0
+                Sws[io] = Sw0
+                aps[io] = [af * Sw0 for af in LADDER_AP_FACS]
+                dMt = (Mts[0] - Mts[1]) / (2 * h_cov)
+                da0[blk] = (a0s[0] - a0s[1]) / (2 * h_cov)
+                dd += (dds[0] - dds[1]) / (2 * h_cov)
+                du_fix = (us[0] - us[1]) / (2 * h_cov)
+                # the data rows through the kernel derivatives
+                for iep, ep in enumerate(deb.epochs_per_obj[k]):
+                    b = ep['band']
+                    fac = ep['weight'] * ep['detAtinv']
+                    for j in range(nap):
+                        dd[io, j, b] += (
+                            fac * LADDER_AP_FACS[j]
+                            * L['Dap'][io][j][iep][sub]
+                        )
+                    for rr, a in enumerate(_MOM_IDX[:nmom]):
+                        dd[io, nap + rr, b] += (
+                            fac * Ds[k][iep][a, sub]
+                        )
+            elif kind == 'cen':
+                pos0 = deb.positions[k]
+                Mts = []
+                dds = []
+                for sgn in (1.0, -1.0):
+                    pp = list(pos0)
+                    pp[sub] += sgn * h_pos
+                    deb.positions[k] = tuple(pp)
+                    Mts.append(ladder_template(deb, idx, aps, Sws))
+                    dds.append(others_rows())
+                deb.positions[k] = pos0
+                dMt = (Mts[0] - Mts[1]) / (2 * h_pos)
+                dd += (dds[0] - dds[1]) / (2 * h_pos)
+                for iep, ep in enumerate(deb.epochs_per_obj[k]):
+                    b = ep['band']
+                    fac = ep['weight'] * ep['detAtinv']
+                    for j in range(nap):
+                        dd[io, j, b] += (
+                            fac * L['Dap'][io][j][iep][3 + sub]
+                        )
+                    for rr, a in enumerate(_MOM_IDX[:nmom]):
+                        dd[io, nap + rr, b] += (
+                            fac * Ds[k][iep][a, 3 + sub]
+                        )
+            else:
+                continue
+        else:
+            # a non-ladder member: only the subtracted rows move
+            if kind == 'sw' or kind == 'fracdev':
+                # its weight enters nothing of the ladder
+                dds = None
+            elif kind == 'F':
+                F0 = m['F'].copy()
+                dds = []
+                for sgn in (1.0, -1.0):
+                    m['F'] = F0.copy()
+                    m['F'][sub] += sgn * 1.0
+                    dds.append(others_rows())
+                m['F'] = F0
+                dd += (dds[0] - dds[1]) / 2.0
+            elif kind == 'cov':
+                key = _covkey(m)
+                r, c = _SYM[sub]
+                cov0 = m[key].copy()
+                dds = []
+                for sgn in (1.0, -1.0):
+                    covp = cov0.copy()
+                    covp[r, c] += sgn * h_cov
+                    covp[c, r] = covp[r, c]
+                    m[key] = covp
+                    dds.append(others_rows())
+                m[key] = cov0
+                dd += (dds[0] - dds[1]) / (2 * h_cov)
+            elif kind == 'cen':
+                pos0 = deb.positions[k]
+                dds = []
+                for sgn in (1.0, -1.0):
+                    pp = list(pos0)
+                    pp[sub] += sgn * h_pos
+                    deb.positions[k] = tuple(pp)
+                    dds.append(others_rows())
+                deb.positions[k] = pos0
+                dd += (dds[0] - dds[1]) / (2 * h_pos)
+            if dds is None:
+                continue
+
+        if dMt is None:
+            dMt = np.zeros_like(Mt)
+        damps = chain(dMt, dd, da0, dcss)
+        dsub = damps[LADDER_TAU0].reshape(nband, nlad, K)
+        for i in range(nobj):
+            dn = np.einsum('jcs,bjc->bs', U[i], dsub)
+            base = dNS_direct.get((i, ic))
+            if base is not None:
+                dn = dn + base
+            if np.any(dn != 0):
+                dNS[(i, ic)] = dn
+        for jo in range(nlad):
+            gf = dsub[:, jo, :] @ u_fix[jo]
+            if du_fix is not None and jo == lad_of.get(k, -1):
+                gf = gf + amps[LADDER_TAU0][:, jo * K:(jo + 1) * K] @ du_fix
+            G_fixed[jo, :, ic] = gf * scales[ic]
+            G_total[jo, :, ic] = (
+                damps[LADDER_TAU_TOTAL].reshape(nband, nlad, K)[:, jo, :]
+                .sum(axis=1) * scales[ic]
+            )
+    # the direct part alone for the columns skipped above
+    for (i, ic), base in dNS_direct.items():
+        if (i, ic) not in dNS and np.any(base != 0):
+            dNS[(i, ic)] = base
+    _restore_state(deb, snap)
+    return dNS, {
+        'G_fixed': G_fixed, 'G_total': G_total,
+        'f0_fixed': f0_fixed, 'f0_total': f0_total,
+    }
+
+
 def _ladder_derivs(deb, snap, x0, L, caches, Ds, theta0s, cols,
-                   covS, epochs, W2, s_star):
+                   covS, epochs, W2, s_star, dNS_direct=None,
+                   use_fd=False):
     """
     the neighbor-sum derivatives for a ladder group:
     dNS[(i, col)] per packed state column by central FD of the
@@ -671,9 +989,15 @@ def _ladder_derivs(deb, snap, x0, L, caches, Ds, theta0s, cols,
     nap = L['nap']
     nS0 = 6 * nobj * nep
 
-    dNS, lstate = _ladder_state_derivs(
-        deb, snap, x0, L, caches, Ds, theta0s, cols, W2, s_star,
-    )
+    if use_fd or dNS_direct is None:
+        dNS, lstate = _ladder_state_derivs(
+            deb, snap, x0, L, caches, Ds, theta0s, cols, W2, s_star,
+        )
+    else:
+        dNS, lstate = _ladder_state_response(
+            deb, snap, x0, L, caches, Ds, theta0s, cols, W2, s_star,
+            dNS_direct,
+        )
 
     # data modes, analytic through the solve at the solution
     _restore_state(deb, snap)
@@ -688,7 +1012,8 @@ def _ladder_derivs(deb, snap, x0, L, caches, Ds, theta0s, cols,
     A, Mws, sigs, css, _ = ladder_assemble(
         deb, idx, L['var'], L['wsum'], Sws, Fhat, Mt,
     )
-    Ainv = np.linalg.inv(A)
+    from .ladder import LADDER_TAU0
+    Ainv = np.linalg.inv(A + np.eye(nband * Z) / LADDER_TAU0 ** 2)
     R = [
         Ainv[:, b * Z:(b + 1) * Z] @ (Mws[b].T / sigs[b][None, :])
         for b in range(nband)
@@ -760,22 +1085,18 @@ def _ladder_functional_covs(deb, snap, x0, L, caches, Ds, theta0s,
     _restore_state(deb, snap)
     _, aps, Sws, Tws, Fhat = ladder_context(deb)
     Mt = ladder_template(deb, idx, aps, Sws)
-    us = []
-    for io, i in enumerate(idx):
-        S00, S01, S11 = deb.models[i]['rungs']
-        from .ladder import pairs_sums
-        us.append(pairs_sums(
-            S00, S01, S11, 0.0, 0.0, W2[0, 0], W2[0, 1], W2[1, 1],
-        )[..., 5] / s_star)
+    us = list(ladder_fixed_units(deb, idx, W2, s_star))
     Rd = {
         'fixed': np.zeros((nlad, nband, nS)),
         'total': np.zeros((nlad, nband, nS)),
     }
-    for which, tau in (('fixed', None), ('total', LADDER_TAU_TOTAL)):
-        A, Mws, sigs, css, _ = ladder_assemble(
-            deb, idx, L['var'], L['wsum'], Sws, Fhat, Mt, tau0=tau,
-        )
-        Ainv = np.linalg.inv(A)
+    from .ladder import LADDER_TAU0
+    A0, Mws, sigs, css, _ = ladder_assemble(
+        deb, idx, L['var'], L['wsum'], Sws, Fhat, Mt,
+    )
+    for which, tau in (('fixed', LADDER_TAU0),
+                       ('total', LADDER_TAU_TOTAL)):
+        Ainv = np.linalg.inv(A0 + np.eye(nband * Z) / tau ** 2)
         R = [
             Ainv[:, b * Z:(b + 1) * Z] @ (Mws[b].T / sigs[b][None, :])
             for b in range(nband)
@@ -1297,7 +1618,6 @@ def _model_sum_derivs(deb, cols):
     for ic, (k, kind, sub) in enumerate(cols):
         m = deb.models[k]
         if kind == 'sw':
-            # only object k's own sums use its weight
             r, c = _SYM[sub]
             swp = deb.Sw[k].copy()
             swm = deb.Sw[k].copy()
@@ -1305,9 +1625,27 @@ def _model_sum_derivs(deb, cols):
             swp[c, r] = swp[r, c]
             swm[r, c] -= h_cov
             swm[c, r] = swm[r, c]
-            dNS[(k, ic)] = (
-                ns(k, Sw=swp) - ns(k, Sw=swm)
-            ) / (2 * h_cov)
+            if m['type'] == 'ladder':
+                # the weight sets the rungs too: at fixed amps
+                # every neighbor of k sees them (the amps'
+                # own response is the analytic chain)
+                rungs0 = m['rungs']
+                m['rungs'] = ladder_rung_covs(swp, deb.Tsmooth)
+                nsp = [ns(i, Sw=swp if i == k else None)
+                       for i in range(nobj)]
+                m['rungs'] = ladder_rung_covs(swm, deb.Tsmooth)
+                nsm = [ns(i, Sw=swm if i == k else None)
+                       for i in range(nobj)]
+                m['rungs'] = rungs0
+                for i in range(nobj):
+                    d = (nsp[i] - nsm[i]) / (2 * h_cov)
+                    if np.any(d != 0):
+                        dNS[(i, ic)] = d
+            else:
+                # only object k's own sums use its weight
+                dNS[(k, ic)] = (
+                    ns(k, Sw=swp) - ns(k, Sw=swm)
+                ) / (2 * h_cov)
             if m['type'] in ('exp', 'dev', 'bdf'):
                 sw0 = deb.Sw[k]
                 deb.Sw[k] = swp
@@ -1669,10 +2007,10 @@ def _chain_pieces(deb, snap, x0, caches, Ds, theta0s, slices,
         # the rung frames and the amps); the predicted-sum
         # derivatives of any mixture members still come from
         # the closed-form micro-FD
-        _, dPS = _model_sum_derivs(deb, cols)
+        dNS_direct, dPS = _model_sum_derivs(deb, cols)
         dNS, dNSm, lstate = _ladder_derivs(
             deb, snap, x0, L, caches, Ds, theta0s, cols, covS,
-            epochs, W2, s_star,
+            epochs, W2, s_star, dNS_direct=dNS_direct,
         )
         # the aperture and T-row data modes reach every update
         # through the re-solved amps in the neighbor sums
