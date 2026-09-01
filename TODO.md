@@ -333,6 +333,30 @@
   isolated, see above); the capped numbers are the scan's.
   Stage B (doshear differential m) and C (production scale)
   remain.
+  Stage B (2026-09-01, stageB-ladder-vs-exp): 100 seeds x 3
+  wldb gri fields per file, exp and ladder on the same fields,
+  g1 = +-0.02 for noise cancellation, types noshear/1p/1m,
+  gauss shapes, Trat 0.5-6, shape-noise weights; 400 jobs on a
+  20-wide pinned queue, 62 min.  The doshear-cancel estimate
+  per model (own selection, bootstrap over files) is far too
+  noisy at this scale: m_exp +0.002 +- 0.070, m_ladder +0.110
+  +- 0.091, dm +0.11 +- 0.085 (s2n > 10; +0.20 +- 0.087 at
+  s2n > 20), and its R11 differed 10 percent between models --
+  an artifact: 12 percent of selected objects flip selection
+  between the models (7 exp-only, 5 ladder-only: blends near
+  the Trat/s2n thresholds).  The rows are the same detections
+  in the same order, so the informative statistic is per
+  object (stageB_paired.py): 61 percent of selected objects
+  have bit-identical shapes under both models (no neighbor in
+  reach) and contribute dm = 0 +- 0.0003; on the common
+  selection dm = -0.019 +- 0.027 (s2n > 10), -0.009 +- 0.017
+  (s2n > 20), dR = +0.002 +- 0.011 / -0.005 +- 0.010.  No
+  evidence of a differential shear bias; the 1e-3 target needs
+  ~300x the fields (Stage C, condor), and the own-selection
+  differential (the metacal-relevant one, selection response
+  included) needs more still.  Note for Stage C: bootstrap
+  over files needs many small files, and the per-object
+  pairing is what makes the difference measurable.
   Idea, for later (2026-09-01): the light the uncapped total
   absorbs is itself a measurement -- per object and band, the
   light in the 4-32 x Sw annuli that neither the object's inner
