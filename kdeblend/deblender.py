@@ -913,7 +913,7 @@ class _Deblender(object):
                         )
                         bvec[i] += fac * self.esums[5]
                     for p, fm in zip(self.fpositions, self.fmodels):
-                        bvec[i] -= fac * model_ksums(
+                        bvec[i] -= fac * _any_model_ksums(
                             fm, band, p[0] - vi, p[1] - ui,
                             Sw, ep['detAtinv'], self.Tsmooth,
                         )[5]
@@ -2485,7 +2485,8 @@ def _convert_fixed_models(fixed_models, nband, Tsmooth):
     """
     internal (positions, models) lists for the fixed external
     sources; entries carry v, u, type, flux and for non-star types
-    the pre-psf e1, e2, T.  Nonfinite parameters raise: a poisoned
+    the pre-psf e1, e2, T (for a ladder the gauss-estimator frame
+    plus amps, see below).  Nonfinite parameters raise: a poisoned
     fixed model would silently corrupt every subtraction
     """
     if not fixed_models:
@@ -2503,6 +2504,29 @@ def _convert_fixed_models(fixed_models, nband, Tsmooth):
         ftype = f.get('type', 'gauss')
         if ftype == 'star':
             m = {'type': 'star', 'cov_sm': smooth_cov.copy(), 'F': F}
+        elif ftype == 'ladder':
+            # a ladder from a first-pass result: e1, e2, T are the
+            # gauss-estimator frame (cov_sm - smoothing) the amps
+            # were solved in, so the rungs are reconstructed
+            # exactly; amps is the (nband, K) amplitude matrix
+            pars = [f['e1'], f['e2'], f['T']]
+            amps = np.asarray(f['amps'], dtype='f8')
+            if not (np.all(np.isfinite(pars))
+                    and np.all(np.isfinite(amps))):
+                raise ValueError(
+                    f'nonfinite fixed model parameters: {f}'
+                )
+            if amps.shape != (nband, LADDER_RUNGS.size):
+                raise ValueError(
+                    f'fixed ladder amps have shape {amps.shape}, '
+                    f'expected {(nband, LADDER_RUNGS.size)}'
+                )
+            Sw = cov_from_e(f['e1'], f['e2'], f['T']) + smooth_cov
+            m = {
+                'type': 'ladder', 'F': F, 'cov_sm': Sw,
+                'rungs': ladder_rung_covs(Sw, Tsmooth),
+                'amps': amps.copy(),
+            }
         elif ftype in ('gauss', 'exp', 'dev', 'bdf'):
             pars = [f['e1'], f['e2'], f['T']]
             if ftype == 'bdf':

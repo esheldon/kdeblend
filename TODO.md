@@ -121,14 +121,80 @@
   the pair (78 single); the functional FD channel (2 tau x 2 x
   npars re-solves, ~40 ms) could share the subtraction
   re-solves of _ladder_derivs.
+  Driver and fixed-external support (2026-08-31): kdeblend
+  accepts ladder fixed externals (entry e1, e2, T are the
+  gauss-estimator frame the amps were solved in, so the rungs
+  reconstruct exactly; test_ladder_fixed_external) and the
+  flux init dispatches them; simcoadd-mdet accepts model
+  'ladder' (config validation, object types, fixed-external
+  entries carry amps, catalog columns total_flux_{b},
+  total_flux_err_{b}, fixed_flux_{b}, fixed_flux_err_{b},
+  gradient_{b1}m{b2}(_err); example config
+  example-wldb-random-coadd-ps-kdeblend-ladder-gri.yaml; the
+  fit_model column widened from U5, which truncated 'ladder').
+  Through the driver's two-blob scene over 30 realizations
+  (s2n 40-50, gaussian truths): total_flux unbiased
+  (mean/truth 0.98-1.00) with 7.5 percent scatter and err/emp
+  0.90-1.03, adaptive flux 2.5 percent scatter, err/emp
+  0.92-1.20, fixed flux err/emp 0.95-1.09
+  (tests/test_mdet_detection.py::test_ladder_model).
+  Pilot (2026-08-31, ~/data/simcoadd-mdet/runs/pilot-ladder-vs-exp,
+  run_pilot_par.sh + compare.py): 20 wldb gri fields per config,
+  same seeds so the rows match, group-replace with full errors,
+  one core per process.  Health: ladder flags==0 0.976 vs exp
+  0.970, deblend_flags!=0 6.1 vs 7.5 percent, demoted 83 vs 125,
+  sweeps p50/p90 13/168 vs 14/202 (both hit 500 on a few
+  groups).  Cost: 125 vs 55 cpu-s per field (whole pipeline),
+  job max 461 vs 158 s.  Estimators, ladder vs exp on the same
+  objects: family flux 2.0-2.5 percent lower at every s2n (the
+  gauss-normalized aperture flux vs the exp model total: expected
+  capture), colors identical (median 0, +-0.004 mag), gauss
+  e1/e2 identical (median 0, +-0.003) with reported errors
+  equal at the median and up to 5-7 percent larger at p84,
+  gauss T lower by up to 0.02 for the p16 tail (less neighbor
+  wing under the weight).  Derived columns sane: total/flux
+  1.09-1.10, total err 1.5x flux err, fixed/flux 0.90, gradients
+  consistent with zero at s/n ~ 1.  No failures.  The truth
+  comparison (biases of fluxes, colors, sizes against the sim
+  truth, and the metacal response) is the actual validation:
+  Fused dyadic aperture kernel (2026-08-31, ladder_apsums): the
+  apertures are 0.25 x 2^n, n=0..7 (J=8), so one pass per epoch
+  gives every aperture flux sum from one exact exponential at
+  a=1 with two square roots down and five squarings up (the
+  squarings amplify relative error 2^n-fold; the table
+  exponential's 2e-6 would become 2e-4 on the widest aperture,
+  hence the exact root), plus the a=1 moment sums (the T row)
+  and the noise variances of every row when the cache is
+  stale.  Exact against the separate passes to 1e-6 (the table
+  error).  Contamination with the production K=8 rungs: the
+  dyadic-8 set matches the log-12 and log-16 sets to 10-20
+  percent at every (n, d), all 30-1000x below exp.  One field:
+  sweeps 47 -> 25 s (aperture passes 32 -> 8), errors 52 -> 47,
+  mdet 108 -> 80 s vs exp 32 (2.5x, from 3.4x).  The error
+  floor is now the functionals' FD state channel
+  (_ladder_functional_covs, 21 s: two tau solves per column that
+  rebuild rows and template already built by _ladder_derivs),
+  then _ladder_derivs 12 s and Cov(S) 8 s; the fit's is the
+  solve cadence on the grinders (gating on the weight change).
+  Merged state loop (2026-08-31, _ladder_state_derivs): one
+  restore/unpack and one row/template/prior build per state
+  column serve the neighbor-sum derivatives, the fixed-flux and
+  the total-flux responses (two cheap solves); _ladder_resolve
+  is staged into _ladder_rows_at / _ladder_solve_at.  One
+  field: errors 47 -> 29 s (state loop 14 s vs 12 + 21), mdet
+  80 -> 62 s vs exp 32: 1.9x (3.4x at the pilot).  Remaining
+  error floor: state loop 14 s (the analytic state response
+  would remove it), Cov(S) 8 s (batched irfft2 / Gram fast
+  path); fit: sweeps 24 s vs exp 12 (solve gating on the
+  weight change for the grinders).
   Remaining slices, in priority order: field-scale wldb validation
-  against exp (needs the simcoadd-mdet driver to accept the
-  type; run once with the complete contract; the gate for the
-  exp/dev/bdf deletion decision, which also makes the bdf items
-  below moot -- decide, do not do them); fixed-external and
-  gpu support (the fused J-aperture admom_ksums kernel serves
-  both the fit cost and the gpu port); the analytic
-  state-column amp response.  (The tight-blend totals
+  against exp with truth matching and doshear (run once with
+  the complete contract; the gate for the exp/dev/bdf deletion
+  decision, which also makes the bdf items below moot -- decide,
+  do not do them); gpu support
+  (the fused J-aperture admom_ksums kernel serves both the fit
+  cost and the gpu port); the analytic state-column amp
+  response.  (The tight-blend totals
   re-measurement is done, 2026-08-31: in the integrated
   deblender the 10:1 wings-on-compact faint member at d=1
   reads a total of -9.7 percent, not the +140-220 percent of

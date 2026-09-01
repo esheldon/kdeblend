@@ -60,7 +60,7 @@ import functools
 from .ladder import (
     ladder_context, ladder_measure_rows, ladder_subtract_others,
     ladder_template, ladder_solve_rows, ladder_write_amps,
-    ladder_assemble, ladder_neighbor_unit_sums,
+    ladder_assemble, ladder_neighbor_unit_sums, ladder_prior,
     ladder_fixed_weight, ladder_fixed_flux,
     LADDER_AP_FACS, LADDER_RUNGS, LADDER_MOMENT_ROWS, _MOM_IDX,
     LADDER_TAU_TOTAL,
@@ -354,9 +354,11 @@ def _full_covariance(deb, mbobs, anchor_sigma, use_chain):
     # _ladder_setup); make the stored amps the exact-weight
     # solve at the solution so the snapshot is self-consistent
     L = None
+    W2 = s_star = None
     if any(m['type'] == 'ladder' for m in deb.models):
         L = _ladder_setup(deb, epochs)
         _ladder_resolve(deb, L, caches, Ds, theta0s, {}, {})
+        W2, s_star = ladder_fixed_weight(deb.Tsmooth)
 
     snap = _save_state(deb)
     x0 = deb._pack_state()
@@ -367,10 +369,11 @@ def _full_covariance(deb, mbobs, anchor_sigma, use_chain):
 
     cols = _column_map(deb)
     dNSm = None
+    lstate = None
     if use_chain:
-        J, dFdS, dFda, dNS, dNSm = _chain_pieces(
+        J, dFdS, dFda, dNS, dNSm, lstate = _chain_pieces(
             deb, snap, x0, caches, Ds, theta0s, slices, pers,
-            covS, epochs, L,
+            covS, epochs, L, W2, s_star,
         )
     else:
         resolve0 = None
@@ -391,9 +394,9 @@ def _full_covariance(deb, mbobs, anchor_sigma, use_chain):
         if L is None:
             dNS, _ = _model_sum_derivs(deb, cols)
         else:
-            dNS, dNSm = _ladder_derivs(
+            dNS, dNSm, lstate = _ladder_derivs(
                 deb, snap, x0, L, caches, Ds, theta0s, cols,
-                covS, epochs,
+                covS, epochs, W2, s_star,
             )
 
     if deb.recenter and np.any(deb.fixcen):
@@ -435,7 +438,7 @@ def _full_covariance(deb, mbobs, anchor_sigma, use_chain):
     if L is not None:
         extras['ladder'] = _ladder_functional_covs(
             deb, snap, x0, L, caches, Ds, theta0s, cols, covS,
-            epochs, Tx, Ra, anchor_cov, slices,
+            epochs, Tx, Ra, anchor_cov, slices, lstate, W2, s_star,
         )
 
     D = np.diag(deb.scales)
@@ -513,17 +516,14 @@ def _ladder_setup(deb, epochs):
     }
 
 
-def _ladder_resolve(deb, L, caches, Ds, theta0s, dap, dT,
-                    tau0=None, write=True):
-    """re-solve the ladder amps at the CURRENT (unpacked)
-    deblender state from the linearized rows: the aperture sums
-    move with the object's weight and center through the
-    analytic kernel derivatives, the T row through the moment
-    sum derivatives, and the deltas dap[(io, j, iep)] and
-    dT[(i, iep, a)] inject data-mode perturbations.  The row
-    weights are frozen at the solution.  Returns the
-    (nband, Z) amps and, with write, stores them in the models;
-    tau0 overrides the prior width (the derived total flux)"""
+def _ladder_rows_at(deb, L, caches, Ds, theta0s, dap, dT):
+    """the linearized rows, template and prior at the CURRENT
+    (unpacked) deblender state: the aperture sums move with the
+    object's weight and center through the analytic kernel
+    derivatives, the T row through the moment sum derivatives,
+    and the deltas dap[(io, j, iep)] and dT[(i, iep, a)] inject
+    data-mode perturbations.  Everything a solve at any prior
+    width needs; the row weights are frozen at the solution"""
     idx = L['idx']
     nap = L['nap']
     _, aps, Sws, Tws, Fhat = ladder_context(deb)
@@ -553,18 +553,103 @@ def _ladder_resolve(deb, L, caches, Ds, theta0s, dap, dT,
                 d[io, nap + r, band] += fac * s
     ladder_subtract_others(deb, idx, aps, Sws, L['wsum'], d)
     Mt = ladder_template(deb, idx, aps, Sws)
+    a0 = ladder_prior(deb, idx, Sws)
+    return {'Sws': Sws, 'Fhat': Fhat, 'd': d, 'Mt': Mt, 'a0': a0}
+
+
+def _ladder_solve_at(deb, L, ctx, tau0=None):
+    """the amps from the rows of _ladder_rows_at at the given
+    prior width"""
     new_full = ladder_solve_rows(
-        deb, idx, d, L['var'], L['wsum'], Sws, Fhat, Mt, tau0=tau0,
+        deb, L['idx'], ctx['d'], L['var'], L['wsum'], ctx['Sws'],
+        ctx['Fhat'], ctx['Mt'], tau0=tau0, a0=ctx['a0'],
     )
     if new_full is None:
         raise LadderResolveError('ladder re-solve failed')
-    if write:
-        ladder_write_amps(deb, idx, new_full)
     return new_full
 
 
+def _ladder_resolve(deb, L, caches, Ds, theta0s, dap, dT,
+                    tau0=None, write=True):
+    """re-solve the ladder amps at the CURRENT (unpacked)
+    deblender state (see _ladder_rows_at).  Returns the
+    (nband, Z) amps and, with write, stores them in the models;
+    tau0 overrides the prior width (the derived total flux)"""
+    ctx = _ladder_rows_at(deb, L, caches, Ds, theta0s, dap, dT)
+    new_full = _ladder_solve_at(deb, L, ctx, tau0)
+    if write:
+        ladder_write_amps(deb, L['idx'], new_full)
+    return new_full
+
+
+def _ladder_state_derivs(deb, snap, x0, L, caches, Ds, theta0s,
+                         cols, W2, s_star):
+    """
+    one central-FD loop over the packed state columns for
+    everything the ladder needs per state: the neighbor sums
+    with the re-solved subtraction amps (dNS[(i, col)], physical
+    units per unit physical change) and the derived flux
+    functionals -- the fixed-aperture flux of the subtraction
+    amps and the total flux of the LADDER_TAU_TOTAL solve -- as
+    (nlad, nband, npars) responses in the normalized columns,
+    plus their values at the solution.  One row/template/prior
+    build per evaluation serves both solves
+    """
+    nobj = deb.nobj
+    idx = L['idx']
+    nlad = len(idx)
+    K = LADDER_RUNGS.size
+    nband = deb.nband
+    npars = x0.size
+    scales = deb.scales
+
+    def evaluate(x):
+        _restore_state(deb, snap)
+        deb._unpack_state(x)
+        ctx = _ladder_rows_at(deb, L, caches, Ds, theta0s, {}, {})
+        asub = _ladder_solve_at(deb, L, ctx, None)
+        ladder_write_amps(deb, idx, asub)
+        ns = [deb._get_neighbor_sums(i) for i in range(nobj)]
+        atot = _ladder_solve_at(deb, L, ctx, LADDER_TAU_TOTAL)
+        fixed = np.array([
+            ladder_fixed_flux(
+                asub[:, io * K:(io + 1) * K],
+                deb.models[i]['rungs'], W2, s_star,
+            )
+            for io, i in enumerate(idx)
+        ])
+        total = np.array([
+            atot[:, io * K:(io + 1) * K].sum(axis=1)
+            for io in range(nlad)
+        ])
+        _restore_state(deb, snap)
+        return ns, fixed, total
+
+    dNS = {}
+    G_fixed = np.zeros((nlad, nband, npars))
+    G_total = np.zeros((nlad, nband, npars))
+    for ic in range(npars):
+        xp = x0.copy()
+        xm = x0.copy()
+        xp[ic] += FD_H
+        xm[ic] -= FD_H
+        nsp, fpf, fpt = evaluate(xp)
+        nsm, fmf, fmt = evaluate(xm)
+        for i in range(nobj):
+            d = (nsp[i] - nsm[i]) / (2 * FD_H * scales[ic])
+            if np.any(d != 0):
+                dNS[(i, ic)] = d
+        G_fixed[:, :, ic] = (fpf - fmf) / (2 * FD_H)
+        G_total[:, :, ic] = (fpt - fmt) / (2 * FD_H)
+    _, f0f, f0t = evaluate(x0)
+    return dNS, {
+        'G_fixed': G_fixed, 'G_total': G_total,
+        'f0_fixed': f0f, 'f0_total': f0t,
+    }
+
+
 def _ladder_derivs(deb, snap, x0, L, caches, Ds, theta0s, cols,
-                   covS, epochs):
+                   covS, epochs, W2, s_star):
     """
     the neighbor-sum derivatives for a ladder group:
     dNS[(i, col)] per packed state column by central FD of the
@@ -576,35 +661,19 @@ def _ladder_derivs(deb, snap, x0, L, caches, Ds, theta0s, cols,
     rows enter the solve's right-hand side linearly, so the amp
     response to a row is a column of A^-1 Mw^T / sigma times the
     epoch factor, and the neighbor sums respond to the amps
-    through the unit rung sums (ladder_neighbor_unit_sums)
+    through the unit rung sums (ladder_neighbor_unit_sums).
+    Also returns the derived-functional state responses from
+    the shared FD loop (_ladder_state_derivs)
     """
     nobj = deb.nobj
     nep = len(epochs)
-    scales = deb.scales
     idx = L['idx']
     nap = L['nap']
     nS0 = 6 * nobj * nep
 
-    def ns_at(x, dap, dT):
-        _restore_state(deb, snap)
-        deb._unpack_state(x)
-        _ladder_resolve(deb, L, caches, Ds, theta0s, dap, dT)
-        out = [deb._get_neighbor_sums(i) for i in range(nobj)]
-        _restore_state(deb, snap)
-        return out
-
-    dNS = {}
-    for ic in range(len(cols)):
-        xp = x0.copy()
-        xm = x0.copy()
-        xp[ic] += FD_H
-        xm[ic] -= FD_H
-        nsp = ns_at(xp, {}, {})
-        nsm = ns_at(xm, {}, {})
-        for i in range(nobj):
-            d = (nsp[i] - nsm[i]) / (2 * FD_H * scales[ic])
-            if np.any(d != 0):
-                dNS[(i, ic)] = d
+    dNS, lstate = _ladder_state_derivs(
+        deb, snap, x0, L, caches, Ds, theta0s, cols, W2, s_star,
+    )
 
     # data modes, analytic through the solve at the solution
     _restore_state(deb, snap)
@@ -652,20 +721,21 @@ def _ladder_derivs(deb, snap, x0, L, caches, Ds, theta0s, cols,
                 for k, d in mode_resp(
                         b, io * nrows + nap + r, fac).items():
                     dNSm[(k, col)] = d
-    return dNS, dNSm
+    return dNS, dNSm, lstate
 
 
 def _ladder_functional_covs(deb, snap, x0, L, caches, Ds, theta0s,
                             cols, covS, epochs, Tx, Ra, anchor_cov,
-                            slices):
+                            slices, lstate, W2, s_star):
     """
     the covariances of the derived flux functionals of the
     ladder objects: the fixed-aperture flux (a linear functional
     of the subtraction amps) and the total flux (sum of the amps
     of the LADDER_TAU_TOTAL solve of the same rows), each with
     the direct data channel analytic through the solve matrix
-    and the state channel by central FD of the re-solve, chained
-    through the state response Tx; and the variance of the color
+    and the state channel from the shared FD loop
+    (_ladder_state_derivs), chained through the state response
+    Tx; and the variance of the color
     gradient (fixed minus adaptive color per adjacent band pair)
     from the fixed-flux response and the flux rows of Tx.
     Returns {i: {'fixed_flux_cov', 'total_flux_cov',
@@ -685,30 +755,6 @@ def _ladder_functional_covs(deb, snap, x0, L, caches, Ds, theta0s,
     nS = covS.shape[0]
     npars = x0.size
     scales = deb.scales
-    W2, s_star = ladder_fixed_weight(deb.Tsmooth)
-
-    def functionals(x):
-        """per ladder object (fixed, total) at state x"""
-        _restore_state(deb, snap)
-        deb._unpack_state(x)
-        asub = _ladder_resolve(
-            deb, L, caches, Ds, theta0s, {}, {}, write=False,
-        )
-        atot = _ladder_resolve(
-            deb, L, caches, Ds, theta0s, {}, {},
-            tau0=LADDER_TAU_TOTAL, write=False,
-        )
-        vals = []
-        for io, i in enumerate(idx):
-            sl = slice(io * K, (io + 1) * K)
-            vals.append((
-                ladder_fixed_flux(
-                    asub[:, sl], deb.models[i]['rungs'], W2, s_star,
-                ),
-                atot[:, sl].sum(axis=1),
-            ))
-        _restore_state(deb, snap)
-        return vals
 
     # direct data channel at the solution
     _restore_state(deb, snap)
@@ -757,22 +803,8 @@ def _ladder_functional_covs(deb, snap, x0, L, caches, Ds, theta0s,
                             else:
                                 Rd[which][jo, bp, col] += da.sum()
 
-    # state channel by FD
-    G = {
-        'fixed': np.zeros((nlad, nband, npars)),
-        'total': np.zeros((nlad, nband, npars)),
-    }
-    for ic in range(npars):
-        xp = x0.copy()
-        xm = x0.copy()
-        xp[ic] += FD_H
-        xm[ic] -= FD_H
-        fp = functionals(xp)
-        fm = functionals(xm)
-        for io in range(nlad):
-            G['fixed'][io, :, ic] = (fp[io][0] - fm[io][0]) / (2 * FD_H)
-            G['total'][io, :, ic] = (fp[io][1] - fm[io][1]) / (2 * FD_H)
-    f0 = functionals(x0)
+    # state channel from the shared FD loop
+    G = {'fixed': lstate['G_fixed'], 'total': lstate['G_total']}
     _restore_state(deb, snap)
 
     cen_cols = {
@@ -798,7 +830,7 @@ def _ladder_functional_covs(deb, snap, x0, L, caches, Ds, theta0s,
                 cov = cov + anchor_term(G[which][io])
             ent[which + '_flux_cov'] = cov
         # the color gradient: fixed color minus adaptive color
-        f2 = f0[io][0]
+        f2 = lstate['f0_fixed'][io]
         F = deb.models[i]['F']
         i0 = slices[i]
         RF = Tx[i0:i0 + nband] * scales[i0:i0 + nband, None]
@@ -1450,7 +1482,7 @@ def _gauss_flux_covs(deb, caches, Ds, dNS, cols, slices,
 
 
 def _chain_pieces(deb, snap, x0, caches, Ds, theta0s, slices,
-                  pers, covS, epochs, L=None):
+                  pers, covS, epochs, L=None, W2=None, s_star=None):
     """the Jacobi Jacobian, data response and anchor response
     assembled by the chain rule: micro finite differences of the
     pure update algebra (all sums cached) chained with the
@@ -1628,6 +1660,7 @@ def _chain_pieces(deb, snap, x0, caches, Ds, theta0s, slices,
         C[i] = Ci
 
     dNSm = None
+    lstate = None
     if L is None:
         dNS, dPS = _model_sum_derivs(deb, cols)
     else:
@@ -1637,9 +1670,9 @@ def _chain_pieces(deb, snap, x0, caches, Ds, theta0s, slices,
         # derivatives of any mixture members still come from
         # the closed-form micro-FD
         _, dPS = _model_sum_derivs(deb, cols)
-        dNS, dNSm = _ladder_derivs(
+        dNS, dNSm, lstate = _ladder_derivs(
             deb, snap, x0, L, caches, Ds, theta0s, cols, covS,
-            epochs,
+            epochs, W2, s_star,
         )
         # the aperture and T-row data modes reach every update
         # through the re-solved amps in the neighbor sums
@@ -1699,7 +1732,7 @@ def _chain_pieces(deb, snap, x0, caches, Ds, theta0s, slices,
                             slices[i], slices[i] + pers[i],
                         )
                         dFda[sli, ja] += B[i] @ d.ravel()
-    return J, dFdS, dFda, dNS, dNSm
+    return J, dFdS, dFda, dNS, dNSm, lstate
 
 
 # ---------------------------------------------------------------

@@ -267,7 +267,10 @@ def test_ladder_consistency_rows():
         on = mismatch_T(obs, True)
         off = mismatch_T(obs, False)
         assert on < 1.0e-4
-        assert on < off / 2
+        # with the dyadic apertures the flux rows alone leave the
+        # elliptical case at ~1.3e-4, so the row's gain there is
+        # ~2x (21x for the round case)
+        assert on < off
 
 
 def test_ladder_derived_values():
@@ -296,3 +299,35 @@ def test_ladder_derived_values():
     assert o['gradient'].shape == (1,)
     assert abs(o['gradient'][0]) < 2.0e-3
     assert np.all(np.isnan(o['total_flux_err']))
+
+
+def test_ladder_fixed_external():
+    """a ladder object from a first-pass result serves as a fixed
+    external: refitting the faint member alone against it
+    reproduces the pair fit's faint flux"""
+    comps = [
+        dict(kind='sersic', n=3.0, hlr=0.8, flux=5.0, e1=0.05,
+             e2=-0.02, v=0.0, u=-1.0),
+        dict(kind='gauss', T=0.2, flux=0.5, e1=0.0, e2=0.0,
+             v=0.0, u=1.0),
+    ]
+    obs = make_blend_obs(comps, 0.8, dim=128)
+    res = deblend(obs, [
+        dict(v=0.0, u=-1.0, type='ladder', Tguess=0.6),
+        dict(v=0.0, u=1.0, type='gauss', Tguess=0.2),
+    ])
+    assert res['converged']
+    rb = res['objects'][0]
+    fixed = [dict(
+        v=0.0, u=-1.0, type='ladder', flux=rb['flux'],
+        e1=rb['e1'], e2=rb['e2'], T=rb['T'], amps=rb['amps'],
+    )]
+    res2 = deblend(
+        obs, [dict(v=0.0, u=1.0, type='gauss', Tguess=0.2)],
+        fixed_models=fixed,
+    )
+    assert res2['converged']
+    assert np.allclose(
+        res2['objects'][0]['flux'], res['objects'][1]['flux'],
+        rtol=1.0e-4,
+    )
