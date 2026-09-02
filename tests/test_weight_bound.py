@@ -22,7 +22,8 @@ def make_deblender():
     objects = [dict(v=0.0, u=0.0, type='exp', Tguess=0.5)]
     dbl, _ = build_deblender(
         obs, objects, fwhm_smooth=FWHM_SMOOTH, ap_rad=0,
-    )
+    rng=np.random.RandomState(1),
+)
     return dbl
 
 
@@ -87,7 +88,8 @@ def test_unbounded_without_entry():
         ),
         [dict(v=0.0, u=0.0, type='exp', Tguess=0.5)],
         fwhm_smooth=FWHM_SMOOTH, ap_rad=0, epochs=epochs,
-    )
+    rng=np.random.RandomState(1),
+)
     assert not np.isfinite(dbl2.Tw_max[0])
     sums = sums_for_moments((1 - 1.0e-3) * dbl2.Sw[0])
     assert dbl2._deweight_measured(0, sums) is not None

@@ -132,6 +132,7 @@ def test_fp32_tol_guard():
     obs, objects = _scenes()[0]
     deb, _ = kdeblend.build_deblender(
         obs, objects, fwhm_smooth=FWHM_SMOOTH, tol=1.0e-8,
-    )
+    rng=np.random.RandomState(1),
+)
     with pytest.raises(ValueError):
         fit_groups([deb], fp32=True)

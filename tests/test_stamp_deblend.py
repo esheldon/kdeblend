@@ -182,7 +182,8 @@ def deblend_stamps_field(mbobs, objects):
         res = deblend_stamps(
             mbobs_list, [objects[j] for j in group],
             fwhm_smooth=FWHM_SMOOTH, tol=TOL,
-        )
+    rng=np.random.RandomState(1),
+)
         for k, j in enumerate(group):
             results[j] = res['objects'][k]
     return results
@@ -207,7 +208,7 @@ def test_stamps_match_shared():
         dict(v=nbr['v'], u=nbr['u'], type='exp', Tguess=0.4),
     ]
 
-    res = deblend(obs, objects, fwhm_smooth=FWHM_SMOOTH)
+    res = deblend(obs, objects, fwhm_smooth=FWHM_SMOOTH, rng=np.random.RandomState(1))
 
     mbobs_list = []
     for o in objects:
@@ -221,7 +222,7 @@ def test_stamps_match_shared():
             ),
             psf=obs.psf,
         ))
-    sres = deblend_stamps(mbobs_list, objects, fwhm_smooth=FWHM_SMOOTH)
+    sres = deblend_stamps(mbobs_list, objects, fwhm_smooth=FWHM_SMOOTH, rng=np.random.RandomState(1))
 
     for r, sr in zip(res['objects'], sres['objects']):
         assert np.allclose(sr['flux'], r['flux'], rtol=1.0e-6)
@@ -269,9 +270,10 @@ def test_rect_images():
     res_sq = deblend(
         _make_rect_obs(comps, 64, 64), objects,
         fwhm_smooth=FWHM_SMOOTH,
-    )
+    rng=np.random.RandomState(1),
+)
     obs_rect = _make_rect_obs(comps, 64, 88)
-    res_rect = deblend(obs_rect, objects, fwhm_smooth=FWHM_SMOOTH)
+    res_rect = deblend(obs_rect, objects, fwhm_smooth=FWHM_SMOOTH, rng=np.random.RandomState(1))
 
     for rs, rr in zip(res_sq['objects'], res_rect['objects']):
         assert np.allclose(rr['flux'], rs['flux'], rtol=1.0e-4)
@@ -287,7 +289,8 @@ def test_rect_images():
         mbobs_list.append(m)
     res_st = deblend_stamps(
         mbobs_list, objects, fwhm_smooth=FWHM_SMOOTH,
-    )
+    rng=np.random.RandomState(1),
+)
     for rr, rst in zip(res_rect['objects'], res_st['objects']):
         assert np.allclose(rst['flux'], rr['flux'], rtol=1.0e-3)
         assert np.abs(rst['T'] / rr['T'] - 1) < 1.0e-3
@@ -302,7 +305,7 @@ def test_deblend_stamps_errors():
     )
     objects = [dict(v=0.0, u=0.0), dict(v=1.0, u=1.0)]
     try:
-        deblend_stamps([obs], objects, fwhm_smooth=FWHM_SMOOTH)
+        deblend_stamps([obs], objects, fwhm_smooth=FWHM_SMOOTH, rng=np.random.RandomState(1))
         raise AssertionError('should have raised')
     except ValueError:
         pass
@@ -339,7 +342,8 @@ def test_gauss_flux_per_object_weights():
             )
         return deblend_stamps(
             mbobs_list, objects, fwhm_smooth=FWHM_SMOOTH, tol=TOL,
-        )
+    rng=np.random.RandomState(1),
+)
 
     resa = run(1.0e-9)
     resb = run(2.0e-9)
@@ -378,7 +382,8 @@ def test_stamp_vs_full():
     t0 = time.perf_counter()
     res_full = deblend(
         mbobs, objects, fwhm_smooth=FWHM_SMOOTH, tol=TOL,
-    )
+    rng=np.random.RandomState(1),
+)
     t_full = time.perf_counter() - t0
 
     t0 = time.perf_counter()

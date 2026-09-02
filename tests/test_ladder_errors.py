@@ -32,7 +32,8 @@ def test_ladder_errors_chain_vs_fd(types):
     deb, _ = build_deblender(
         mbobs, _objects(types), tol=1.0e-6, maxiter=2000,
         full_errors=True,
-    )
+    rng=np.random.RandomState(1),
+)
     res = deb.go()
     assert res['converged']
 
@@ -59,10 +60,11 @@ def test_ladder_errors_applied():
     rng = np.random.RandomState(7)
     mbobs = make_mbobs(rng, OFFSETS)
     objs = _objects(('ladder', 'gauss'))
-    res0 = deblend(mbobs, objs, tol=1.0e-6, maxiter=2000)
+    res0 = deblend(mbobs, objs, tol=1.0e-6, maxiter=2000, rng=np.random.RandomState(1))
     res = deblend(
         mbobs, objs, tol=1.0e-6, maxiter=2000, full_errors=True,
-    )
+    rng=np.random.RandomState(1),
+)
     assert res['converged'] and res['full_errors'] is True
     for r0, r in zip(res0['objects'], res['objects']):
         assert np.all(np.isfinite(r['flux_err']))
@@ -108,7 +110,8 @@ def test_ladder_errors_calibration(types):
         mbobs = make_mbobs(rng, offsets)
         res = deblend(
             mbobs, objs, tol=1.0e-6, maxiter=2000, full_errors=True,
-        )
+    rng=np.random.RandomState(1),
+)
         if not (res['converged'] and res['full_errors'] is True):
             continue
         nconv += 1
@@ -143,7 +146,8 @@ def test_flux_kernel_and_dtheta_matches_ngmix():
     deb, _ = build_deblender(
         mbobs, _objects(('ladder', 'gauss')), tol=1.0e-6,
         maxiter=2000, full_errors=True,
-    )
+    rng=np.random.RandomState(1),
+)
     deb.go()
     for ep in deb.epochs_per_obj[0]:
         W = 2.7 * np.asarray(deb.Sw[0]) + np.array([[0.0, 0.03],
@@ -171,7 +175,8 @@ def test_flux_kernels_dyadic_match_per_aperture():
     deb, _ = build_deblender(
         mbobs, _objects(('ladder', 'gauss')), tol=1.0e-6,
         maxiter=2000, full_errors=True,
-    )
+    rng=np.random.RandomState(1),
+)
     deb.go()
     Sw = np.asarray(deb.Sw[0]) + np.array([[0.0, 0.03], [0.03, 0.0]])
     for ep in deb.epochs_per_obj[0]:
@@ -200,7 +205,8 @@ def test_ladder_state_response_matches_fd(types):
     deb, _ = build_deblender(
         mbobs, _objects(types), tol=1.0e-6, maxiter=2000,
         full_errors=True,
-    )
+    rng=np.random.RandomState(1),
+)
     res = deb.go()
     assert res['converged']
     epochs = deb.epochs_per_obj[0]
@@ -253,7 +259,8 @@ def test_cov_sums_subsampled_matches_full_grid():
     deb, _ = build_deblender(
         mbobs, _objects(('ladder', 'gauss')), tol=1.0e-6,
         maxiter=2000, full_errors=True,
-    )
+    rng=np.random.RandomState(1),
+)
     assert deb.go()['converged']
     obs_flat = [o for ol in mbobs for o in ol]
     epochs = deb.epochs_per_obj[0]
@@ -284,7 +291,8 @@ def test_model_sum_derivs_pairwise_matches_full(types):
     deb, _ = build_deblender(
         mbobs, _objects(types, offsets), tol=1.0e-6, maxiter=2000,
         full_errors=True,
-    )
+    rng=np.random.RandomState(1),
+)
     assert deb.go()['converged']
     cols = FE._column_map(deb)
     dA, pA = FE._model_sum_derivs(deb, cols)

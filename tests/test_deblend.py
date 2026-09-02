@@ -81,7 +81,8 @@ def test_gauss_pair_multiband(sep):
             dict(v=posB[0], u=posB[1], Tguess=0.4),
         ],
         fwhm_smooth=FWHM_SMOOTH,
-    )
+    rng=np.random.RandomState(1),
+)
 
     for r, obj, fluxes in [
         (res['objects'][0], objA, fluxesA),
@@ -115,7 +116,8 @@ def test_star_blends():
                 dict(v=star['v'], u=star['u'], type=stype, Tguess=0.4),
             ],
             fwhm_smooth=FWHM_SMOOTH,
-        )
+    rng=np.random.RandomState(1),
+)
         rgal, rstar = res['objects']
         assert np.abs(rgal['e1'] - gal['e1']) < 1.0e-3
         assert np.abs(rgal['T'] / gal['T'] - 1) < 1.0e-2
@@ -137,7 +139,8 @@ def test_star_blends():
             dict(v=bgal['v'], u=bgal['u'], Tguess=0.5),
         ],
         fwhm_smooth=FWHM_SMOOTH,
-    )
+    rng=np.random.RandomState(1),
+)
     assert np.abs(res['objects'][0]['flux'][0] / faint_star['flux'] - 1) \
         < 1.0e-3
     assert np.abs(res['objects'][1]['flux'][0] / bgal['flux'] - 1) < 1.0e-3
@@ -166,7 +169,8 @@ def test_exp_bright_neighbor():
                 dict(v=nbr['v'], u=nbr['u'], type=btype, Tguess=0.4),
             ],
             fwhm_smooth=FWHM_SMOOTH,
-        )
+    rng=np.random.RandomState(1),
+)
         dff[btype] = np.abs(res['objects'][0]['flux'][0] / gal['flux'] - 1)
 
     assert dff['exp'] < 0.05
@@ -215,7 +219,8 @@ def test_noisy_smoke():
             ],
             fwhm_smooth=FWHM_SMOOTH,
             tol=1.0e-6,
-        )
+    rng=np.random.RandomState(1),
+)
         frs.append(res['objects'][0]['flux'][1] / fluxesA[1])
 
     frs = np.array(frs)
@@ -244,7 +249,8 @@ def test_s2n():
     res = deblend(
         obs, [dict(v=comp['v'], u=comp['u'], Tguess=0.4)],
         fwhm_smooth=FWHM_SMOOTH,
-    )
+    rng=np.random.RandomState(1),
+)
     r = res['objects'][0]
 
     assert np.all(np.isfinite(r['flux_err']))
@@ -285,7 +291,8 @@ def test_flux_err_calibration():
         obs = make_blend_obs([compA, compB], 0.9, noise=noise, rng=rng)
         res = deblend(
             obs, objects, fwhm_smooth=FWHM_SMOOTH, tol=1.0e-6,
-        )
+    rng=np.random.RandomState(1),
+)
         for i in range(2):
             robj = res['objects'][i]
             vals['flux'][i].append(robj['flux'][0])
@@ -341,14 +348,15 @@ def test_s2n_noise_image():
     )
     res = deblend(
         obs, objects, fwhm_smooth=FWHM_SMOOTH, use_noise_image=True,
-    )
+    rng=np.random.RandomState(1),
+)
     r = res['objects'][0]
 
     assert np.all(np.isfinite(r['flux_err']))
     assert np.abs(r['s2n'] / fres['s2n'] - 1) < 0.05
 
     # the white assumption misses the low-k power concentration
-    res_white = deblend(obs, objects, fwhm_smooth=FWHM_SMOOTH)
+    res_white = deblend(obs, objects, fwhm_smooth=FWHM_SMOOTH, rng=np.random.RandomState(1))
     assert res_white['objects'][0]['s2n'] > 1.5 * r['s2n']
 
 
@@ -389,7 +397,7 @@ def test_failure_containment():
         objects = [
             {'v': 0.0, 'u': 0.0, 'type': model, 'Tguess': 1.5},
         ]
-        res = deblend(obs, objects, tol=1.0e-6)
+        res = deblend(obs, objects, tol=1.0e-6, rng=np.random.RandomState(1))
         obj = res['objects'][0]
         assert obj['deblend_flags'] & DEBLENDED_AS_PSF
         assert obj['deblend_flags'] & RESTARTED
@@ -411,7 +419,7 @@ def test_failure_containment():
         {'v': 0.0, 'u': -1.0, 'type': 'exp', 'Tguess': 0.6},
         {'v': 0.0, 'u': 1.0, 'type': 'exp', 'Tguess': 0.8},
     ]
-    res = deblend(obs, objects, tol=1.0e-6)
+    res = deblend(obs, objects, tol=1.0e-6, rng=np.random.RandomState(1))
     for obj in res['objects']:
         assert obj['deblend_flags'] == 0
         assert obj['type'] == 'exp'
@@ -437,7 +445,7 @@ def test_fixed_models():
 
     # isolated reference
     obs = make_blend_obs([faint], 0.9)
-    ref = deblend(obs, objects, tol=1.0e-6)['objects'][0]
+    ref = deblend(obs, objects, tol=1.0e-6, rng=np.random.RandomState(1))['objects'][0]
     assert ref['deblend_flags'] == 0
 
     # blended, with the neighbor as a fixed external model at truth
@@ -446,7 +454,7 @@ def test_fixed_models():
         'v': 0.0, 'u': 2.5, 'type': 'gauss',
         'e1': 0.0, 'e2': 0.0, 'T': 1.0, 'flux': [10000.0],
     }]
-    res = deblend(obs, objects, tol=1.0e-6, fixed_models=fixed)
+    res = deblend(obs, objects, tol=1.0e-6, fixed_models=fixed, rng=np.random.RandomState(1))
     obj = res['objects'][0]
 
     assert obj['deblend_flags'] == 0
@@ -464,7 +472,7 @@ def test_fixed_models():
         'e1': 0.0, 'e2': 0.0, 'T': np.nan, 'flux': [10000.0],
     }]
     with pytest.raises(ValueError):
-        deblend(obs, objects, tol=1.0e-6, fixed_models=bad)
+        deblend(obs, objects, tol=1.0e-6, fixed_models=bad, rng=np.random.RandomState(1))
 
 
 def test_dev_blends():
@@ -485,7 +493,7 @@ def test_dev_blends():
         {'v': 0.0, 'u': -1.2, 'type': 'dev', 'Tguess': 2.0},
         {'v': 0.0, 'u': 1.2, 'type': 'gauss', 'Tguess': 0.5},
     ]
-    res = deblend(obs, objects, tol=1.0e-8)
+    res = deblend(obs, objects, tol=1.0e-8, rng=np.random.RandomState(1))
     o0, o1 = res['objects']
     for o in (o0, o1):
         assert o['deblend_flags'] == 0
@@ -510,7 +518,7 @@ def test_dev_blends():
         {'v': 0.0, 'u': -1.2, 'type': 'dev', 'Tguess': 2.0},
         {'v': 0.0, 'u': 1.2, 'type': 'exp', 'Tguess': 0.5},
     ]
-    res = deblend(obs, objects, tol=1.0e-8)
+    res = deblend(obs, objects, tol=1.0e-8, rng=np.random.RandomState(1))
     o0, o1 = res['objects']
     for o in (o0, o1):
         assert o['deblend_flags'] == 0
@@ -541,7 +549,7 @@ def test_gauss_shapes():
         {'v': 0.0, 'u': -1.0, 'type': 'gauss', 'Tguess': 0.6},
         {'v': 0.0, 'u': 1.0, 'type': 'gauss', 'Tguess': 0.8},
     ]
-    res = deblend(obs, objects, tol=1.0e-8)
+    res = deblend(obs, objects, tol=1.0e-8, rng=np.random.RandomState(1))
     for o in res['objects']:
         assert np.allclose(o['gauss_e1'], o['e1'])
         assert np.allclose(o['gauss_e2'], o['e2'])
@@ -559,7 +567,8 @@ def test_gauss_shapes():
     res = deblend(
         obs, [{'v': 0.0, 'u': 0.0, 'type': 'exp', 'Tguess': 0.5}],
         tol=1.0e-8,
-    )
+    rng=np.random.RandomState(1),
+)
     o = res['objects'][0]
     assert o['gauss_e_flags'] == 0
     assert np.isfinite(o['gauss_e1'])
@@ -581,7 +590,8 @@ def test_gauss_s2n():
     res = deblend(
         obs, [{'v': 0.0, 'u': 0.0, 'type': 'gauss', 'Tguess': 0.6}],
         tol=1.0e-8, use_noise_image=False,
-    )
+    rng=np.random.RandomState(1),
+)
     o = res['objects'][0]
     assert np.allclose(o['gauss_flux'], o['flux'])
     assert np.allclose(o['gauss_flux_err'], o['flux_err'])
@@ -590,7 +600,8 @@ def test_gauss_s2n():
     res = deblend(
         obs, [{'v': 0.0, 'u': 0.0, 'type': 'exp', 'Tguess': 0.6}],
         tol=1.0e-8,
-    )
+    rng=np.random.RandomState(1),
+)
     o = res['objects'][0]
     assert np.all(np.isfinite(o['gauss_flux']))
     assert np.all(o['gauss_flux_err'] > 0)

@@ -301,8 +301,10 @@ def deblend(
         measured from the noise realization attached to each
         observation (obs.noise) rather than assumed white; use for
         correlated noise such as with metacal.  Default False.
-    rng: np.random.RandomState, optional
-        Used for psf fits when choosing the smoothing automatically.
+    rng: np.random.RandomState
+        Used for the psf fits when choosing the smoothing
+        automatically; required unless fwhm_smooth is sent, so
+        the deblend is repeatable.
     fixed_models: list of dicts, optional
         External sources whose light is subtracted in closed form but
         whose parameters are never updated.  Each entry has v, u (in
@@ -496,6 +498,14 @@ def _get_smoothing(mbobs, fwhm_smooth, smooth_fac, rng):
     Chosen from the largest psf when not sent (see
     ngmix.prepsfadmom).
     """
+    if fwhm_smooth is None and rng is None:
+        # the psf fits behind the automatic choice draw from the
+        # generator; an unseeded one makes the whole deblend
+        # unrepeatable (Tsmooth moves at the 1e-6 level and the
+        # sweep path with it)
+        raise ValueError(
+            'rng is required when fwhm_smooth is not sent'
+        )
     fwhm_smooth = choose_fwhm_smooth(
         mbobs, fwhm_smooth=fwhm_smooth, smooth_fac=smooth_fac, rng=rng,
     )

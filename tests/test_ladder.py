@@ -63,7 +63,8 @@ def _model_flux_sum(model, Tsmooth, band, dv, du, W):
 def _fit_single(obs, t):
     deb, _ = build_deblender(
         obs, [dict(v=0.0, u=0.0, type=t, Tguess=0.5)],
-    )
+    rng=np.random.RandomState(1),
+)
     res = deb.go()
     return deb, res
 
@@ -124,7 +125,7 @@ def test_ladder_pair_fluxes():
     res = deblend(obs, [
         dict(v=0.0, u=-1.0, type='ladder', Tguess=0.7),
         dict(v=0.0, u=1.0, type='gauss', Tguess=0.2),
-    ])
+    ], rng=np.random.RandomState(1))
     assert res['converged']
     for o in res['objects']:
         assert o['deblend_flags'] == 0
@@ -147,7 +148,8 @@ def test_ladder_multiband_perband_amps():
     )
     deb, _ = build_deblender(
         mbobs, [dict(v=0.0, u=0.0, type='ladder', Tguess=0.5)],
-    )
+    rng=np.random.RandomState(1),
+)
     res = deb.go()
     assert res['converged']
     m = deb.models[0]
@@ -178,7 +180,7 @@ def test_ladder_pack_roundtrip():
     deb, _ = build_deblender(obs, [
         dict(v=0.0, u=-1.0, type='ladder', Tguess=0.7),
         dict(v=0.0, u=1.0, type='gauss', Tguess=0.2),
-    ])
+    ], rng=np.random.RandomState(1))
     for _ in range(6):
         deb.isweep += 1
         deb._sweep()
@@ -228,7 +230,7 @@ def test_ladder_pair_joint():
     res = deblend(obs, [
         dict(v=0.0, u=-1.0, type='ladder', Tguess=0.7),
         dict(v=0.0, u=1.0, type='ladder', Tguess=0.4),
-    ])
+    ], rng=np.random.RandomState(1))
     assert res['converged']
     for o in res['objects']:
         assert o['deblend_flags'] == 0
@@ -241,7 +243,7 @@ def test_ladder_pair_joint():
         riso = deblend(iso, [dict(
             v=c['v'], u=c['u'], type='ladder',
             Tguess=2 * c['hlr'] ** 2,
-        )])
+        )], rng=np.random.RandomState(1))
         assert riso['converged']
         assert np.allclose(
             res['objects'][i]['flux'][0],
@@ -311,7 +313,8 @@ def test_ladder_derived_values(monkeypatch):
     mbobs = make_blend_mbobs([comps, comps], [0.8, 0.9], dim=128)
     deb, _ = build_deblender(
         mbobs, [dict(v=0.0, u=0.0, type='ladder', Tguess=0.6)],
-    )
+    rng=np.random.RandomState(1),
+)
     res = deb.go()
     assert res['converged']
     o = res['objects'][0]
@@ -341,7 +344,7 @@ def test_ladder_fixed_external():
     res = deblend(obs, [
         dict(v=0.0, u=-1.0, type='ladder', Tguess=0.6),
         dict(v=0.0, u=1.0, type='gauss', Tguess=0.2),
-    ])
+    ], rng=np.random.RandomState(1))
     assert res['converged']
     rb = res['objects'][0]
     fixed = [dict(
@@ -351,7 +354,8 @@ def test_ladder_fixed_external():
     res2 = deblend(
         obs, [dict(v=0.0, u=1.0, type='gauss', Tguess=0.2)],
         fixed_models=fixed,
-    )
+    rng=np.random.RandomState(1),
+)
     assert res2['converged']
     assert np.allclose(
         res2['objects'][0]['flux'], res['objects'][1]['flux'],
@@ -371,7 +375,8 @@ def test_ladder_apsums_matches_passes():
     obs = make_blend_obs([comp], 0.8, dim=128)
     deb, _ = build_deblender(
         obs, [dict(v=0.0, u=0.0, type='gauss', Tguess=0.5)],
-    )
+    rng=np.random.RandomState(1),
+)
     deb.go()
     ep = deb.epochs_per_obj[0][0]
     Sw = np.asarray(deb.Sw[0]) + np.array([[0.0, 0.02], [0.02, 0.0]])
@@ -420,7 +425,8 @@ def test_tdet_bounds_the_weight():
     mbobs = make_blend_mbobs([[comp]], [0.8], dim=192)
     deb, _ = build_deblender(
         mbobs, [dict(v=0.0, u=0.0, type='ladder', Tguess=2.0)],
-    )
+    rng=np.random.RandomState(1),
+)
     res = deb.go()
     T_free = res['objects'][0]['T']
     assert res['converged'] and np.isfinite(T_free)
@@ -428,7 +434,8 @@ def test_tdet_bounds_the_weight():
     deb2, _ = build_deblender(
         mbobs, [dict(v=0.0, u=0.0, type='ladder', Tguess=2.0,
                      Tdet=T_free)],
-    )
+    rng=np.random.RandomState(1),
+)
     res2 = deb2.go()
     assert deb2.Tw_max[0] == pytest.approx(
         WEIGHT_TMAX_FAC * (T_free + deb2.Tsmooth),
@@ -440,7 +447,8 @@ def test_tdet_bounds_the_weight():
     deb3, _ = build_deblender(
         mbobs, [dict(v=0.0, u=0.0, type='ladder', Tguess=0.05,
                      Tdet=Tdet)],
-    )
+    rng=np.random.RandomState(1),
+)
     assert deb3.Tw_max[0] < T_free + deb3.Tsmooth
     deb3.go()
     assert deb3.dbflags[0] & WEIGHT_BOUNDED

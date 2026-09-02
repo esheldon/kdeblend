@@ -703,6 +703,21 @@
   The cross-module names (idx, Sws, Tws, aps, Fhat, d, var,
   wsum, Mt, K, Z, nap, nrows) are defined once in the module
   docstring; opaque locals renamed.
+  Reproducibility note (2026-09-01): deblend(rng=None) with the
+  automatic smoothing choice is not run-to-run reproducible --
+  choose_fwhm_smooth's psf fits use an unseeded generator, so
+  Tsmooth differs at the 1e-6 level between calls (0.33369770 vs
+  0.33369683 on an 8-galaxy blend) and the exp sweep path with
+  it (99 vs 169 sweeps; the converged fluxes agree to 5e-6).
+  With a seeded rng or an explicit fwhm_smooth the result is
+  bitwise repeatable (the driver seeds it).  DECIDED (Erin):
+  rng is required whenever fwhm_smooth is not sent
+  (_get_smoothing raises); the 70 test call sites pass one, the
+  driver already did; the experiments/ scripts (7) predate this
+  and would need an rng to rerun.  The sweep count's
+  sensitivity to a 1e-6 change in the smoothing is itself a
+  measure of how near-critical the exp iteration is on such
+  blends.
   Idea, for later (2026-09-01): the light the uncapped total
   absorbs is itself a measurement -- per object and band, the
   light in the 4-32 x Sw annuli that neither the object's inner
