@@ -769,6 +769,76 @@
   the extraction.  The risky strip is full_errors' interleaved
   exp/bdf branches.  Next step offered: the AST inventory of
   the functions and branches that leave.
+  Photometry-path run (2026-09-02,
+  ~/data/simcoadd-mdet/runs/photwhite-ladder-vs-exp,
+  run_photwhite.sh, analysis.txt): truth_photometry.py
+  --photometry skips metacal entirely (run_photometry: the sim's
+  own psf and noise), white noise, extras off, gri, full errors,
+  exp and ladder on the same 5000 fields and fit seeds (20 jobs x
+  250; 444k matched rows per model, 25x Stage A; ~1.5 h per job
+  at 20 concurrent, the smoke rate was 3.5 s per field for both
+  models).  Per field the photometry path costs 1.5 s exp / 2.9 s
+  ladder against 6.6 / 10.6 for three metacal types, and the
+  white sim 0.4 s against 2-3 for the coadd noise; detections
+  and groups are the same (90 vs 87 on one field), psf T 15
+  percent smaller than the metacal target.  Results reproduce
+  Stage A at 20+ sigma: isolated flux_i bias exp +1.8/+1.1/+0.7/
+  -0.2 percent vs ladder aperture -0.5/-1.9/-2.3/-4.2 by s2n bin
+  (10-20/20-50/50-100/100+); blended exp +12.1/+8.0/+7.0/+5.3 vs
+  ladder +7.8/+4.6/+3.4/+2.1; bright-neighbor exp +9.4/+4.7/+2.6/
+  +0.8 vs ladder +3.5/-0.2/-1.8/-3.0.  The high-s2n ladder deficit
+  is the aperture vs the total truth (exp's gauss_flux shows the
+  same -4.1 percent), not a fit error: the analysis needs the
+  same-aperture truth (as the figures used) before the aperture
+  pulls mean anything (isolated pull 10 at s2n>100 for both
+  aperture columns).  Ladder total_flux (cap 4): isolated +3.1/
+  +3.5/+3.6/+1.4 percent, blended +14/+11/+12/+11 -- the total
+  absorbs faint undetected neighbors and neighbor residue;
+  as a total estimator it is worse than exp's model total in
+  blends.  Colors: both unbiased to 6 mmag; isolated pulls exp
+  1.02/1.03/1.13/1.35, ladder 1.01/1.02/1.11/1.32 (white noise,
+  exact weight: the color errors are honest at s2n<50, the
+  high-s2n excess is the aperture-vs-integrated color); ladder
+  color scatter 5 percent larger than exp's.  Health: flags 0.996
+  both, deblend_flags==0 0.977 vs 0.984, star demotions exp 2.0
+  vs ladder 0.6 percent.  The isolated pulls match Stage A's
+  metacal-noise values (1.10/1.35/1.95 vs 1.08/1.34/2.03), so the
+  kernel-scale weight calibration is adequate for the gauss
+  aperture quantities.  Next: same-aperture truth column in
+  truth_photometry.py (render the true object with the fitted
+  weight, as vis_blend8 does) so flux and color pulls test the
+  errors; then the ladder's total in blends.
+  Same-aperture truth (2026-09-02, simcoadd-mdet
+  simcoadd_mdet/truthaper.py + truth_photometry.py): run_sim
+  returns the per-band scene (return_scene), every true object
+  is drawn as the sim drew it and prepped on its own stamp with
+  the fit's fwhm_smooth (now a catalog column), and the fitted
+  gauss weight (gauss frame + smoothing, at the fitted position)
+  is applied to the object's own light (ap_true_flux), to the
+  detected and undetected other objects (ap_nbr_det/undet_flux)
+  and to the observed image itself (ap_data_flux, so gauss_flux
+  - ap_data_flux is what the group subtraction removed); ap4_
+  repeats it for 4 x Sw, the ladder total's largest aperture.
+  Normalization is the gauss flux's (4 pi sqrt det Sw times the
+  weighted sum, fs/ws with one epoch per band); the stamp prep
+  matches a full-field prep to 1e-8 (k-space sums are exact),
+  and data = own + neighbors within noise.  Also saved: dx, dy
+  (fit - true, px), wldb true_bt/true_hlr_b/true_hlr_d/true_z,
+  undet_nbr_ratio/sep (truth), ndet_nbr/det_nbr_sep (other
+  detections within 15 px: shredding), psf_T.  Costs ~3 s per
+  field on top of the 3.5 s fits.  Smoke (3 fields, white
+  noise): isolated same-aperture pull scatter 1.00 (exp) / 0.89
+  (ladder), bias -0.2/-0.4 percent, so the gauss flux errors are
+  honest; the bright isolated outliers (pulls -6 to -25) are
+  real: the group subtraction removes 1-5 percent of a bright
+  object's light even with no detection within 15 px (other
+  groups' models absorbing its wings), the wings-stealing
+  phenomenon, now measurable per object.  Analysis script
+  extended (same-aperture flux and color tables, neighbor-light
+  fractions, the ladder total by undetected light in the 4x
+  aperture).  Prepared, not launched (Erin reinstalls first):
+  ~/data/simcoadd-mdet/runs/photwhite-ap-ladder-vs-exp/
+  run_photwhite_ap.sh, 16 jobs x 250 fields, seeds 9101-9116.
   Idea, for later (2026-09-01): the light the uncapped total
   absorbs is itself a measurement -- per object and band, the
   light in the 4-32 x Sw annuli that neither the object's inner
