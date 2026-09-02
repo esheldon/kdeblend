@@ -114,6 +114,19 @@ NFAIL_LIMIT = 10
 # deblend_flags
 MAX_WEIGHT_SIGMA_FAC = 0.5
 
+# the detected-footprint bound on the weight: an object whose entry
+# carries Tdet (the observed second-moment size of its detection
+# footprint, sky units, e.g. sep's x2 + y2) may not grow its weight
+# beyond WEIGHT_TMAX_FAC * (Tdet + Tsmooth).  The stamp bound above
+# is geometric and on a group cutout admits T of hundreds of
+# arcsec^2; the runaways it never caught (2026-09-01, a 25-member
+# wldb group) took s2n ~ 30 members from T ~ 1-2 to 30-100 and a
+# faint one (s2n 4) to 47, i.e. 20-200x their footprints, while
+# a detected object's true moments exceed its isophotal footprint
+# by a few times at most (low surface-brightness wings).  Rejected
+# updates are contained exactly like the stamp bound's
+WEIGHT_TMAX_FAC = 10.0
+
 # update the bdf flux split every this many sweeps: the split
 # varies slowly compared to the structure, so intermediate sweeps
 # can reuse it, saving the smoothing-aperture data pass.  The last
@@ -153,6 +166,18 @@ RHO_CAP = 0.999
 # contractions (rho^WINDOW > CONTRACT_FAC with every step
 # valid).  One per window: coupled cycles often settle once
 # the worst member is removed
+# the boost's own guard: an accepted Steffensen boost whose following
+# plain sweep changes no less than the sweep before it did nothing
+# for the iteration; after this many consecutive unproductive
+# boosts the booster is retired for the rest of the run.  Isolated
+# faint objects (s2n 6-10) and small groups were found (2026-09-01)
+# accepting a boost every 3-4 sweeps for 500 sweeps, each overshoot
+# re-estimated into the next, while healthy large groups accept
+# 25-40 productive ones; with the guard the ten-field cap rate went
+# from 0.33/0.67 percent (exp/ladder) to 0.22 with the median and
+# p90 sweeps unchanged and 13-17 percent fewer object-sweeps
+EXTRAP_MAX_UNPRODUCTIVE = 3
+
 NONCONTRACT_WINDOW = 50
 NONCONTRACT_FAC = 0.7
 DEFAULT_CEN_SIGMA0 = 0.1
@@ -289,6 +314,11 @@ def deblend(
                 fracdev_sigma0=0 freezes the model split.
             Tguess: float, optional
                 initial pre-psf T, default 0.5; ignored for stars
+            Tdet: float, optional
+                observed second-moment size of the detection
+                footprint (sky units); bounds the weight to
+                WEIGHT_TMAX_FAC times (Tdet + Tsmooth).  Without
+                it only the stamp bound applies
             fixcen: bool, optional
                 keep this object's center fixed at (v, u) even
                 when recenter is on (default False).  Useful for
@@ -775,6 +805,11 @@ class _Deblender(object):
         # sweep-map extrapolation history of normalized global states
         self.scales = None
         self.hist = []
+        # the boost guard (EXTRAP_MAX_UNPRODUCTIVE): the change of
+        # the sweep before the last accepted boost, and the count
+        # of consecutive unproductive boosts
+        self._boost_pre = None
+        self._boost_unprod = 0
 
         # per-object failure containment state
         self.nfail = np.zeros(self.nobj, dtype='i4')
@@ -788,6 +823,14 @@ class _Deblender(object):
             min(ep.get('Tw_max', np.inf) for ep in epochs)
             for epochs in self.epochs_per_obj
         ])
+        # the detected-footprint bound where the entry carries one
+        for i, o in enumerate(objects):
+            Tdet = o.get('Tdet')
+            if Tdet is not None and np.isfinite(Tdet) and Tdet > 0:
+                self.Tw_max[i] = min(
+                    self.Tw_max[i],
+                    WEIGHT_TMAX_FAC * (float(Tdet) + self.Tsmooth),
+                )
         self.nbound = np.zeros(self.nobj, dtype='i4')
 
         if not self._defer_flux_init:
@@ -1879,6 +1922,18 @@ class _Deblender(object):
         the Aitken/Steffensen/Sidi references
         """
         self.hist.append(self._pack_state())
+        if self._boost_pre is not None:
+            # the plain sweep after an accepted boost has run: a
+            # boost is productive when that sweep changed less
+            # than the sweep before the boost
+            post = max(self._sweep_changes.values())
+            if post >= self._boost_pre:
+                self._boost_unprod += 1
+            else:
+                self._boost_unprod = 0
+            self._boost_pre = None
+        if self._boost_unprod >= EXTRAP_MAX_UNPRODUCTIVE:
+            return
         if len(self.hist) < 3:
             return
 
@@ -1917,6 +1972,7 @@ class _Deblender(object):
             if accepted:
                 # a fresh trio of plain sweeps is needed for the
                 # next ratio estimate
+                self._boost_pre = max(self._sweep_changes.values())
                 self.hist = []
                 self._reset_change_hist()
         if len(self.hist) > 3:

@@ -4,6 +4,7 @@ point and subtraction quality, pair accuracy, multiband
 per-band amplitudes, state packing, and containment
 """
 import numpy as np
+import pytest
 
 from ngmix.prepsfadmom import get_phase_angles
 from ngmix.prepsfadmom.prepsfadmom_nb import admom_ksums
@@ -380,3 +381,47 @@ def test_ladder_apsums_matches_passes():
         if af == 1.0:
             assert np.allclose(s1, ref, rtol=1.0e-5)
             assert abs(vr[nap] / cov[4, 4] - 1) < 1.0e-5
+
+
+def test_tdet_bounds_the_weight():
+    """an object entry's Tdet caps the weight at WEIGHT_TMAX_FAC
+    times (Tdet + Tsmooth): with a footprint far below the true
+    size the update is rejected and contained (the object ends
+    WEIGHT_BOUNDED, demoted or restarted), while a footprint at
+    the true size leaves the fit untouched"""
+    from kdeblend.deblender import WEIGHT_TMAX_FAC
+    from kdeblend.flags import WEIGHT_BOUNDED
+
+    # a large galaxy: the bound has a floor of WEIGHT_TMAX_FAC
+    # smoothing scales (~2.4 arcsec^2), so a compact object could
+    # never reach it
+    comp = dict(kind='exp', hlr=2.0, flux=20.0, e1=0.0, e2=0.0,
+                v=0.0, u=0.0)
+    mbobs = make_blend_mbobs([[comp]], [0.8], dim=192)
+    deb, _ = build_deblender(
+        mbobs, [dict(v=0.0, u=0.0, type='ladder', Tguess=2.0)],
+    )
+    res = deb.go()
+    T_free = res['objects'][0]['T']
+    assert res['converged'] and np.isfinite(T_free)
+
+    deb2, _ = build_deblender(
+        mbobs, [dict(v=0.0, u=0.0, type='ladder', Tguess=2.0,
+                     Tdet=T_free)],
+    )
+    res2 = deb2.go()
+    assert deb2.Tw_max[0] == pytest.approx(
+        WEIGHT_TMAX_FAC * (T_free + deb2.Tsmooth),
+    )
+    assert res2['objects'][0]['T'] == pytest.approx(T_free, rel=1e-6)
+    assert not (deb2.dbflags[0] & WEIGHT_BOUNDED)
+
+    Tdet = T_free / (4 * WEIGHT_TMAX_FAC)
+    deb3, _ = build_deblender(
+        mbobs, [dict(v=0.0, u=0.0, type='ladder', Tguess=0.05,
+                     Tdet=Tdet)],
+    )
+    assert deb3.Tw_max[0] < T_free + deb3.Tsmooth
+    deb3.go()
+    assert deb3.dbflags[0] & WEIGHT_BOUNDED
+    assert deb3.nbound[0] > 0

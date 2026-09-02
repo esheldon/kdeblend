@@ -89,7 +89,8 @@ DS_FAC = 0.1
 MUTABLE_ATTRS = (
     'models', 'Sw', 'positions', 'cen_pull', '_sweep_changes',
     '_fscales', '_win_max', '_win_nfail', '_prev_win_max',
-    '_prev_win_nfail', '_change_hist', 'hist', 'nskip', 'nfail',
+    '_prev_win_nfail', '_change_hist', 'hist', '_boost_pre',
+    '_boost_unprod', 'nskip', 'nfail',
     'nrestart', 'isweep', 'dbflags', 'bdf_info', 'bdf_last_dfd',
     '_cen_sigma_sweep', '_bdf_noise_cache', 'ladder_last_da',
     '_ladder_sig_cache', '_ladder_last_x', '_ladder_next',

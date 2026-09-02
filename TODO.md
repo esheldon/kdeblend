@@ -469,6 +469,213 @@
   error-stage changes together: that field exp 132 -> 104,
   ladder 245 -> 211.  The remaining tail cost is the sweeps
   (67 / 160 s there) -- the grind.
+  Grind diagnostic (2026-09-01, instrumented sweeps of the
+  39-member group, both models, all three types; then the
+  Stage B catalogs): no pass hits the 500 cap there (134-393
+  sweeps) -- the sweeps go to the containment cascade: 46-56
+  events per pass, 25-30 restarts then 21-26 demotions of the
+  37-39 members (two thirds end as point sources), 560-1070
+  rejected structure updates, each restart/demotion resetting
+  the convergence history; not a limit cycle, no slow mode.
+  Triggers visible in the movers: detection pairs 1.0-1.8 px
+  apart (unresolvable at a 4 px psf) and weight runaways to
+  T = 78-271 arcsec^2.  Run-wide (150 fields): the sweep
+  budget is in groups of 3-10 (60 percent of object-sweeps;
+  p90 sweeps 230-400), the giant groups are 2 percent; 2.6
+  percent of objects end at the cap (both models); objects in
+  a restarted/demoted state are 6-7.5 percent of the catalog
+  and 19-21 percent of the sweeps (median 120 sweeps vs 12
+  clean).  By nearest-detection distance: < 2 px is 12.8
+  percent of detections but 43-46 percent of interventions
+  and 27-34 of object-sweeps; < 3 px is 21 percent of
+  detections, 60-63 of interventions, 43-47 of sweeps, with
+  demotion 17-23 percent and 5-7.5 at the cap; beyond 8 px the
+  intervention rate is 1-2 percent.  The ladder intervenes
+  less than exp everywhere (demoted 4.6 vs 6.5 percent).
+  Against the sim truth (three fields, pair_truth.py): all
+  15 sub-2-px detection pairs are two detections of the same
+  truth galaxy (0 real pairs, 0 spurious), i.e. split peaks.
+  CORRECTION (2026-09-01): the split peaks are not the
+  detector's (sep, as in production; fpdetect was never
+  used).  The example gri configs used for Stage A/B and the
+  timing had anull_extra_detections: true (the experimental
+  adaptive-color-null extras, color_det = 1; off in
+  production): they are 12 percent of the catalog with a 41
+  percent sub-2-px-neighbor rate, intervene 42-50 percent of
+  the time and hit the cap 8-9 percent; plain sep detections
+  intervene 1-1.6 percent and cap at 1.8-1.9.  89-91 percent
+  of all interventions and 52-55 of cap objects involve an
+  injected detection or a sep detection within 2 px of one;
+  with the injection off the same three fields have zero
+  sub-2-px pairs (264 vs 305 detections).  So the grind
+  measured here is mostly the injected extras fighting their
+  hosts, not a deblender or detector pathology; the
+  production-relevant numbers are the sep-only rows above,
+  and the Stage A/B exp-vs-ladder comparisons stand as
+  relative statements (same config for both) while their
+  absolute health, sweep and timing-tail numbers carry the
+  artifact.  Remaining, on sep-only detections: what drives
+  the 1-1.6 percent interventions and 1.8 percent cap losses
+  (the 433 sep-sep close pairs intervene at only ~1-2
+  percent).  Diagnostic scripts: scratch grind_diag.py
+  (per-sweep hooks), pair_truth.py.
+  DECISION (Erin, 2026-09-01): when the extra detections are
+  turned on in production, they get a de-duplication pass
+  first (simcoadd-mdet).  What the data say it should do: the
+  extras are injected with pinned centers to find missed
+  objects, so an extra within the psf core of an existing sep
+  detection is a duplicate by construction -- 41 percent of
+  them sit within 2 px of one (all of the sub-2-px pairs on
+  three fields were two detections of one truth galaxy), and
+  those drive 89-91 percent of the restarts/demotions and
+  half the cap losses.  Drop (or merge into the host) any
+  extra within ~2-3 px, a fraction of the psf fwhm, of an
+  existing detection; the detector's own sep-sep close pairs
+  (433 of 12.9k) are not the problem (intervene at 1-2
+  percent), so the pass is specific to the injected channel.
+  Same for the s2 extras when they are used.
+  Ladder cycle (2026-09-01, extras off, seed 8081 trial 2):
+  with the extras off the same field has a 25-member group
+  where exp converges in 117 sweeps (18 restarts, 14
+  demotions) and the ladder's noshear pass runs to the cap
+  (exp 49 s, ladder 150 s; typical fields 1.27x).  Per-sweep
+  trace: a period-4 cycle locked to LADDER_SOLVE_EVERY = 2 --
+  one faint member (F ~ 20-30) in the wings of two
+  runaway-weight neighbors (T 30 and 81) alternates T = 11.2
+  -> 38.2 -> 14.2 -> 47.4 -> 11.2 exactly, the amp solve (da
+  9.9e-3 / 8.5e-3, amp sums 24.6 <-> 26.0) on every other
+  sweep: the solve sets the amps under the current weight,
+  the next weight update balloons with those amps subtracted,
+  the next solve re-measures under the ballooned weight and
+  collapses it.  The weight map and the amp map never reach a
+  joint fixed point; exp has the same runaway neighbors but
+  no group solve to couple to.  Nothing intervenes: no
+  extrapolation is accepted (a period cycle has no
+  contraction) and the non-contraction check keys on
+  constrained steps, so accepted-but-oscillating steps are
+  exempt by design.  Realization-sensitive: the noshear pass
+  alone (different rng sequence) converges in 150 sweeps.
+  Cadence: 1 cycles on all three passes (period 2, at the
+  cap), 3 converges on all three (124/163/290 sweeps vs
+  500/200/355 at 2); cadence is a fragile knob (4 defeated
+  convergence in the pair studies).  Fixed damping of the amp
+  update (amps <- 0.5 new + 0.5 old, prototype hook) is not
+  it: the cycling pass converges (232 sweeps) and another
+  speeds up (355 -> 228), but a pass that converged in 200
+  now runs to the cap -- the group sits at the edge of
+  stability in every pass and a fixed blend only moves which
+  pass tips over; and it halves the step everywhere (median
+  sweeps on the field's other groups 21 -> 43).  Open, design
+  level: (a) alternation-triggered damping on the amps (damp
+  only when successive row-space amp changes flip sign, like
+  the extrapolation guard); (b) a joint weight+amp inner
+  update for the offending member; (c) the underlying runaway
+  weights themselves -- the cycle needs a faint member (F ~
+  20) in the wings of neighbors whose weights ran to T = 30
+  and 81 arcsec^2 (F 220-480); MAX_WEIGHT_SIGMA_FAC bounds the
+  weight to half the cutout, which on a 200 px group cutout
+  allows T of thousands, so a physically motivated bound
+  (relative to the smoothing scale or the segment) would help
+  both models, exp included (its own runaways reach T = 307).
+  (c) landed (2026-09-01, WEIGHT_TMAX_FAC = 10): an object
+  entry may carry Tdet, the observed second-moment size of its
+  detection footprint (the driver passes sep's unclipped
+  x2 + y2 in sky units, floored at TGUESS_RANGE[0]; injected
+  extras get Tsmooth), and the weight is bounded at
+  WEIGHT_TMAX_FAC (Tdet + Tsmooth) -- a floor of ten smoothing
+  scales (~2.4 arcsec^2) for compact footprints, then
+  proportional to the footprint; rejected updates are
+  contained exactly like the stamp bound's (WEIGHT_BOUNDED).
+  A per-pixel peak-surface-brightness criterion was
+  considered and rejected: at fixed s2n the peak scales as
+  1/sqrt(T), so the s2n ~ 30 runaways (peak/sigma_pix
+  0.4-0.85 at T 30-100) sit exactly where legitimate faint
+  small detections sit (T ~ 0.5, s2n ~ 5).  The 25-member
+  field, extras off, three types: ladder cap 0.309 -> 0.000,
+  max sweeps 500 -> 133, flags==0 0.69 -> 1.00, 150 -> 88 s;
+  exp max sweeps 117 -> 88, 49 -> 45 s; no T > 15 weights
+  remain (6 before); demoted 6 -> 17 percent (ladder), 19 ->
+  26 (exp), 17-18 percent of the field's objects bounded --
+  the runaways are now contained instead of absorbing the
+  group.  A typical field is bit-identical.  Unit test
+  test_tdet_bounds_the_weight; 102 kdeblend tests pass.
+  Run-wide (10 fields, 901 objects, extras off, no errors):
+  the bound touches 0 of 571 isolated objects for either
+  model; 0.4-0.8 percent of objects bounded, all in groups
+  (median size 4) and mostly demoted; T > 15 weights 3 -> 0
+  (exp), 2 -> 0 (ladder); cap rate exp 0.55 -> 0.33 percent,
+  ladder 0.67 -> 0.67 (the remaining cap objects are one
+  group with a different failure, not a runaway); demoted
+  exp 0.44 -> 0.89 percent, ladder 0 -> 0.22.  Adopted.
+  The remaining cap cases (2026-09-01, the 10-field set
+  reproduced with sweep hooks, all three passes: 16
+  unconverged runs in 7 of 20 trials) are convergence
+  machinery, not blending: (i) bright + faint pairs (F 329 vs
+  25, 15 px; exp and ladder alike, every pass): the faint
+  member's weight flips T = 1.47 <-> 0.75 every sweep with no
+  constrained updates -- a period-2 cycle of the plain weight
+  update, rho ~ -1, which the Steffensen guard (0.2 < rho <
+  0.998) rejects and the non-contraction check (constrained
+  steps only) exempts; (ii) isolated faint singles (s2n 6-10,
+  both models) plus a triple and a quad: 125-150 ACCEPTED
+  extrapolations in 500 sweeps, one every 3-4 sweeps, each
+  boost overshooting and the next re-estimating -- the
+  booster fighting the iteration.  Measured on the twenty
+  reproductions: extrapolation off converges everything but
+  the pairs (cap exp 0.33 -> 0.22 percent, ladder 0.67 ->
+  0.22) at +9 percent object-sweeps for exp on typical groups
+  (ladder -15, the cap runs outweigh it); accepting negative
+  rho (the Aitken midpoint) does nothing for the pairs and
+  adds failures -- their fixed point is unstable under the
+  plain map, so after the midpoint the iteration walks off
+  again: that case needs under-relaxation, not extrapolation.
+  Landed (2026-09-01, EXTRAP_MAX_UNPRODUCTIVE = 3): a boost is
+  productive when the plain sweep after it changes less than
+  the sweep before it; three consecutive unproductive boosts
+  retire the booster for the run (a fixed count would not do:
+  healthy large groups accept 25-41 productive boosts, the
+  failing singles 125-150 unproductive ones).  Ten fields,
+  both models: cap rate exp 0.33 -> 0.22 percent, ladder 0.67
+  -> 0.22, median/p90 sweeps unchanged (11/26, 11/23),
+  object-sweeps -9 / -16 percent; the 25-member field exp 44.6
+  -> 42.4 s, ladder 88.5 -> 93.7 (its big group 133 -> 191
+  sweeps once the booster retired: the one cost seen); a
+  typical field's slowest group 74/81 -> 36/35 sweeps.  What
+  remains at the cap: the bright + faint pair (both models,
+  every pass) and two singles in sheared passes.  Global
+  under-relaxation of the weight update (0.5) was measured and
+  rejected: cap 1.2 / 2.2 percent and +60-100 percent sweeps,
+  the slow contraction everywhere costs far more than the
+  pairs; if the pairs matter, a per-member under-relaxation
+  triggered by sign-alternating structure changes (or the
+  non-contraction check extended to alternation, demoting the
+  faint member) is the targeted form.  102 kdeblend tests pass.
+  Checked (2026-09-01): the pass exists, per channel.  s2
+  extras: S2_EXTRA_MIN_SEP = 4 px vs sep and prior extras
+  ("removes the near-degenerate pairs that destabilize the
+  deblend").  anull extras: ANULL_EXTRA_MIN_SEP = 1 px vs sep,
+  ANULL_EXTRA_DUP = 1.5 mutual, and a post-fit
+  FLAG_DUPLICATE_EXTRA at R_DUP_FIT = 1.5 px that only runs
+  with recenter on (off in production and in these runs, so
+  it fired on 0 of 1811 extras).  The 1 px exclusion is what
+  let 40 percent of the anull extras sit within 2 px of a sep
+  detection (0.6 percent within 1 px, 60 within 3, 70 within
+  4); the docstring notes the anull radii were validated on
+  the cluster-core scenes, where extras near bright members
+  are the point, so the radius is a policy choice: on random
+  fields everything under ~2-3 px is a duplicate, and the
+  same 4 px as s2 would drop 70 percent of the anull extras.
+  DONE (2026-09-01, simcoadd-mdet): the radii are config keys,
+  fitter.anull_extra_min_sep and fitter.s2_extra_min_sep
+  (optional, default EXTRA_MIN_SEP_DEFAULT = 4 px, validated
+  non-negative; the module constants remain the defaults for
+  direct callers), passed through mdet to the two channel
+  functions; the two gri example configs carry them
+  explicitly with the rationale.  Three fields with the anull
+  extras on at 4 px: 280 detections (305 at 1 px, 264 with
+  the extras off), zero sub-2-px pairs.  Tests: the six
+  extra-detection tests pass (one stub in
+  test_single_fit_path_extra_detections learned the keyword).
   Idea, for later (2026-09-01): the light the uncapped total
   absorbs is itself a measurement -- per object and band, the
   light in the 4-32 x Sw annuli that neither the object's inner
