@@ -838,7 +838,80 @@
   fractions, the ladder total by undetected light in the 4x
   aperture).  Prepared, not launched (Erin reinstalls first):
   ~/data/simcoadd-mdet/runs/photwhite-ap-ladder-vs-exp/
-  run_photwhite_ap.sh, 16 jobs x 250 fields, seeds 9101-9116.
+  run_photwhite_ap.sh, 16 jobs x 250 fields, seeds 9101-9116
+  (launched 2026-09-02 08:15 against the installed packages).
+  lsst-mdet ladder catalog (2026-09-02, branch "ladder"): the
+  minimum ladder row decided with Erin -- flux_{b} = total_flux
+  (the exp run's flux is the model total, same meaning), colors
+  from the gauss fluxes with gauss_flux_cov, gauss_flux_{b} kept,
+  gradient_{b1}m{b2} (fixed minus adaptive color) with errors
+  kept, fixed fluxes and amps dropped; fit_model and fwhm_smooth
+  columns for every model; demoted stars fall back to the psf
+  flux.  get_struct(model=) keys the ladder columns; the family
+  and gauss shapes coincide for a ladder so one shape block
+  stays.  Also: Tdet (sep x2+y2, floored) now reaches kdeblend
+  from lsst-mdet (the footprint weight bound was inactive there),
+  the hardcoded fit settings moved to DEBLEND_SETTINGS and are
+  written to the meta table with the kdeblend/lsst-mdet versions
+  (meta model widened to U8: 'ladder' did not fit U5).  Tests:
+  the packer on synthetic ladder/star results, the meta round
+  trip, and fit_deblend end to end on a two-band blob scene for
+  exp and ladder (66 pass).  Noted for the total: on noiseless
+  data the cap makes the outer rungs an unconstrained
+  extrapolation (dev +44 percent, exp +10), a regime only above
+  s2n ~5000; with noise the prior completes and dev comes out
+  low (0.94 at s2n 170, 0.82 at 17), exp 0.99 at every s2n.
+  Same-aperture run results (2026-09-02, photwhite-ap-ladder-vs-
+  exp/analysis.txt: 4000 fields, 356k matched rows per model,
+  2:07 per job at 16 concurrent).  Errors: gauss flux vs its own
+  aperture truth, isolated, bias +1.4/+0.7/+0.1/-0.5 percent (exp)
+  and +1.2/+0.4/0.0/-0.5 (ladder) by s2n bin, pulls 0.90/0.96/
+  1.21/2.6 and 0.89/0.94/1.16/2.5: honest (slightly conservative)
+  below s2n 50; above 100 the 1.5 percent scatter is not noise
+  but the group subtraction (other groups' models absorb ~1
+  percent of a bright object's wings, subtr/own median 0.94/0.98
+  percent), same for both models.  Colors: both unbiased to 5
+  mmag in every bin; the catalog (covariance-aware) color errors
+  are honest isolated (pulls 1.01-1.05 at s2n<50, 1.27 at >100),
+  the independent-band combination is conservative (0.85-0.95);
+  ladder color scatter 5-6 percent larger than exp's.
+  Contamination accounting in blends (nbr_ratio>=0.1, i band,
+  medians of fractions of own light): neighbor light in the
+  fitted aperture 9.9 percent of which undetected 2.9-3.1;
+  the fit subtracts only 2.2 (exp) / 2.7 (ladder); so gauss -
+  own truth = +8.6/+4.8/+2.9/+2.2 percent (exp), +7.7/+4.3/+2.7/
+  +2.3 (ladder): roughly a third undetected light nothing can
+  model and two thirds under-subtracted detected-neighbor light
+  (the models under-predict the neighbor's light inside the
+  target aperture; the ladder removes ~20 percent more than exp).
+  Split by undetected light in the 4x aperture: objects with
+  <1 percent are clean (gauss same-aperture bias +1.2/+0.1/-0.4/
+  -0.7, pulls 0.87/0.88/0.99/2.3) and the >=5 percent class
+  carries +16/+11/+8/+6.6.  Ladder total by the same split:
+  <1 percent +2.9/+1.4/+0.9/+0.0 with pulls 1.07/1.18/1.33/1.98
+  (nearly unbiased, honest errors), 1-5 percent +5/+4.6/+5.2/
+  +4.2, >=5 percent +35/+27/+22/+18: the total absorbs the
+  undetected light through its outer apertures, as anticipated
+  (the earlier +3.5 percent 'isolated' excess was this mixed
+  population).  Star demotions exp 1.9 vs ladder 0.6 percent.
+  Next: (a) the neighbor under-subtraction is the dominant
+  aperture bias in blends for both models and is a wings
+  problem -- check it against nbr_sep and the neighbor's
+  true_bt, and whether the ladder's cap/prior is what limits its
+  wings; (b) the total needs an undetected-light guard or the
+  unmodelled-light covariate (the parked idea below); (c) the
+  same-aperture columns are the reference for any estimator
+  change from here.
+  lsst-mdet provenance (2026-09-02, branch "ladder"): fit_model
+  column removed at Erin's request (the model is in meta, a
+  demotion is DEBLENDED_AS_PSF); the meta table is now built by
+  provenance.make_meta as plain columns: run options (repo,
+  collections, patch_dir, gaia_file, gsub, apod_stars, cells),
+  every stage's settings from the module constants (DETECT_ and
+  METACAL_SETTINGS dicts now drive detect.py/metacal.py, plus
+  deblend_, s2_, starsub_, mfrac, apodize, cell geometry,
+  skymap), version_* from each package's __version__ (Erin keeps
+  them meaningful), and date/hostname/command.
   Idea, for later (2026-09-01): the light the uncapped total
   absorbs is itself a measurement -- per object and band, the
   light in the 4-32 x Sw annuli that neither the object's inner
