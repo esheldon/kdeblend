@@ -245,7 +245,9 @@ def test_ladder_state_response_matches_fd(types):
         scale = np.abs(f).max(axis=2, keepdims=True) + 1e-30
         assert np.all(np.abs(a - f) < 1.0e-3 * scale), name
     for name in ('f0_fixed', 'f0_total'):
-        assert np.allclose(ls_an[name], ls_fd[name], rtol=1e-10)
+        # the same solve reached through the state round trip; the
+        # per-rung prior precisions leave ~1e-10 of rounding
+        assert np.allclose(ls_an[name], ls_fd[name], rtol=1e-8)
 
 
 def test_cov_sums_subsampled_matches_full_grid():

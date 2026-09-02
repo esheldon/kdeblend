@@ -63,7 +63,11 @@ from .flags import (  # noqa: E402, F401
 )
 
 # consecutive failed structure updates on one object before
-# intervening
+# intervening.  Measured dead end (2026-09-02, TODO): demoting a
+# failing ladder to a frozen frame with live amps instead of a star
+# made the demoted objects worse (a quarter of their totals
+# negative) -- the joint amp solve, not the weight iteration, decides
+# where a faint companion's light goes
 NFAIL_LIMIT = 10
 
 # the largest weight an object may take, as the sigma of the weight
@@ -995,7 +999,7 @@ class _Deblender(object):
                 (w > self.tol) & (w > NONCONTRACT_FAC * prev)
                 & (wn + prevn > 0)
             )
-            if self.models[i]['type'] != 'star'
+            if _adaptive(self.models[i])
         ]
         if bad:
             i = max(bad, key=lambda k: w[k])
@@ -1048,7 +1052,7 @@ class _Deblender(object):
         if sums[5] > 0:
             self.cen_pull[i] = sums[0:2] / sums[5]
 
-        if m['type'] == 'star':
+        if not _adaptive(m):
             # structure frozen at the delta-function model; only
             # the linear flux is updated
             newF = _matched_flux(fs, ws, self.Sw[i], m['cov_sm'])
@@ -1840,12 +1844,13 @@ class _Deblender(object):
             Sw[0, 0], Sw[0, 1], Sw[1, 1]  weight covariance
 
         where C is cov_sm for gauss and ladder objects and the family cov
-        for exp/dev; star structures are frozen, so only their fluxes
-        enter and a demotion changes the layout.  With recentering the
-        center offsets from the detection positions follow the fluxes,
-        packed with a +1 offset.  Each component is divided by a scale
-        fixed on the first call, so the sweep-map differences are
-        comparable across fluxes and covariances.
+        for exp/dev; star structures and frozen ladder frames are not
+        state (see _adaptive), so only their fluxes enter and a
+        demotion changes the layout.  With recentering the center
+        offsets from the detection positions follow the fluxes, packed
+        with a +1 offset.  Each component is divided by a scale fixed
+        on the first call, so the sweep-map differences are comparable
+        across fluxes and covariances.
         """
         x = []
         for i, (m, sw) in enumerate(zip(self.models, self.Sw)):
@@ -1856,6 +1861,8 @@ class _Deblender(object):
                     self.positions[i][0] - v0 + 1.0,
                     self.positions[i][1] - u0 + 1.0,
                 ])
+            if not _adaptive(m):
+                continue
             if m['type'] in ('gauss', 'ladder'):
                 # the ladder amps are NOT part of the packed
                 # state: they are the closed-form response to
@@ -1904,6 +1911,8 @@ class _Deblender(object):
                     v0 + x[k] - 1.0, u0 + x[k + 1] - 1.0,
                 )
                 k += 2
+            if not _adaptive(m):
+                continue
             if m['type'] in ('gauss', 'ladder'):
                 m['cov_sm'] = np.array([
                     [x[k], x[k + 1]], [x[k + 1], x[k + 2]],
@@ -2493,6 +2502,16 @@ def _moment_matrix(sums):
         [0.5 * (T - M1), 0.5 * M2],
         [0.5 * M2, 0.5 * (T + M1)],
     ])
+
+
+def _adaptive(m):
+    """
+    Whether a model's structure and weight are state.
+
+    False for a star (a delta function): its structure never updates,
+    so only its fluxes (and center) are packed and differentiated.
+    """
+    return m['type'] != 'star'
 
 
 def _matched_flux(fs, ws, Sigma, cov):

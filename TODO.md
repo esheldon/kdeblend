@@ -876,14 +876,32 @@
   the independent-band combination is conservative (0.85-0.95);
   ladder color scatter 5-6 percent larger than exp's.
   Contamination accounting in blends (nbr_ratio>=0.1, i band,
-  medians of fractions of own light): neighbor light in the
-  fitted aperture 9.9 percent of which undetected 2.9-3.1;
-  the fit subtracts only 2.2 (exp) / 2.7 (ladder); so gauss -
-  own truth = +8.6/+4.8/+2.9/+2.2 percent (exp), +7.7/+4.3/+2.7/
-  +2.3 (ladder): roughly a third undetected light nothing can
-  model and two thirds under-subtracted detected-neighbor light
-  (the models under-predict the neighbor's light inside the
-  target aperture; the ladder removes ~20 percent more than exp).
+  medians of fractions of own light): gauss - own truth = +8.6/
+  +4.8/+2.9/+2.2 percent (exp), +7.7/+4.3/+2.7/+2.3 (ladder).
+  CORRECTION (same day, nbr_split.txt, the brightest true
+  neighbor rebuilt per row by replaying the truth catalogs,
+  nbr_augment.py): the blended class is two populations and
+  the medians of separate quantities misled.  Rows whose
+  brightest neighbor was DETECTED (43 percent): the fit removes
+  all of its light in the aperture -- residual (gauss - own -
+  undetected) exp +0.1/-0.6/-0.8 percent of own light by s2n
+  bin for disk neighbors (bt<0.2), the ladder -1.0/-1.2/-1.0;
+  exp under-subtracts bulge-dominated neighbors (bt>=0.6:
+  residual +4.4/+2.2/+0.3, only 67/71/80 percent of their
+  aperture light removed -- the exp wings are too shallow for
+  n=4 neighbors), the ladder removes them fully (-1.8/-1.1/
+  -1.0, 113-117 percent).  The ladder over-subtracts by 1-2
+  percent of own light everywhere, -3 percent at 5-8 px
+  separations (its flexible wings absorb the target's light and
+  hand it back as subtraction); exp is within +-1 except for
+  bulge neighbors.  No detected pairs below 5 px.  Rows whose
+  brightest neighbor was UNDETECTED (57 percent): the excess is
+  that light itself, 12.5 percent of own for disk neighbors and
+  20-24 for bulge-dominated ones (compact, more light per flux
+  inside the aperture), gauss/own-1 +12 to +23 percent.  So the
+  aperture bias in blends is undetected light, not
+  under-subtraction; the only under-subtraction is exp's n=4
+  wings, which the ladder fixes.
   Split by undetected light in the 4x aperture: objects with
   <1 percent are clean (gauss same-aperture bias +1.2/+0.1/-0.4/
   -0.7, pulls 0.87/0.88/0.99/2.3) and the >=5 percent class
@@ -894,14 +912,195 @@
   undetected light through its outer apertures, as anticipated
   (the earlier +3.5 percent 'isolated' excess was this mixed
   population).  Star demotions exp 1.9 vs ladder 0.6 percent.
-  Next: (a) the neighbor under-subtraction is the dominant
-  aperture bias in blends for both models and is a wings
-  problem -- check it against nbr_sep and the neighbor's
-  true_bt, and whether the ladder's cap/prior is what limits its
-  wings; (b) the total needs an undetected-light guard or the
-  unmodelled-light covariate (the parked idea below); (c) the
-  same-aperture columns are the reference for any estimator
-  change from here.
+  Next: (a) undetected neighbors set the aperture bias in
+  blends for both models; the levers are detection (extra
+  detections) and the unmodelled-light covariate (the parked
+  idea below), not the subtraction; (b) the ladder's 1-3
+  percent over-subtraction near detected neighbors is worth a
+  look (does the outer-rung prior let a neighbor absorb the
+  target's light?); (c) the total needs an undetected-light
+  guard; (d) the same-aperture columns (now with the neighbor's
+  bt, size and detection state in truth_photometry.py) are the
+  reference for any estimator change from here.
+  s2 extra detections on the unrecognized blends (2026-09-02,
+  ~/data/simcoadd-mdet/runs/photwhite-ap-s2-ladder-vs-exp,
+  paired_s2.py/.txt): the first 60 trials of the same 16 seeds
+  (960 fields, 20-39 min per job) with s2_extra_detections true
+  (min sep 4 px), paired per object to the s2-off run.  Extras:
+  2.96 per field matched to a true object (about 5 percent of
+  the ~60 undetected objects per field), faint (true flux
+  quartiles 34/60/115, s2n 6-21) and sitting in the wings of a
+  brighter neighbor (median nbr_ratio 4.2).  Recovery of the
+  brightest undetected neighbor of the unrecognized blends: 4
+  percent at target s2n 10-20, 11-12 at 20-50, 30 at >50 (the
+  seg-gated plane finds companions of bright objects).  But the
+  recovered neighbor's light is barely removed: excess for the
+  recovered rows exp +22.9 -> +18.2 percent (s2n 10-20), +19.0
+  -> +18.6, +8.9 -> +8.8; ladder +22.0 -> +20.4, +19.1 -> +18.0,
+  +8.3 -> +8.3; the unrecognized class as a whole is unchanged
+  (+15.7 both).  Cause: the extras are demoted to stars (exp 62
+  percent, ladder 47), and a psf model of a resolved faint
+  galaxy takes only its core (demoted extras recover 0.31/0.22
+  of their true flux; the galaxy-model ones 0.89 exp, ladder
+  aperture 1.03 of its own aperture truth).  The ladder total
+  on the recovered rows improves more (+44 -> +23 at s2n 10-20,
+  +48 -> +39, +28 -> +24) since even a core removal cuts what
+  the outer apertures integrate.  Side effects small: isolated
+  and detected-neighbor rows unchanged in bias and pull; sweeps
+  p90 up 10-40 percent, non-converged 0.3 -> 0.6 percent, flags
+  ==0 0.997 -> 0.994, deblend_flags==0 down 2 points (the
+  extras' own flagged rows), star fraction of sep rows
+  unchanged.  So extra detection in this form is a weak lever:
+  the detector misses 95 percent of the faint neighbors and the
+  fit demotes half of the found ones.  Options: (1) stop
+  demoting fixed-center extras -- give a failing extra a frozen
+  galaxy structure (the fixed-externals path with Tguess from
+  the smoothing) so its wings are modelled; (2) a lower s2
+  threshold or a second channel (the anull filter, off since the
+  grind cascade) for more of the missed neighbors, watching
+  purity; (3) the unmodelled-light covariate on the target,
+  which is the only lever for the 95 percent never detected.
+  How many of the missed neighbors are detectable at all
+  (nbr_completeness.py/.txt, replayed truth of the 4000
+  fields): isolated-object completeness (no object above 0.05
+  ratio within 20 px) is 50 percent at r flux 11.1 and 90 at
+  19.5.  The 87k missed brightest neighbors have median r flux
+  13.1 (quartiles 9/13/24) at 5.6/8.4/12 px; applying the
+  curve, 60 percent would be detected in isolation (59 percent
+  for targets at s2n 10-20, 82 at 20-50, 98 at >50; 68 percent
+  within 8 px, 52-56 at 8-15 px).  So most of the unrecognized
+  blends are detection failures caused by the blend itself
+  (the neighbor sits inside the target's segment or under its
+  light), not objects below threshold: a detection lever exists
+  in principle, and s2 as configured recovers 4-30 percent of
+  it.
+  Demotion follow-up (2026-09-02): free centers would not help
+  (an s2n-10 extra has k ~ 0.8 in the center update, so it moves
+  with the contaminated centroid toward the bright neighbor, up
+  to the 0.5 sqrt(Tsmooth) clip; the note measured all-free
+  centers destabilizing crowded groups, 376 flagged rows in 16
+  scenes).  lsst-mdet was injecting its s2 extras with free
+  centers (no extra_fixcen from the pipeline); now pinned via
+  DEBLEND_SETTINGS extra_fixcen=True (recorded in meta).  Erin's
+  objection to the frozen-galaxy demotion: it may freeze a
+  garbage structure (the last accepted structure is the
+  runaway's, the size guess is a guess).  Proposal that avoids
+  freezing anything fitted, ladder only: demote the FRAME to the
+  smoothing (the restart state, a known quantity) permanently --
+  no more deweight steps, type stays ladder, rungs 0.2-25.6 x
+  the smoothing frame, and the amplitudes keep being solved in
+  the scene-wide regularized solve with the tau0 prior toward
+  the exp projection.  The wings then live in linear amplitudes
+  under a prior, which cannot run away (the runaway is a
+  weight-iteration phenomenon); the gauss flux is the psf-sized
+  aperture (as for a star) and the total comes from the amps.
+  The delta model is itself a garbage structure for a resolved
+  galaxy (0.22-0.31 of the flux recovered).  exp has no such
+  option (one structure, so freezing it means freezing a
+  guess).  Implementation notes: in _contain_failure's demote
+  branch set a frozen flag instead of type='star', keep amps,
+  skip the structure update in the sweep like a star; full
+  errors must treat the frozen frame as a constant (drop its
+  weight rows from the packed state or zero its derivatives).
+  Test on the 960 paired fields (photwhite-ap-s2): the extras'
+  flux recovery and the target excess for the recovered rows.
+  Frozen-frame demotion, implemented and tested (2026-09-02):
+  FRAME_FROZEN flag; _adaptive(m) gates the packed state, the
+  layout, the column map, the sweep (flux-only update, amps by
+  the scene solve), the sandwich (fixed-weight variances) and
+  the full errors (no structure blocks; chain-vs-FD referee with
+  a frozen member passes, tests/test_frozen_frame.py).  Result
+  on the 960 paired s2 fields (photwhite-ap-s2-frozen-ladder-vs-
+  exp, frozen_vs_star.txt, paired_frozen_vs_off.txt; exp
+  identical to the star run, the control): 46.4 percent of the
+  extras frozen instead of demoted; their flux/true went 0.22
+  (star matched flux) -> 0.18 (frozen gauss) and the total 0.15
+  with 27 percent NEGATIVE totals; recovered targets' excess
+  s2n 10-20 +20.4 -> +19.0 percent, 20-50 +18.0 -> +17.4, >50
+  +8.3 -> +10.1 (worse); non-converged 0.69 -> 1.01 percent.
+  Diagnosis (smoke field, one pair): a 637-flux extra at 9.5 px
+  from a 3x brighter ladder got total 26 (star: 177) while the
+  neighbor's total/true is 1.33-1.37, high by about the extra's
+  flux: the joint amp solve hands the companion's light to the
+  bright neighbor's outer rungs (its prior width scales with
+  ITS flux, huge absolute freedom) and leaves the companion
+  negative wings.  The demotion was a symptom; the lever is the
+  joint solve: outer-rung prior widths that do not grow with
+  flux, or non-negative amps, or a prior tying a detected
+  companion's wings to its own core flux.  Code kept behind
+  LADDER_DEMOTE_FROZEN = False (star demotion stays the
+  default) as the vehicle for that next experiment.
+  Multiplicative prior width (2026-09-02, ladder.py
+  LADDER_PRIOR_MODE 'uniform' | 'multiplicative', floor
+  LADDER_PRIOR_FLOOR; env overrides KDEBLEND_LADDER_PRIOR /
+  _FLOOR for experiments; ladder_prior_lambda gives the
+  per-rung precisions and their derivative in the center, used
+  by the solve and by every Ainv in full_errors, with the dlam
+  terms in the state-response chain; chain-vs-FD referee passes
+  in both modes, tests/test_ladder_prior_mult.py, 113 tests).
+  Rung k's width is tau sqrt(a0_k^2 + floor^2) instead of tau:
+  the outer rungs (exp projection ~1 percent of the flux) go
+  from width 0.5 to ~0.5 floor.  Probe (prior_probe.txt):
+  isolated dev total at s2n 171 0.94 (uniform) -> 0.81/0.85/0.89
+  (floor 0.05/0.1/0.2), exp unchanged at high s2n, exp at s2n 18
+  0.97 -> 0.89/0.90/0.93; a bright dev neighbor's real wing
+  light is pushed into a faint target at floor 0.05 (neighbor
+  total 0.79, target 1.21) and nearly not at 0.2.  Paired run,
+  floor 0.1, s2 on, vs the star-demotion reference
+  (photwhite-ap-s2-priormult-ladder-vs-exp/compare_vs_star.txt,
+  total_by_undet.txt; exp identical): isolated totals +4.8/+4.1/
+  +1.9 percent -> +0.6/-0.7/+0.7 (the undetected-light
+  absorption largely gone: undet>=5 percent class 1.35 -> 1.27);
+  clean objects (undet4<1 percent) 1.033/1.016/1.010/1.001 ->
+  1.004/0.987/0.993/1.003, disks unbiased, but bulge-dominated
+  objects (bt>=0.6, ~4 percent of rows) 0.88/0.91/0.94 ->
+  0.85/0.85/0.88 and mixed 0.99/0.97/0.98 -> 0.97/0.94/0.96;
+  total pull scatter up (1.10 -> 1.17 low s2n, 2.1 -> 2.6 high).
+  Detected-neighbor over-subtraction reduced to <0.5 percent
+  (disk -0.6 -> -0.07, bulge -2.3 -> -0.4 at s2n 10-20; bulge at
+  20-50 +0.35, the first hint of under-subtraction); the
+  detected-neighbor class aperture excess +4.0 -> +4.6 percent
+  (the over-subtraction had been cancelling undetected light).
+  Extras: demoted 46.5 -> 42.5 percent, flux/true 0.49 -> 0.52,
+  total 0.76 -> 0.79; the recovered targets' aperture excess
+  unchanged (+19.9 -> +19.0, +15.7 -> +16.1, +7.8 -> +7.7): the
+  companion's light is still not subtracted, the extras stay
+  faint and mostly demoted.  Health slightly better (non-
+  converged 0.69 -> 0.59 percent, flags 0.9931 -> 0.9941).
+  Floor 0.2 (photwhite-ap-s2-priormult02-ladder-vs-exp): clean
+  objects 1.007/0.996/1.004/1.008 (the most unbiased of the
+  three), clean isolated 1.009/0.994/1.004/1.007; bulge-
+  dominated clean 0.853/0.857/0.905 (vs 0.85/0.85/0.88 at floor
+  0.1 and 0.88/0.91/0.94 uniform), mixed 0.976/0.950/0.975;
+  undet>=5 percent absorption 1.275/1.200/1.169/1.165 (uniform
+  1.355/1.266/1.209/1.170); detected-neighbor residuals disk
+  -0.33, bulge -1.1 percent at s2n 10-20 (halfway between
+  uniform and floor 0.1, no positive residual anywhere); total
+  pull scatter 1.16/1.27/1.47/2.38 (uniform 1.10/1.21/1.36/2.07,
+  floor 0.1 1.17/1.37/1.55/2.59); extras and the recovered
+  targets as at floor 0.1; non-converged 0.58 percent.
+  Recommendation: floor 0.2 -- it keeps the isolated/clean total
+  fix (+3-5 percent -> <1) and most of the over-subtraction
+  reduction while giving back a third of the bulge completion
+  loss; the remaining bulge deficit (3-5 points below uniform,
+  which itself under-completes n=4 by 6-12 percent) is the
+  prior's shape, an exp, doing what it should at low s2n.  The
+  total's error does not know about the prior-driven deficit
+  (pull scatter up 5-15 percent).  DECIDED (Erin, 2026-09-02):
+  multiplicative, floor 0.2 is the default (LADDER_PRIOR_MODE,
+  LADDER_PRIOR_FLOOR in ladder.py; the environment overrides
+  used for the A/B runs are removed -- an experiment sets the
+  module constants).  The comparison figures were redone at the
+  new default (ladder-figures/*_priormult.png with the printed
+  tables): on the bulge-heavy figure scenes the cost shows as a
+  bright n=4 member's total -14 percent (was 0) and chi2 within
+  1.5 arcsec 1.3 (was 1.0), colors unchanged.
+  Dead ends removed the same day: the frozen-frame demotion
+  (FRAME_FROZEN, LADDER_DEMOTE_FROZEN, tests/test_frozen_frame.py)
+  -- measured worse, the record stays in the paragraph above and
+  the run dirs; the _adaptive(m) predicate and the
+  _apply_structure_errors split in full_errors stay as
+  cleanups.
   lsst-mdet provenance (2026-09-02, branch "ladder"): fit_model
   column removed at Erin's request (the model is in meta, a
   demotion is DEBLENDED_AS_PSF); the meta table is now built by

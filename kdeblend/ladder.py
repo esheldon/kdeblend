@@ -27,10 +27,12 @@ Structural properties:
 - Priors, in fraction units (amps / per-band flux scale): a
   gaussian prior of width LADDER_TAU0 toward the exp profile
   expressed on the current rungs (with noise-weighted rows this
-  reverts faint objects to exp smoothly), and a cross-band
-  prior of width LADDER_TAUX tying the per-band fraction
-  vectors (color-gradient freedom that reverts to shared
-  structure at low s/n).
+  reverts faint objects to exp smoothly; the width is the same
+  on every rung, or scales with each rung's expected amplitude,
+  see LADDER_PRIOR_MODE and ladder_prior_lambda), and a
+  cross-band prior of width LADDER_TAUX tying the per-band
+  fraction vectors (color-gradient freedom that reverts to
+  shared structure at low s/n).
 - sum(amps) is the wing-dominated model total flux and is never
   a reported quantity; the catalog totals come from derived
   functionals (see ladder_derived).
@@ -82,6 +84,30 @@ LADDER_AP_FACS = 0.25 * 2.0 ** np.arange(8)
 # prior widths in fraction units (see module docstring)
 LADDER_TAU0 = 0.5
 LADDER_TAUX = 0.2
+
+# the shape of the profile prior's width across the rungs.
+# 'multiplicative' (the default): rung k may deviate from the exp
+# projection by tau sqrt(a0_k^2 + floor^2) in fraction units, a
+# fraction of its own expected amplitude, with the floor keeping
+# rungs whose projection is ~0 from being pinned; the data still
+# move any rung whose rows are significant, and a rung without
+# signal falls back to the profile.  'uniform': every rung may
+# deviate by tau, i.e. by tau times the object's flux -- the outer
+# rungs, whose exp-projection amplitude is a percent of the flux,
+# are then nearly free in relative terms, and a bright object's
+# wings have enough absolute freedom to absorb undetected light and
+# detected companions (measured 2026-09-02: isolated totals +3-5
+# percent from undetected neighbors; a 637-flux companion at 9.5 px
+# from a 3x brighter ladder ends up in the neighbor's outer rungs).
+# Floor 0.2 measured on 960 paired wldb fields: clean-object totals
+# 1.033/1.016/1.010/1.001 -> 1.007/0.996/1.004/1.008 by s2n bin, the
+# over-subtraction near detected neighbors halved, bulge-dominated
+# objects (bt >= 0.6, ~4 percent) 3-5 points less complete (0.85/
+# 0.86/0.91 vs 0.88/0.91/0.94); floor 0.1 gave the same gains with
+# twice the bulge loss, 0.05 pushed a bright dev neighbor's real
+# wing light into faint targets
+LADDER_PRIOR_MODE = 'multiplicative'
+LADDER_PRIOR_FLOOR = 0.2
 
 # scene-wide amp solve cadence: first solve at sweep
 # LADDER_WARMUP (early sweeps subtract the exp-profile init),
@@ -847,6 +873,29 @@ def ladder_prior(deb, idx, Sws, tol=0.0):
     return a0
 
 
+def ladder_prior_lambda(a0, tau0):
+    """
+    The per-column prior precisions and their derivative in the center.
+
+    In fraction units for one band's Z columns, from the prior center
+    a0 (see ladder_prior) at width tau0.  Returns (lam, dlam_da0):
+    'uniform' mode has lam = 1 / tau0^2 everywhere and a zero
+    derivative; 'multiplicative' mode has lam_k = 1 / (tau0^2 (a0_k^2
+    + floor^2)), so the width scales with the rung's own expected
+    amplitude, and dlam_k / da0_k = -2 a0_k lam_k / (a0_k^2 +
+    floor^2).  See LADDER_PRIOR_MODE.
+    """
+    a0 = np.asarray(a0, dtype='f8')
+    if LADDER_PRIOR_MODE == 'uniform':
+        lam = np.full(a0.size, 1.0 / tau0 ** 2)
+        return lam, np.zeros(a0.size)
+    if LADDER_PRIOR_MODE != 'multiplicative':
+        raise ValueError(f'bad LADDER_PRIOR_MODE {LADDER_PRIOR_MODE!r}')
+    s2 = a0 ** 2 + LADDER_PRIOR_FLOOR ** 2
+    lam = 1.0 / (tau0 ** 2 * s2)
+    return lam, -2.0 * a0 * lam / s2
+
+
 def ladder_assemble(deb, idx, var, wsum, Sws, Fhat, Mt, prior_tol=0.0):
     """
     The prior-width-independent solve pieces at the current state.
@@ -902,13 +951,13 @@ def ladder_solve_pieces(deb, idx, d, pieces, tau0=None):
     Z = nlad * K
     if tau0 is None:
         tau0 = LADDER_TAU0
-    lam0 = 1.0 / tau0 ** 2
+    lam, _ = ladder_prior_lambda(a0, tau0)
     rhs = np.zeros(nband * Z)
     for b in range(nband):
         db = d[:, :, b].reshape(nlad * nrows) / sigs[b]
-        rhs[b * Z:(b + 1) * Z] = Mws[b].T @ db + lam0 * a0
+        rhs[b * Z:(b + 1) * Z] = Mws[b].T @ db + lam * a0
     try:
-        X = np.linalg.solve(A + lam0 * np.eye(nband * Z), rhs)
+        X = np.linalg.solve(A + np.diag(np.tile(lam, nband)), rhs)
     except np.linalg.LinAlgError:
         return None
     if not np.all(np.isfinite(X)):

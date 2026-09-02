@@ -65,7 +65,7 @@ from .ladder import (
     ladder_fixed_weight, ladder_fixed_fluxes, ladder_fixed_units,
     ladder_exp_fracs, ladder_rung_covs, unit_flux_sums,
     t_row_indices, LADDER_TAU0, LADDER_AP_FACS, LADDER_RUNGS,
-    LADDER_TAU_TOTAL,
+    LADDER_TAU_TOTAL, ladder_prior_lambda,
 )
 
 SUPPORTED_TYPES = ('gauss', 'exp', 'dev', 'star', 'ladder')
@@ -165,9 +165,7 @@ def apply_full_errors(deb, mbobs, res, anchor_sigma=0.0):
     except LadderResolveError:
         return False
 
-    from ngmix.flags import NONPOS_SHAPE_VAR
-
-    from .deblender import _shape_errors, _joint_s2n
+    from .deblender import _joint_s2n, _adaptive
 
     # the packed family-covariance components map to the
     # (M1, M2, T) basis of the reported structure errors as
@@ -221,52 +219,8 @@ def apply_full_errors(deb, mbobs, res, anchor_sigma=0.0):
             # entries (T = 0, flagged shapes) stand
             continue
 
-        # structure errors from the family-covariance block;
-        # replaced only when the full values are usable, so a
-        # degenerate block cannot degrade a usable row
-        ic = i0 + nband + ncen
-        cblock = cov[np.ix_(
-            [ic, ic + 1, ic + 2], [ic, ic + 1, ic + 2],
-        )]
-        fam_cov = L @ cblock @ L.T
-        if np.all(np.isfinite(fam_cov)) and fam_cov[2, 2] > 0:
-            robj['T_err'] = np.sqrt(fam_cov[2, 2])
-            if np.isfinite(robj['e1']) and robj['T'] > 0:
-                e1e, e2e, eflags = _shape_errors(
-                    robj['e1'], robj['e2'], robj['T'], fam_cov,
-                )
-                if eflags == 0:
-                    robj['e1_err'] = e1e
-                    robj['e2_err'] = e2e
-                    # e_flags describes the reported errors:
-                    # these replace the per-object sandwich
-                    # values, so a shape-variance failure there
-                    # no longer applies.  NONPOS_SIZE cannot be
-                    # set on this branch (it requires the shape
-                    # itself usable), so this restores
-                    # e_flags == 0 iff shape and errors usable
-                    robj['e_flags'] &= ~NONPOS_SHAPE_VAR
-
-        # gauss-estimator structure errors from the weight rows:
-        # the gauss family is the weight minus the constant
-        # smoothing, so its covariance is the Sw block
-        isw = ic + 3
-        gblock = cov[np.ix_(
-            [isw, isw + 1, isw + 2], [isw, isw + 1, isw + 2],
-        )]
-        gfam_cov = L @ gblock @ L.T
-        if np.all(np.isfinite(gfam_cov)) and gfam_cov[2, 2] > 0:
-            robj['gauss_T_err'] = np.sqrt(gfam_cov[2, 2])
-            if np.isfinite(robj['gauss_e1']) \
-                    and robj['gauss_T'] > 0:
-                e1e, e2e, eflags = _shape_errors(
-                    robj['gauss_e1'], robj['gauss_e2'],
-                    robj['gauss_T'], gfam_cov,
-                )
-                if eflags == 0:
-                    robj['gauss_e1_err'] = e1e
-                    robj['gauss_e2_err'] = e2e
-                    robj['gauss_e_flags'] &= ~NONPOS_SHAPE_VAR
+        if _adaptive(deb.models[i]):
+            _apply_structure_errors(robj, cov, i0 + nband + ncen, L)
 
         gF = extras['gauss_flux'][i]
         gfc = extras['gauss_flux_cov'][i]
@@ -288,6 +242,60 @@ def apply_full_errors(deb, mbobs, res, anchor_sigma=0.0):
                     ))
                 robj['gauss_s2n'] = gs2n
     return True
+
+
+def _apply_structure_errors(robj, cov, ic, L):
+    """
+    Replace one adaptive object's structure and gauss-shape errors.
+
+    From its family-covariance block at packed offset ic and the
+    weight block that follows it.  Replaced only when the full values
+    are usable, so a degenerate block cannot degrade a usable row.
+    """
+    from ngmix.flags import NONPOS_SHAPE_VAR
+
+    from .deblender import _shape_errors
+
+    cblock = cov[np.ix_(
+        [ic, ic + 1, ic + 2], [ic, ic + 1, ic + 2],
+    )]
+    fam_cov = L @ cblock @ L.T
+    if np.all(np.isfinite(fam_cov)) and fam_cov[2, 2] > 0:
+        robj['T_err'] = np.sqrt(fam_cov[2, 2])
+        if np.isfinite(robj['e1']) and robj['T'] > 0:
+            e1e, e2e, eflags = _shape_errors(
+                robj['e1'], robj['e2'], robj['T'], fam_cov,
+            )
+            if eflags == 0:
+                robj['e1_err'] = e1e
+                robj['e2_err'] = e2e
+                # e_flags describes the reported errors: these
+                # replace the per-object sandwich values, so a
+                # shape-variance failure there no longer applies.
+                # NONPOS_SIZE cannot be set on this branch (it
+                # requires the shape itself usable), so this
+                # restores e_flags == 0 iff shape and errors usable
+                robj['e_flags'] &= ~NONPOS_SHAPE_VAR
+
+    # gauss-estimator structure errors from the weight rows: the
+    # gauss family is the weight minus the constant smoothing, so
+    # its covariance is the Sw block
+    isw = ic + 3
+    gblock = cov[np.ix_(
+        [isw, isw + 1, isw + 2], [isw, isw + 1, isw + 2],
+    )]
+    gfam_cov = L @ gblock @ L.T
+    if np.all(np.isfinite(gfam_cov)) and gfam_cov[2, 2] > 0:
+        robj['gauss_T_err'] = np.sqrt(gfam_cov[2, 2])
+        if np.isfinite(robj['gauss_e1']) and robj['gauss_T'] > 0:
+            e1e, e2e, eflags = _shape_errors(
+                robj['gauss_e1'], robj['gauss_e2'],
+                robj['gauss_T'], gfam_cov,
+            )
+            if eflags == 0:
+                robj['gauss_e1_err'] = e1e
+                robj['gauss_e2_err'] = e2e
+                robj['gauss_e_flags'] &= ~NONPOS_SHAPE_VAR
 
 
 def full_covariance(deb, mbobs, anchor_sigma=0.0,
@@ -774,9 +782,13 @@ def _ladder_state_response(deb, snap, x0, L, caches, Ds, theta0s,
     Ainv = {}
     X = {}
     amps = {}
+    lams = {}
+    dlams = {}
     for tau in taus:
         A0 = pieces_of[tau][0]
-        Ainv[tau] = np.linalg.inv(A0 + np.eye(N) / tau ** 2)
+        a0_tau = pieces_of[tau][4]
+        lams[tau], dlams[tau] = ladder_prior_lambda(a0_tau, tau)
+        Ainv[tau] = np.linalg.inv(A0 + np.diag(np.tile(lams[tau], nband)))
         full = ladder_solve_pieces(deb, idx, d0, pieces_of[tau], tau0=tau)
         if full is None:
             raise LadderResolveError('ladder solve failed')
@@ -810,7 +822,11 @@ def _ladder_state_response(deb, snap, x0, L, caches, Ds, theta0s,
         """
         out = {}
         for tau in taus:
-            lam0 = 1.0 / tau ** 2
+            lam = lams[tau]
+            a0_tau = pieces_of[tau][4]
+            # the prior precisions move with the center in the
+            # multiplicative mode (zero in the uniform mode)
+            dlam = dlams[tau] * da0
             drhs = np.zeros(N)
             dAX = np.zeros(N)
             for b in range(nband):
@@ -826,8 +842,12 @@ def _ladder_state_response(deb, snap, x0, L, caches, Ds, theta0s,
                 db = d0[:, :, b].reshape(-1) / sig
                 ddb = dd[:, :, b].reshape(-1) / sig
                 xb = X[tau][sl]
-                drhs[sl] = dMw.T @ db + Mw.T @ ddb + lam0 * da0
-                dAX[sl] = dMw.T @ (Mw @ xb) + Mw.T @ (dMw @ xb)
+                drhs[sl] = (
+                    dMw.T @ db + Mw.T @ ddb + lam * da0 + dlam * a0_tau
+                )
+                dAX[sl] = (
+                    dMw.T @ (Mw @ xb) + Mw.T @ (dMw @ xb) + dlam * xb
+                )
             dX = Ainv[tau] @ (drhs - dAX)
             out[tau] = np.stack([
                 dX[b * Z:(b + 1) * Z] * css[b]
@@ -1050,10 +1070,11 @@ def _ladder_derivs(deb, snap, x0, L, caches, Ds, theta0s, cols,
     nrows = nap + nmom
     _, aps, Sws, Tws, Fhat = ladder_context(deb)
     Mt = ladder_template(deb, idx, aps, Sws)
-    A, Mws, sigs, css, _ = ladder_assemble(
+    A, Mws, sigs, css, a0 = ladder_assemble(
         deb, idx, L['var'], L['wsum'], Sws, Fhat, Mt,
     )
-    Ainv = np.linalg.inv(A + np.eye(nband * Z) / LADDER_TAU0 ** 2)
+    lam, _ = ladder_prior_lambda(a0, LADDER_TAU0)
+    Ainv = np.linalg.inv(A + np.diag(np.tile(lam, nband)))
     R = [
         Ainv[:, b * Z:(b + 1) * Z] @ (Mws[b].T / sigs[b][None, :])
         for b in range(nband)
@@ -1131,10 +1152,11 @@ def _ladder_functional_covs(deb, snap, x0, L, caches, Ds, theta0s,
     for which, tau, var_w in (('fixed', LADDER_TAU0, L['var']),
                               ('total', LADDER_TAU_TOTAL,
                                L['var_total'])):
-        A0, Mws, sigs, css, _ = ladder_assemble(
+        A0, Mws, sigs, css, a0_w = ladder_assemble(
             deb, idx, var_w, L['wsum'], Sws, Fhat, Mt,
         )
-        Ainv = np.linalg.inv(A0 + np.eye(nband * Z) / tau ** 2)
+        lam_w, _ = ladder_prior_lambda(a0_w, tau)
+        Ainv = np.linalg.inv(A0 + np.diag(np.tile(lam_w, nband)))
         R = [
             Ainv[:, b * Z:(b + 1) * Z] @ (Mws[b].T / sigs[b][None, :])
             for b in range(nband)
@@ -1407,6 +1429,8 @@ def _object_layout(deb):
 
     Replays the _pack_state layout.
     """
+    from .deblender import _adaptive
+
     slices = []
     pers = []
     k = 0
@@ -1415,13 +1439,13 @@ def _object_layout(deb):
         per = deb.nband
         if deb.recenter:
             per += 2
-        if m['type'] in ('gauss', 'ladder'):
-            per += 3
-        elif m['type'] in ('exp', 'dev'):
-            per += 3
-        elif m['type'] == 'bdf':
-            per += 4
-        if m['type'] != 'star':
+        if _adaptive(m):
+            if m['type'] in ('gauss', 'ladder'):
+                per += 3
+            elif m['type'] in ('exp', 'dev'):
+                per += 3
+            elif m['type'] == 'bdf':
+                per += 4
             per += 3
         pers.append(per)
         k += per
@@ -1788,17 +1812,19 @@ def _column_map(deb):
     kind is one of 'F' (sub = band), 'cen' (sub 0 = v, 1 = u), 'cov'
     (sub = 00, 01, 11 component), 'fracdev', 'sw'.
     """
+    from .deblender import _adaptive
+
     cols = []
     for k, m in enumerate(deb.models):
         cols += [(k, 'F', b) for b in range(deb.nband)]
         if deb.recenter:
             cols += [(k, 'cen', 0), (k, 'cen', 1)]
-        if m['type'] in ('gauss', 'exp', 'dev', 'bdf', 'ladder'):
-            cols += [(k, 'cov', c) for c in range(3)]
+        if not _adaptive(m):
+            continue
+        cols += [(k, 'cov', c) for c in range(3)]
         if m['type'] == 'bdf':
             cols += [(k, 'fracdev', 0)]
-        if m['type'] != 'star':
-            cols += [(k, 'sw', c) for c in range(3)]
+        cols += [(k, 'sw', c) for c in range(3)]
     return cols
 
 
