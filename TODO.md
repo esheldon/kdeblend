@@ -718,6 +718,57 @@
   sensitivity to a 1e-6 change in the smoothing is itself a
   measure of how near-critical the exp iteration is on such
   blends.
+  Visual comparisons (2026-09-01, experiments/vis_*.py, figures
+  in ~/data/simcoadd-mdet/runs/ladder-figures): a bulge (n=4,
+  red) + disk (exp, blue) galaxy at s/n ~100, a five-galaxy
+  blend, and a random eight-galaxy blend (s/n 9-120 after the
+  full-error coupling), all gri with the same red-bulge /
+  blue-disk colors, fit at the true positions with all-exp and
+  all-ladder.  Exp leaves a negative core + positive ring on
+  every bulge-dominated member (strongest in i where the red
+  bulges dominate), reduced chi2 1.5-6 within 1.5 arcsec, flat
+  color gradients, and on the blends runaway/demoted faint
+  members in bright wings (with Tdet the bound demotes them);
+  the ladder's residuals are noise in every band (chi2 0.9-1.2),
+  it reproduces the color gradients, and its total_flux
+  recovers the bright members to 0-8 percent, the faint n=4
+  members under (-19/-31) and a faint disk in a bright wing over
+  (+53 +- 16).  Colors compared the right way -- the fitted
+  weight applied to the object's own noiseless truth in the
+  smoothed plane, not the integrated color -- the ladder's
+  aperture colors are within 1 sigma (0.013-0.02 mag) for the
+  bright members; the earlier +0.2-0.35 offsets were entirely
+  aperture-vs-integrated.  A blue disk's color error is smaller
+  than a red bulge's at the same i flux because g is the
+  limiting band.  render.py now draws ladder objects
+  (render_model needs Tsmooth).
+  Proposal under evaluation (2026-09-01): a new repo for the
+  ladder deblender, kdeblend frozen as the reference.  Stripped
+  scope: types ladder, star (demotion, point externals), gauss
+  (the estimator); group-replace mode only (stamps dropped);
+  fixed externals kept; full errors kept (the ladder's
+  total/fixed/gradient errors exist only through them, though
+  production runs full_errors false today); recentering to
+  decide (small in the deblender, ~200 lines of anchor
+  machinery in full_errors); gpu/ not carried (its kernel is
+  the gauss/exp sweep; the ladder port is future work).
+  Sizes: ladder.py 1150 stays; deblender 2600 -> ~1400 (bdf
+  ~450 lines, mixture/damped/shrinkage ~250, stamps ~150);
+  full_errors 2800 -> ~1700 (bdf joint sandwich, fracdev
+  columns, dPS channel, mixture branches of _phi_healthy /
+  _chain_pieces; the FD referees stay); render/vis/flags ~450;
+  ~7200 -> ~4700 package lines, ngmix.prepsfadmom stays the
+  engine dependency.  Method: extract with history, put an
+  identity harness first (reproduce_field.py against the
+  reference catalogs, bit-identical in every column, the
+  refactor's test), then strip and re-prove identity after
+  each removal so Stage A/B validation transfers by
+  construction; a model-keyed dispatch in the driver runs both
+  packages until Stage C signs off.  Alternative: strip on a
+  kdeblend branch with the reference tagged.  Recommendation:
+  the extraction.  The risky strip is full_errors' interleaved
+  exp/bdf branches.  Next step offered: the AST inventory of
+  the functions and branches that leave.
   Idea, for later (2026-09-01): the light the uncapped total
   absorbs is itself a measurement -- per object and band, the
   light in the 4-32 x Sw annuli that neither the object's inner
