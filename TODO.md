@@ -676,6 +676,33 @@
   the extras off), zero sub-2-px pairs.  Tests: the six
   extra-detection tests pass (one stub in
   test_single_fit_path_extra_detections learned the keyword).
+  Refactor of the ladder code (2026-09-01, bit-identical
+  catalogs on both reference fields for both models, all three
+  types with errors; 102 tests; timing within noise).
+  Removed dead ends: the unused imports (FASTEXP_MAX_CHI2,
+  admom_ksums, admom_finalize) and constants (_NAP, _CHI2_CAP);
+  the settled A/B switches LADDER_ROW_CACHE, KERNEL_SUBSAMPLE
+  and MODEL_SUM_DERIVS_PAIRWISE (the referees stay as functions:
+  _model_sum_derivs_full, _cov_sums(subsample=False),
+  _ladder_state_derivs, _flux_kernel_and_dtheta); the
+  never-passed parameters a0=, others=, write=, use_fd= and the
+  unused aps argument of ladder_measure_rows; the _MOM_IDX
+  "general moment rows" scaffolding that only ever supported
+  the T row (now T_ROW_INDEX, row_layout(), t_row_indices());
+  the second closed-form kernel gauss_pairs_sums/pairs_sums,
+  whose three uses were all components under one weight at zero
+  offset (unit_flux_sums on grid_sums).  Split: the row
+  measurement into _measure_object_rows plus the two caches;
+  the context -> rows -> subtract others -> template sequence
+  shared by the fit, the derived functionals and the error
+  setup into ladder_rows; the per-row flux-or-T selection into
+  _row_values; the fixed-aperture routines onto unit_flux_sums;
+  the amp-solve gate out of _sweep into _ladder_solve_step;
+  _any_model_ksums through band_comps.  Test-only reference
+  helpers (_comps_sums, _comps_flux_sum) moved to the tests.
+  The cross-module names (idx, Sws, Tws, aps, Fhat, d, var,
+  wsum, Mt, K, Z, nap, nrows) are defined once in the module
+  docstring; opaque locals renamed.
   Idea, for later (2026-09-01): the light the uncapped total
   absorbs is itself a measurement -- per object and band, the
   light in the 4-32 x Sw annuli that neither the object's inner

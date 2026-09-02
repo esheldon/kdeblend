@@ -33,18 +33,33 @@ Structural properties:
   structure at low s/n).
 - sum(amps) is the wing-dominated model total flux and is never
   a reported quantity; the catalog totals come from derived
-  functionals (see the TODO ledger).
+  functionals (see ladder_derived).
+
+Names used throughout this module and the ladder parts of
+full_errors, per group:
+
+- idx: the deblender indices of the ladder objects; io indexes
+  them (nlad of them), i the deblender's objects
+- K: the number of rungs; Z = nlad K amp columns per band
+- Sws[io], Tws[io]: the object's adaptive weight and its trace;
+  aps[io]: its aperture weights, LADDER_AP_FACS times Sws[io]
+- Fhat: (nlad, nband) per-band flux scales of the fraction units
+- nap, nrows: apertures per object and rows per object (the
+  apertures plus, with LADDER_MOMENT_ROWS, the T row)
+- d, var: (nlad, nrows, nband) measured rows and their noise
+  variances; wsum: (nlad, nband) epoch weight sums
+- Mt: (nlad nrows, Z) unit template, the row predictions of
+  every rung of every ladder object at unit amplitude
+- amps: (nband, K) per object; new_full / amps_full: (nband, Z)
+  for the whole group in flux units
 """
 import numpy as np
 from numba import njit
 
-from ngmix.prepsfadmom.models import get_profile_comps
-from ngmix.prepsfadmom.models_nb import gauss_comps_ksums, DET_REL_TOL
+from ngmix.prepsfadmom.models import get_profile_comps, model_comps
+from ngmix.prepsfadmom.models_nb import DET_REL_TOL
 from ngmix.prepsfadmom import get_phase_angles
-from ngmix.prepsfadmom.prepsfadmom_nb import (
-    admom_ksums, admom_finalize, _fill_phasors,
-)
-from ngmix.fastexp_nb import FASTEXP_MAX_CHI2  # noqa: F401
+from ngmix.prepsfadmom.prepsfadmom_nb import _fill_phasors
 
 # rung sizes as multiples of the pre-smoothing frame covariance,
 # geometric ratio 2.  Sub-smoothing rungs are omitted: after the
@@ -63,7 +78,6 @@ LADDER_RUNGS = 0.2 * 2.0 ** np.arange(8)      # 0.2 ... 25.6
 # per aperture instead of the chain is ~10 percent slower (the
 # per-aperture branch costs more than the straight-line chain)
 LADDER_AP_FACS = 0.25 * 2.0 ** np.arange(8)
-_NAP = LADDER_AP_FACS.size
 
 # prior widths in fraction units (see module docstring)
 LADDER_TAU0 = 0.5
@@ -77,7 +91,12 @@ LADDER_TAUX = 0.2
 # (long carried plateaus) and destabilizes the extrapolation,
 # while 1 lets the amps chase the weights into a limit cycle --
 # the one-sweep lag is load-bearing (measured on the
-# ladder+gauss pair test)
+# ladder+gauss pair test).  Measured dead end, do not revisit:
+# an adaptive cadence that doubled the solve interval (up to 16
+# sweeps) after solves whose model change was below 1e-3 cut the
+# solves by 22 percent on a wldb field but lagged the amps
+# behind the weights: sweeps +25 percent, converged 0.991 ->
+# 0.928, the >= 300-sweep groups 6 -> 28
 LADDER_SOLVE_EVERY = 2
 LADDER_WARMUP = 3
 
@@ -90,23 +109,6 @@ LADDER_WARMUP = 3
 # weights barely move; a final solve at the converged state
 # keeps the reported amps exact
 LADDER_GATE_TOL = 1.0e-4
-# per-object row cache in ladder_measure_rows: a member whose
-# position and weight are bit-identical to its last measurement
-# reuses its rows (they are data-only; the neighbor subtraction is
-# applied afterwards), exact by construction.  Measured motion
-# between solves is bimodal -- frozen (< 1e-12) or > 1e-3 in a
-# grinding group -- so no tolerance would add hits without adding
-# discontinuities against DEFAULT_TOL; hit rate 10 percent on
-# small groups, 29 on a 39-member grind
-LADDER_ROW_CACHE = True
-# Measured dead end, do not revisit: an adaptive cadence that
-# doubled the solve interval (up to 16 sweeps) after solves whose
-# model change was below 1e-3 cut the solves by 22 percent on a
-# wldb field but lagged the amps behind the weights: sweeps
-# +25 percent, converged 0.991 -> 0.928, the >= 300-sweep
-# groups 6 -> 28 (noisy pairs: 32 -> 75 and 24 -> 167 sweeps
-# for the same answer).  The two-sweep lag is the most the
-# coupled iteration tolerates, as the every-4 test also showed
 
 # frame eigenvalue floor, as a fraction of Tsmooth/2: a noisy
 # weight can drop below the smoothing; the rungs stay valid
@@ -123,12 +125,13 @@ LADDER_BASE_FLOOR = 0.1
 # aperture-corrected adaptive flux whose completion comes from
 # the fitted shape; the completion from the prior shape alone
 # is biased low (-12 percent on an exp truth, -35 on sersic
-# n=3), and sum(amps) of the subtraction solve is never used,
-# and the fixed-aperture flux is the model flux sum under a
-# round gaussian weight of this fwhm in the smoothed plane,
+# n=3), and sum(amps) of the subtraction solve is never used.
+# The fixed-aperture flux is the model flux sum under a round
+# gaussian weight of LADDER_FIXED_FWHM in the smoothed plane,
 # star-normalized (exact from the ladder mixture; the fixed
 # aperture is uniform across objects and psf-model calibratable)
 LADDER_TAU_TOTAL = 0.3
+LADDER_FIXED_FWHM = 2.0
 # the largest aperture factor (of LADDER_AP_FACS) whose flux row
 # informs the total-flux solve; None keeps all.  The outer
 # apertures integrate ~100 arcsec^2 of whatever is not modelled
@@ -147,7 +150,6 @@ LADDER_TAU_TOTAL = 0.3
 # the outer rungs become an ill-posed extrapolation there: the
 # cap only means something with real noise
 LADDER_TOTAL_MAX_AP = 4.0
-LADDER_FIXED_FWHM = 2.0
 
 # consistency row: the T sum under each ladder object's own
 # adaptive weight joins the solve as a soft noise-weighted row,
@@ -162,12 +164,35 @@ LADDER_FIXED_FWHM = 2.0
 # 1e-3).  Ellipticity consistency needs a frame-ellipticity
 # degree of freedom, a nonlinear follow-on
 LADDER_MOMENT_ROWS = True
-_MOM_IDX = (4,)
 
-# chi2 cap for the numpy noise-variance pass, matching the
-# fastexp cutoff regime (the tail contributes nothing)
-_CHI2_CAP = 200.0
+# indices into the moment-sum vector [v, u, M1, M2, T, flux]
+T_ROW_INDEX = 4
+_FLUX_INDEX = 5
 
+
+def row_layout():
+    """
+    The row layout per ladder object.
+
+    Returns (nap, nrows): the apertures per object and the rows per
+    object, the apertures plus the T row when it is on.
+    """
+    nap = LADDER_AP_FACS.size
+    return nap, nap + len(t_row_indices())
+
+
+def t_row_indices():
+    """
+    The moment-sum indices of the consistency rows.
+
+    In row order after the apertures: (T_ROW_INDEX,) with
+    LADDER_MOMENT_ROWS, else empty.
+    """
+    return (T_ROW_INDEX,) if LADDER_MOMENT_ROWS else ()
+
+
+# ---------------------------------------------------------------
+# frame and rungs
 
 def _frame_base(Sw, Tsmooth):
     """the eigenvalue-floored pre-smoothing base covariance"""
@@ -179,8 +204,11 @@ def _frame_base(Sw, Tsmooth):
 
 
 def ladder_rung_covs(Sw, Tsmooth):
-    """the smoothed rung covariances (S00, S01, S11 arrays) for
-    the frame implied by the weight Sw"""
+    """
+    The smoothed rung covariances of the frame implied by a weight.
+
+    Returns the arrays (S00, S01, S11) over the rungs.
+    """
     sm = Tsmooth / 2
     Sb = _frame_base(Sw, Tsmooth)
     return (
@@ -190,65 +218,22 @@ def ladder_rung_covs(Sw, Tsmooth):
     )
 
 
-@njit(cache=True)
-def gauss_pairs_sums(So00, So01, So11, dv, du, sw00, sw01, sw11, out):
-    """
-    per-pair moment sums [v, u, M1, M2, T, flux] of unit-flux
-    gaussian components So offset (dv, du) from the centers of
-    weights sw, at detAtinv=1: the gauss_comps_ksums algebra
-    without the accumulation, one weight per entry.  All inputs
-    are flat arrays of equal length; out is (n, 6).  A non
-    positive definite total covariance gives nan for that entry
-    """
-    n = So00.size
-    nrm = 2 * np.pi
-    for k in range(n):
-        C00 = sw00[k] + So00[k]
-        C01 = sw01[k] + So01[k]
-        C11 = sw11[k] + So11[k]
-        det = C00 * C11 - C01 * C01
-        if not (C00 > 0.0 and det > DET_REL_TOL * C00 * C11):
-            for j in range(6):
-                out[k, j] = np.nan
-            continue
-        idet = 1.0 / det
-        Ci00 = C11 * idet
-        Ci01 = -C01 * idet
-        Ci11 = C00 * idet
-        Cd0 = Ci00 * dv[k] + Ci01 * du[k]
-        Cd1 = Ci01 * dv[k] + Ci11 * du[k]
-        sflux = np.exp(
-            -0.5 * (dv[k] * Cd0 + du[k] * Cd1)
-        ) / (nrm * np.sqrt(det))
-        mu0 = sw00[k] * Cd0 + sw01[k] * Cd1
-        mu1 = sw01[k] * Cd0 + sw11[k] * Cd1
-        A00 = sw00[k] * Ci00 + sw01[k] * Ci01
-        A01 = sw00[k] * Ci01 + sw01[k] * Ci11
-        A10 = sw01[k] * Ci00 + sw11[k] * Ci01
-        A11 = sw01[k] * Ci01 + sw11[k] * Ci11
-        Sp00 = A00 * So00[k] + A01 * So01[k]
-        Sp01 = A00 * So01[k] + A01 * So11[k]
-        Sp11 = A10 * So01[k] + A11 * So11[k]
-        vv = Sp00 + mu0 * mu0
-        vu = Sp01 + mu0 * mu1
-        uu = Sp11 + mu1 * mu1
-        out[k, 0] = sflux * mu0
-        out[k, 1] = sflux * mu1
-        out[k, 2] = sflux * (uu - vv)
-        out[k, 3] = sflux * 2 * vu
-        out[k, 4] = sflux * (uu + vv)
-        out[k, 5] = sflux
-
+# ---------------------------------------------------------------
+# closed-form moment sums of gaussian components under gaussian
+# weights
 
 @njit(cache=True)
 def gauss_grid_sums(S00, S01, S11, W00, W01, W11, DV, DU, out):
     """
-    the moment sums [v, u, M1, M2, T, flux] of every unit-flux
-    component c (covariances S00, S01, S11, arrays of nc) under
-    every weight r (W00, W01, W11, arrays of nr) at the per-pair
-    offsets DV[r, c], DU[r, c], at detAtinv=1: out (nr, nc, 6).
-    The gauss_pairs_sums algebra on a weights-by-components grid,
-    without any broadcasting on the caller's side
+    Moment sums of every unit component under every weight, on a grid.
+
+    The moment sums [v, u, M1, M2, T, flux] of every unit-flux
+    component c (covariances S00, S01, S11, arrays of nc) under every
+    weight r (W00, W01, W11, arrays of nr) at the per-pair offsets
+    DV[r, c], DU[r, c], at detAtinv=1: out (nr, nc, 6).  The
+    gauss_comps_ksums algebra on a weights-by-components grid, without
+    any broadcasting on the caller's side; a non positive definite
+    total covariance gives nan for that pair.
     """
     nr = W00.size
     nc = S00.size
@@ -313,108 +298,89 @@ def grid_sums(S00, S01, S11, W00, W01, W11, DV, DU):
     return out
 
 
-def pairs_sums(S00, S01, S11, dv, du, W00, W01, W11):
-    """batched closed-form sums: broadcasts the inputs to a
-    common shape and returns the (..., 6) sums"""
-    arrs = np.broadcast_arrays(
-        np.asarray(S00, dtype='f8'), np.asarray(S01, dtype='f8'),
-        np.asarray(S11, dtype='f8'), np.asarray(dv, dtype='f8'),
-        np.asarray(du, dtype='f8'), np.asarray(W00, dtype='f8'),
-        np.asarray(W01, dtype='f8'), np.asarray(W11, dtype='f8'),
-    )
-    shape = arrs[0].shape
-    flat = [np.ascontiguousarray(a).ravel() for a in arrs]
-    out = np.empty((flat[0].size, 6))
-    gauss_pairs_sums(*flat, out)
-    return out.reshape(shape + (6,))
+def unit_flux_sums(S00, S01, S11, W):
+    """
+    Flux sums of unit components under one weight at zero offset.
 
-
-def _comps_sums(F, S00, S01, S11, dv, du, W):
-    """closed-form moment sums [v, u, M1, M2, T, flux] of
-    gaussian components offset (dv, du) from the center of
-    weight W, at detAtinv=1"""
-    F = np.atleast_1d(np.asarray(F, dtype='f8'))
-    n = F.size
-    sums = np.zeros(6)
-    gauss_comps_ksums(
-        F,
-        np.atleast_1d(np.asarray(S00, dtype='f8')),
-        np.atleast_1d(np.asarray(S01, dtype='f8')),
-        np.atleast_1d(np.asarray(S11, dtype='f8')),
-        np.full(n, float(dv)), np.full(n, float(du)),
-        W[0, 0], W[0, 1], W[1, 1], 1.0, sums,
-    )
-    return sums
-
-
-def _comps_flux_sum(F, S00, S01, S11, dv, du, W):
-    """the flux sum of _comps_sums"""
-    return _comps_sums(F, S00, S01, S11, dv, du, W)[5]
+    S00, S01, S11 are arrays of n components; returns (n,).
+    """
+    S00 = np.atleast_1d(np.asarray(S00, dtype='f8'))
+    zero = np.zeros((1, S00.size))
+    return grid_sums(
+        S00, S01, S11,
+        np.array([W[0, 0]]), np.array([W[0, 1]]), np.array([W[1, 1]]),
+        zero, zero,
+    )[0, :, _FLUX_INDEX]
 
 
 def band_comps(model, Tsmooth):
     """
-    per-band component fluxes and shared smoothed covariances of
-    any model type.
+    Per-band component fluxes and smoothed covariances of any model.
 
     Returns
     -------
     Fb, So00, So01, So11
-        Fb has shape (nband, ncomp): the per-band component
-        fluxes.  For the standard types this is the outer
-        product of the per-band flux with the fixed fractions;
-        for a ladder it is the amplitude matrix itself.
+        Fb has shape (nband, ncomp): the per-band component fluxes.
+        For the standard types this is the outer product of the
+        per-band flux with the fixed fractions; for a ladder it is
+        the amplitude matrix itself.
     """
     if model['type'] == 'ladder':
         S00, S01, S11 = model['rungs']
         return model['amps'], S00, S01, S11
-    from ngmix.prepsfadmom.models import model_comps
     fracs, S00, S01, S11 = model_comps(model, Tsmooth)
     return np.outer(model['F'], fracs), S00, S01, S11
 
 
 def ladder_exp_fracs(rungs, Sw, Tsmooth):
     """
-    the unit-total-flux exp profile expressed on the rungs: the
-    prior center of the amp solve and the amp initialization.
-    Closed form: match the exp model's aperture flux sums under
-    the standard aperture set with a tiny ridge; the exp family
-    covariance is the frame base of Sw
+    The unit-total-flux exp profile expressed on the rungs.
+
+    The prior center of the amp solve and the amp initialization.
+    Closed form: match the exp model's aperture flux sums under the
+    standard aperture set with a tiny ridge; the exp family
+    covariance is the frame base of Sw.
     """
     sm = Tsmooth / 2
     Sb = _frame_base(Sw, Tsmooth)
-    comps = get_profile_comps('exp')
-    efr = np.array([c[0] for c in comps])
-    ecT = np.array([c[1] for c in comps])
-    eS00 = ecT * Sb[0, 0] + sm
-    eS01 = ecT * Sb[0, 1]
-    eS11 = ecT * Sb[1, 1] + sm
+    exp_comps = get_profile_comps('exp')
+    exp_fracs = np.array([c[0] for c in exp_comps])
+    exp_size_facs = np.array([c[1] for c in exp_comps])
+    exp_S00 = exp_size_facs * Sb[0, 0] + sm
+    exp_S01 = exp_size_facs * Sb[0, 1]
+    exp_S11 = exp_size_facs * Sb[1, 1] + sm
     S00, S01, S11 = rungs
 
     K = LADDER_RUNGS.size
     Sw = np.asarray(Sw)
     nap = LADDER_AP_FACS.size
     # the rungs and the exp components in one grid call
-    zero = np.zeros((nap, K + efr.size))
-    ME = grid_sums(
-        np.concatenate([S00, eS00]), np.concatenate([S01, eS01]),
-        np.concatenate([S11, eS11]),
+    zero = np.zeros((nap, K + exp_fracs.size))
+    flux_sums = grid_sums(
+        np.concatenate([S00, exp_S00]), np.concatenate([S01, exp_S01]),
+        np.concatenate([S11, exp_S11]),
         LADDER_AP_FACS * Sw[0, 0], LADDER_AP_FACS * Sw[0, 1],
         LADDER_AP_FACS * Sw[1, 1], zero, zero,
-    )[..., 5]
-    M = ME[:, :K]
-    d0 = ME[:, K:] @ efr
-    MtM = M.T @ M
-    lam = 1.0e-8 * np.trace(MtM) / K
-    return np.linalg.solve(MtM + lam * np.eye(K), M.T @ d0)
+    )[..., _FLUX_INDEX]
+    rung_sums = flux_sums[:, :K]                    # (nap, K)
+    exp_sums = flux_sums[:, K:] @ exp_fracs         # (nap,)
+    MtM = rung_sums.T @ rung_sums
+    ridge = 1.0e-8 * np.trace(MtM) / K
+    return np.linalg.solve(
+        MtM + ridge * np.eye(K), rung_sums.T @ exp_sums,
+    )
 
+
+# ---------------------------------------------------------------
+# the group's ladder context and row bookkeeping
 
 def ladder_context(deb):
-    """the ladder objects and their per-object aperture and
-    frame quantities at the current state: (idx, aps, Sws, Tws,
-    Fhat) with aps[io] the aperture weights, Sws[io] the
-    adaptive weight, Tws[io] its trace and Fhat[io] the
-    per-band flux scale of the fraction units"""
+    """
+    The ladder objects of a group and their per-object quantities.
+
+    Returns (idx, aps, Sws, Tws, Fhat) at the current state, see the
+    module docstring.
+    """
     idx = [
         i for i, m in enumerate(deb.models) if m['type'] == 'ladder'
     ]
@@ -435,9 +401,13 @@ def ladder_context(deb):
     return idx, aps, Sws, Tws, Fhat
 
 
-def ladder_others(deb):
-    """the non-ladder members and fixed externals as
-    (position, band_comps) pairs, subtracted from the data side"""
+def _others_comps(deb):
+    """
+    The non-ladder members and fixed externals as components.
+
+    A list of (position, band_comps) pairs, subtracted from the data
+    side of the rows.
+    """
     others = []
     for j, m in enumerate(deb.models):
         if m['type'] != 'ladder':
@@ -449,25 +419,77 @@ def ladder_others(deb):
     return others
 
 
-def _nrows():
-    nmom = len(_MOM_IDX) if LADDER_MOMENT_ROWS else 0
-    return LADDER_AP_FACS.size, nmom, LADDER_AP_FACS.size + nmom
+def _row_weights(deb, idx, aps, Sws):
+    """
+    The row weights of the ladder system in row order.
 
+    Per object its nap aperture covariances then, with the T row, its
+    own weight.  Returns W00, W01, W11 (nlad nrows,), the row
+    positions (nlad nrows, 2) and is_t_row (nlad nrows,).
+    """
+    nap, nrows = row_layout()
+    nlad = len(idx)
+    W = np.empty((nlad * nrows, 3))
+    rpos = np.empty((nlad * nrows, 2))
+    is_t_row = np.zeros(nlad * nrows, dtype=bool)
+    for io, i in enumerate(idx):
+        r0 = io * nrows
+        for j, w in enumerate(aps[io]):
+            W[r0 + j] = (w[0, 0], w[0, 1], w[1, 1])
+        for r in range(nap, nrows):
+            Sw = Sws[io]
+            W[r0 + r] = (Sw[0, 0], Sw[0, 1], Sw[1, 1])
+            is_t_row[r0 + r] = True
+        rpos[r0:r0 + nrows] = deb.positions[i]
+    return W[:, 0], W[:, 1], W[:, 2], rpos, is_t_row
+
+
+def _row_values(sums, is_t_row):
+    """
+    Each row's own entry of a (nrows, ncomp, 6) grid of moment sums.
+
+    The flux sum for an aperture row, the T sum for a T row; returns
+    (nrows, ncomp).
+    """
+    return np.where(
+        is_t_row[:, None], sums[:, :, T_ROW_INDEX],
+        sums[:, :, _FLUX_INDEX],
+    )
+
+
+def _rung_comps(deb, idx):
+    """
+    All ladder objects' rungs as one component set.
+
+    In column order (jo-major): S00, S01, S11 (nlad K,) and the
+    component positions (nlad K, 2).
+    """
+    K = LADDER_RUNGS.size
+    R = np.array([deb.models[i]['rungs'] for i in idx], dtype='f8')
+    cpos = np.repeat(
+        np.array([deb.positions[i] for i in idx], dtype='f8'), K, axis=0,
+    )
+    return R[:, 0, :].ravel(), R[:, 1, :].ravel(), R[:, 2, :].ravel(), cpos
+
+
+# ---------------------------------------------------------------
+# the measured rows
 
 @njit(cache=True)
 def ladder_apsums(kim, iy, ix, dim, alpha, beta, kv, ku,
                   w00, w01, w11, df2, err_fac2, need_var,
                   flux, sums1, var):
     """
-    the fused ladder data pass: for the adaptive weight
-    (w00, w01, w11) at the centering phases (alpha, beta), one
-    loop over the modes accumulates the flux sums under the
-    eight dyadic apertures a = 0.25 ... 32 times the weight, the
-    six moment sums under the a=1 weight itself (the T row), and
-    with need_var the raw kernel cross sums for their noise
-    variances (multiply by (fac df2)^2, as for admom_finalize).
-    Per mode the a=1 weight is one exact exponential; the others
-    follow by two square roots and five squarings
+    The fused ladder data pass over the modes of one epoch.
+
+    For the adaptive weight (w00, w01, w11) at the centering phases
+    (alpha, beta), one loop over the modes accumulates the flux sums
+    under the eight dyadic apertures a = 0.25 ... 32 times the weight,
+    the six moment sums under the a=1 weight itself (the T row), and
+    with need_var the raw kernel cross sums for their noise variances
+    (multiply by (fac df2)^2, as for admom_finalize).  Per mode the
+    a=1 weight is one exact exponential; the others follow by two
+    square roots and five squarings.
 
     Parameters
     ----------
@@ -483,8 +505,8 @@ def ladder_apsums(kim, iy, ix, dim, alpha, beta, kv, ku,
     sums1: array of size 6
         output [v, u, M1, M2, T, flux] sums under the weight
     var: array of size 9
-        output raw variance sums: the 8 aperture flux sums and
-        the T sum (index 8); zeros when need_var is False
+        output raw variance sums: the 8 aperture flux sums and the T
+        sum (index 8); zeros when need_var is False
     """
     pyre = np.empty(dim)
     pyim = np.empty(dim)
@@ -574,190 +596,175 @@ def ladder_apsums(kim, iy, ix, dim, alpha, beta, kv, ku,
         flux[j] *= df2
 
 
-def ladder_measure_rows(deb, idx, aps, Sws, Tws, use_cache=True):
+def _measure_object_rows(deb, i, Sw, need_var):
     """
-    the measured rows: per ladder object, per aperture flux sum
-    and (with LADDER_MOMENT_ROWS) the T row under the object's
-    own weight, per band, with the epoch factors applied, plus
-    their noise variances and the per-band epoch weight sums,
-    all from one fused pass per epoch (ladder_apsums).  The
-    variances only set the relative row weights, so with
-    use_cache they are cached per object on the deblender and
-    refreshed when the weight has moved by more than 10 percent.
-    Also returns raw[io], the (nap, nep) per-epoch aperture flux
-    sums before the epoch factor, for the linearization used by
-    the full errors
+    The rows of one ladder object from the fused pass over its epochs.
 
-    Returns
-    -------
-    d, var: (nlad, nrows, nband); wsum: (nlad, nband);
-    raw: list of (nap, nep) arrays
+    Returns the per-band rows (nrows, nband) with the epoch factors
+    applied, their noise variances (zeros unless need_var), the
+    per-band epoch weight sums (nband,) and the raw per-epoch aperture
+    flux sums (nap, nep) before the epoch factor, the linearization
+    point of the full errors.
     """
-    nap, nmom, nrows = _nrows()
-    if nmom and tuple(_MOM_IDX) != (4,):
-        raise NotImplementedError(
-            'the fused ladder pass provides the T row only'
-        )
+    nap, nrows = row_layout()
     nband = deb.nband
-    nlad = len(idx)
-    cache = None
-    rcache = None
-    if use_cache:
-        cache = getattr(deb, '_ladder_sig_cache', None)
-        if cache is None:
-            cache = deb._ladder_sig_cache = {}
-        if LADDER_ROW_CACHE:
-            rcache = getattr(deb, '_ladder_row_cache', None)
-            if rcache is None:
-                rcache = deb._ladder_row_cache = {}
+    vi, ui = deb.positions[i]
+    epochs = deb.epochs_per_obj[i]
     flux = np.zeros(nap)
     sums1 = np.zeros(6)
-    vraw = np.zeros(nap + 1)
+    var_raw = np.zeros(nap + 1)
+    rows = np.zeros((nrows, nband))
+    var = np.zeros((nrows, nband))
+    wsum = np.zeros(nband)
+    raw_flux = np.zeros((nap, len(epochs)))
+    for iep, ep in enumerate(epochs):
+        band = ep['band']
+        fac = ep['weight'] * ep['detAtinv']
+        wsum[band] += ep['weight']
+        alpha, beta = get_phase_angles(
+            ep, vi - ep['vcen'], ui - ep['ucen'],
+        )
+        ladder_apsums(
+            ep['kim'], ep['iy'], ep['ix'], ep['dim'],
+            alpha, beta, ep['kv'], ep['ku'],
+            Sw[0, 0], Sw[0, 1], Sw[1, 1], ep['df2'],
+            ep['err_fac2'], need_var, flux, sums1, var_raw,
+        )
+        raw_flux[:, iep] = flux
+        rows[:nap, band] += fac * flux
+        if nrows > nap:
+            rows[nap, band] += fac * sums1[T_ROW_INDEX]
+        if need_var:
+            noise_fac = (fac * ep['df2']) ** 2
+            var[:nap, band] += noise_fac * var_raw[:nap]
+            if nrows > nap:
+                var[nap, band] += noise_fac * var_raw[nap]
+    return rows, var, wsum, raw_flux
+
+
+def ladder_measure_rows(deb, idx, Sws, Tws, use_cache=True):
+    """
+    The measured rows of every ladder object, stacked.
+
+    Returns d, var (nlad, nrows, nband), wsum (nlad, nband) and raw,
+    the list of (nap, nep) raw aperture sums (see
+    _measure_object_rows).
+
+    With use_cache two per-object caches on the deblender apply: the
+    variances only set the relative row weights, so they are reused
+    until the weight has moved by more than 10 percent; and a member
+    whose position and weight are bit-identical to its last
+    measurement reuses its rows outright (they are data-only; the
+    neighbor subtraction is applied afterwards), exact by
+    construction.  Measured motion between solves is bimodal --
+    frozen below 1e-12 or above 1e-3 in a grinding group -- so no
+    tolerance would add hits without adding discontinuities against
+    the deblender tolerance; the hit rate is 10 percent on small
+    groups, 17-29 on large ones.
+    """
+    nap, nrows = row_layout()
+    nband = deb.nband
+    nlad = len(idx)
+    sig_cache = None
+    row_cache = None
+    if use_cache:
+        sig_cache = getattr(deb, '_ladder_sig_cache', None)
+        if sig_cache is None:
+            sig_cache = deb._ladder_sig_cache = {}
+        row_cache = getattr(deb, '_ladder_row_cache', None)
+        if row_cache is None:
+            row_cache = deb._ladder_row_cache = {}
     d = np.zeros((nlad, nrows, nband))
     var = np.zeros((nlad, nrows, nband))
     wsum = np.zeros((nlad, nband))
     raw = []
     for io, i in enumerate(idx):
-        vi, ui = deb.positions[i]
         Sw = Sws[io]
-        epochs = deb.epochs_per_obj[i]
-        rawi = np.zeros((nap, len(epochs)))
-        ent = cache.get(i) if cache is not None else None
+        sig_entry = sig_cache.get(i) if sig_cache is not None else None
         need_var = (
-            ent is None or ent[1].shape != (nrows, nband)
-            or abs(ent[0] / Tws[io] - 1) > 0.1
+            sig_entry is None or sig_entry[1].shape != (nrows, nband)
+            or abs(sig_entry[0] / Tws[io] - 1) > 0.1
         )
-        key = (vi, ui, Sw[0, 0], Sw[0, 1], Sw[1, 1])
-        rent = rcache.get(i) if rcache is not None else None
-        if rent is not None and rent[0] == key and not need_var:
-            d[io] = rent[1]
-            wsum[io] = rent[2]
-            var[io] = ent[1]
-            raw.append(rent[3])
+        vi, ui = deb.positions[i]
+        state_key = (vi, ui, Sw[0, 0], Sw[0, 1], Sw[1, 1])
+        row_entry = row_cache.get(i) if row_cache is not None else None
+        if (
+            row_entry is not None and row_entry[0] == state_key
+            and not need_var
+        ):
+            d[io] = row_entry[1]
+            wsum[io] = row_entry[2]
+            var[io] = sig_entry[1]
+            raw.append(row_entry[3])
             continue
-        for iep, ep in enumerate(epochs):
-            band = ep['band']
-            fac = ep['weight'] * ep['detAtinv']
-            wsum[io, band] += ep['weight']
-            alpha, beta = get_phase_angles(
-                ep, vi - ep['vcen'], ui - ep['ucen'],
-            )
-            ladder_apsums(
-                ep['kim'], ep['iy'], ep['ix'], ep['dim'],
-                alpha, beta, ep['kv'], ep['ku'],
-                Sw[0, 0], Sw[0, 1], Sw[1, 1], ep['df2'],
-                ep['err_fac2'], need_var, flux, sums1, vraw,
-            )
-            rawi[:, iep] = flux
-            d[io, :nap, band] += fac * flux
-            if nmom:
-                d[io, nap, band] += fac * sums1[4]
-            if need_var:
-                nf = (fac * ep['df2']) ** 2
-                var[io, :nap, band] += nf * vraw[:nap]
-                if nmom:
-                    var[io, nap, band] += nf * vraw[nap]
+        d[io], var_io, wsum[io], raw_flux = _measure_object_rows(
+            deb, i, Sw, need_var,
+        )
         if need_var:
-            if cache is not None:
-                cache[i] = (Tws[io], var[io].copy())
+            var[io] = var_io
+            if sig_cache is not None:
+                sig_cache[i] = (Tws[io], var_io.copy())
         else:
-            var[io] = ent[1]
-        if rcache is not None:
-            rcache[i] = (key, d[io].copy(), wsum[io].copy(), rawi)
-        raw.append(rawi)
+            var[io] = sig_entry[1]
+        if row_cache is not None:
+            row_cache[i] = (
+                state_key, d[io].copy(), wsum[io].copy(), raw_flux,
+            )
+        raw.append(raw_flux)
     return d, var, wsum, raw
 
 
-def _row_weights(deb, idx, aps, Sws):
-    """the row weights of the ladder system in row order: per
-    object its nap aperture covariances then (with the T row)
-    its own weight; returns W00, W01, W11 (nlad nrows,), the row
-    positions (nlad nrows, 2) and the row kinds (nlad nrows,)
-    with -1 for a flux row and the moment index for a T row"""
-    nap, nmom, nrows = _nrows()
-    nlad = len(idx)
-    W = np.empty((nlad * nrows, 3))
-    rpos = np.empty((nlad * nrows, 2))
-    kind = np.full(nlad * nrows, -1, dtype=np.int64)
-    for io, i in enumerate(idx):
-        r0 = io * nrows
-        for j, w in enumerate(aps[io]):
-            W[r0 + j] = (w[0, 0], w[0, 1], w[1, 1])
-        for r, a in enumerate(_MOM_IDX[:nmom]):
-            Sw = Sws[io]
-            W[r0 + nap + r] = (Sw[0, 0], Sw[0, 1], Sw[1, 1])
-            kind[r0 + nap + r] = a
-        rpos[r0:r0 + nrows] = deb.positions[i]
-    return W[:, 0], W[:, 1], W[:, 2], rpos, kind
+def ladder_subtract_others(deb, idx, aps, Sws, wsum, d):
+    """
+    Subtract the non-ladder members and fixed externals from the rows.
 
-
-def _rung_comps(deb, idx):
-    """all ladder objects' rungs as one component set in column
-    order (jo-major): S00, S01, S11 (nlad K,) and the component
-    positions (nlad K, 2)"""
-    K = LADDER_RUNGS.size
-    R = np.array([deb.models[i]['rungs'] for i in idx], dtype='f8')
-    cpos = np.repeat(
-        np.array([deb.positions[i] for i in idx], dtype='f8'), K, axis=0,
-    )
-    return R[:, 0, :].ravel(), R[:, 1, :].ravel(), R[:, 2, :].ravel(), cpos
-
-
-def ladder_subtract_others(deb, idx, aps, Sws, wsum, d, others=None):
-    """subtract the non-ladder members and fixed externals from
-    the data rows, in place"""
-    nap, nmom, nrows = _nrows()
-    if others is None:
-        others = ladder_others(deb)
+    In place on d.
+    """
+    nap, nrows = row_layout()
+    others = _others_comps(deb)
     if not others or not idx:
         return
     nlad = len(idx)
-    W00, W01, W11, rpos, kind = _row_weights(deb, idx, aps, Sws)
-    nrt = W00.size
-    rowidx = np.arange(nrt) % nrows
-    for p, (Fb, oS00, oS01, oS11) in others:
-        DV = np.repeat(p[0] - rpos[:, 0:1], oS00.size, axis=1)
-        DU = np.repeat(p[1] - rpos[:, 1:2], oS00.size, axis=1)
-        out = grid_sums(oS00, oS01, oS11, W00, W01, W11, DV, DU)
-        # each row picks its own sum index: flux or its moment
-        vals = np.where(
-            kind[:, None] < 0, out[:, :, 5],
-            out[np.arange(nrt), :, np.maximum(kind, 0)][:, :],
-        )                                          # (nrt, ncomp)
-        contrib = vals @ Fb.T                      # (nrt, nband)
-        d -= (np.repeat(wsum, nrows, axis=0) * contrib).reshape(
-            nlad, nrows, -1,
-        )
+    W00, W01, W11, rpos, is_t_row = _row_weights(deb, idx, aps, Sws)
+    epoch_weights = np.repeat(wsum, nrows, axis=0)     # (nlad nrows, nband)
+    for pos, (Fb, oS00, oS01, oS11) in others:
+        DV = np.repeat(pos[0] - rpos[:, 0:1], oS00.size, axis=1)
+        DU = np.repeat(pos[1] - rpos[:, 1:2], oS00.size, axis=1)
+        vals = _row_values(
+            grid_sums(oS00, oS01, oS11, W00, W01, W11, DV, DU), is_t_row,
+        )                                          # (nlad nrows, ncomp)
+        contrib = vals @ Fb.T                      # (nlad nrows, nband)
+        d -= (epoch_weights * contrib).reshape(nlad, nrows, -1)
 
 
 def ladder_template(deb, idx, aps, Sws):
-    """the band-independent unit template matrix
-    (nlad nrows, nlad K): the row predictions of every rung of
+    """
+    The band-independent unit template matrix Mt.
+
+    Shape (nlad nrows, nlad K): the row predictions of every rung of
     every ladder object at unit amplitude, in one grid-kernel
-    evaluation"""
-    nap, nmom, nrows = _nrows()
-    K = LADDER_RUNGS.size
-    nlad = len(idx)
-    if nlad == 0:
+    evaluation.
+    """
+    if not idx:
         return np.zeros((0, 0))
-    W00, W01, W11, rpos, kind = _row_weights(deb, idx, aps, Sws)
+    W00, W01, W11, rpos, is_t_row = _row_weights(deb, idx, aps, Sws)
     S00, S01, S11, cpos = _rung_comps(deb, idx)
     DV = cpos[None, :, 0] - rpos[:, None, 0]
     DU = cpos[None, :, 1] - rpos[:, None, 1]
-    out = grid_sums(S00, S01, S11, W00, W01, W11, DV, DU)
-    nrt = W00.size
-    Mt = np.where(
-        kind[:, None] < 0, out[:, :, 5],
-        out[np.arange(nrt), :, np.maximum(kind, 0)],
+    Mt = _row_values(
+        grid_sums(S00, S01, S11, W00, W01, W11, DV, DU), is_t_row,
     )
     return np.ascontiguousarray(Mt)
 
 
 def ladder_neighbor_unit_sums(deb, idx):
-    """the (nobj, nlad, K, 6) unit rung sums of every ladder
-    object's rungs under every object's weight at the relative
-    offsets -- the neighbor-sum template d(NS_k)/d(amps_j),
-    zero on the object's own block"""
+    """
+    The neighbor-sum template d(NS_k)/d(amps_j).
+
+    The (nobj, nlad, K, 6) unit rung sums of every ladder object's
+    rungs under every object's weight at the relative offsets, zero
+    on the object's own block.
+    """
     K = LADDER_RUNGS.size
     nobj = deb.nobj
     nlad = len(idx)
@@ -778,15 +785,42 @@ def ladder_neighbor_unit_sums(deb, idx):
     return U
 
 
+def ladder_rows(deb, use_cache):
+    """
+    Everything the joint solve needs at the current state.
+
+    A dict with the context (idx, aps, Sws, Tws, Fhat), the measured
+    rows d with the non-ladder members subtracted, var, wsum, raw (see
+    ladder_measure_rows) and the unit template Mt.  The fit uses the
+    caches; the derived functionals and the error setup measure
+    afresh.
+    """
+    idx, aps, Sws, Tws, Fhat = ladder_context(deb)
+    d, var, wsum, raw = ladder_measure_rows(
+        deb, idx, Sws, Tws, use_cache=use_cache,
+    )
+    ladder_subtract_others(deb, idx, aps, Sws, wsum, d)
+    return {
+        'idx': idx, 'aps': aps, 'Sws': Sws, 'Tws': Tws, 'Fhat': Fhat,
+        'd': d, 'var': var, 'wsum': wsum, 'raw': raw,
+        'Mt': ladder_template(deb, idx, aps, Sws),
+    }
+
+
+# ---------------------------------------------------------------
+# the joint amplitude solve
+
 def ladder_prior(deb, idx, Sws, tol=0.0):
-    """the stacked prior center: the exp profile on each ladder
-    object's current rungs.  Cached per object on the deblender
-    against the weight it was computed for: reused when the
-    weight is unchanged (tol=0, the error evaluations, where
-    only a perturbed weight column changes an object's frame
-    and the derivative must stay exact), or within tol
-    relative (the fit, where a slightly stale prior center is
-    harmless)"""
+    """
+    The stacked prior center: the exp profile on each object's rungs.
+
+    Cached per object on the deblender against the weight it was
+    computed for: reused when the weight is unchanged (tol=0, the
+    error evaluations, where only a perturbed weight column changes
+    an object's frame and the derivative must stay exact), or within
+    tol relative (the fit, where a slightly stale prior center is
+    harmless).
+    """
     K = LADDER_RUNGS.size
     cache = getattr(deb, '_ladder_prior_cache', None)
     if cache is None:
@@ -794,41 +828,41 @@ def ladder_prior(deb, idx, Sws, tol=0.0):
     a0 = np.zeros(len(idx) * K)
     for io, i in enumerate(idx):
         Sw = np.asarray(Sws[io])
-        ent = cache.get(i)
+        entry = cache.get(i)
         hit = False
-        if ent is not None:
-            dS = np.abs(Sw - ent[0]).max()
+        if entry is not None:
+            dSw = np.abs(Sw - entry[0]).max()
             if tol <= 0:
-                hit = dS == 0.0
+                hit = dSw == 0.0
             else:
-                hit = dS <= tol * (Sw[0, 0] + Sw[1, 1])
+                hit = dSw <= tol * (Sw[0, 0] + Sw[1, 1])
         if hit:
-            a0i = ent[1]
+            a0_io = entry[1]
         else:
-            a0i = ladder_exp_fracs(
+            a0_io = ladder_exp_fracs(
                 deb.models[i]['rungs'], Sw, deb.Tsmooth,
             )
-            cache[i] = (Sw.copy(), a0i)
-        a0[io * K:(io + 1) * K] = a0i
+            cache[i] = (Sw.copy(), a0_io)
+        a0[io * K:(io + 1) * K] = a0_io
     return a0
 
 
-def ladder_assemble(deb, idx, var, wsum, Sws, Fhat, Mt, a0=None,
-                    prior_tol=0.0):
-    """the prior-width-independent solve pieces at the current
-    state: the (N, N) system matrix WITHOUT the lam0 diagonal
-    (the data blocks and the cross-band coupling; a solve at
-    prior width tau0 adds eye / tau0^2), and per band the
-    noise-weighted, fraction-scaled template Mw (nlad nrows, Z),
-    the row sigmas, the column scales and the prior center a0
-    (computed here unless given)"""
-    nap, nmom, nrows = _nrows()
+def ladder_assemble(deb, idx, var, wsum, Sws, Fhat, Mt, prior_tol=0.0):
+    """
+    The prior-width-independent solve pieces at the current state.
+
+    Returns the (N, N) system matrix WITHOUT the lam0 diagonal (the
+    data blocks and the cross-band coupling; a solve at prior width
+    tau0 adds eye / tau0^2), and per band the noise-weighted,
+    fraction-scaled template Mw (nlad nrows, Z), the row sigmas, the
+    column scales, and the prior center a0 (see ladder_prior).
+    """
+    nap, nrows = row_layout()
     K = LADDER_RUNGS.size
     nband = deb.nband
     nlad = len(idx)
     Z = nlad * K
-    if a0 is None:
-        a0 = ladder_prior(deb, idx, Sws, tol=prior_tol)
+    a0 = ladder_prior(deb, idx, Sws, tol=prior_tol)
     lamx = 1.0 / LADDER_TAUX ** 2
     N = nband * Z
     A = np.zeros((N, N))
@@ -839,9 +873,9 @@ def ladder_assemble(deb, idx, var, wsum, Sws, Fhat, Mt, a0=None,
     for b in range(nband):
         sig = np.sqrt(var[:, :, b]).reshape(nlad * nrows)
         sig = np.where(sig > 0, sig, 1.0)
-        rows = np.repeat(wsum[:, b], nrows)
+        epoch_weights = np.repeat(wsum[:, b], nrows)
         cs = np.repeat(Fhat[:, b], K)
-        Mw = ((Mt * rows[:, None]) / sig[:, None]) * cs[None, :]
+        Mw = ((Mt * epoch_weights[:, None]) / sig[:, None]) * cs[None, :]
         sl = slice(b * Z, (b + 1) * Z)
         A[sl, sl] = Mw.T @ Mw + lamx * (nband - 1) * eye
         for b2 in range(nband):
@@ -854,10 +888,14 @@ def ladder_assemble(deb, idx, var, wsum, Sws, Fhat, Mt, a0=None,
 
 
 def ladder_solve_pieces(deb, idx, d, pieces, tau0=None):
-    """the solve from assembled pieces at prior width tau0;
-    returns the (nband, Z) amps in flux units or None"""
+    """
+    The solve from assembled pieces at prior width tau0.
+
+    Returns the (nband, Z) amps in flux units, or None when the
+    system is singular or the solution is not finite.
+    """
     A, Mws, sigs, css, a0 = pieces
-    nap, nmom, nrows = _nrows()
+    nap, nrows = row_layout()
     K = LADDER_RUNGS.size
     nband = deb.nband
     nlad = len(idx)
@@ -882,53 +920,60 @@ def ladder_solve_pieces(deb, idx, d, pieces, tau0=None):
 
 
 def ladder_solve_rows(deb, idx, d, var, wsum, Sws, Fhat, Mt,
-                      tau0=None, a0=None, prior_tol=0.0):
-    """the regularized joint solve from the assembled rows;
-    returns the (nband, nlad K) amplitude matrix in flux units,
-    or None when the solve is unsafe"""
+                      tau0=None, prior_tol=0.0):
+    """
+    The regularized joint solve from the assembled rows.
+
+    Returns the (nband, nlad K) amplitude matrix in flux units, or
+    None when the solve is unsafe.
+    """
     if not (
         np.all(np.isfinite(d)) and np.all(np.isfinite(Mt))
         and np.all(np.isfinite(var))
     ):
         return None
     pieces = ladder_assemble(
-        deb, idx, var, wsum, Sws, Fhat, Mt, a0=a0,
-        prior_tol=prior_tol,
+        deb, idx, var, wsum, Sws, Fhat, Mt, prior_tol=prior_tol,
     )
     return ladder_solve_pieces(deb, idx, d, pieces, tau0=tau0)
 
 
 def ladder_change(deb, idx, Mt, wsum, Fhat, Tws, old_full, new_full):
-    """the per-object change of the model's row predictions
-    relative to the flux scale (times the weight T for the
-    moment rows).  The raw amp vectors carry prior-dominated
-    degenerate directions that amplify ~1e-8 frame noise into
-    ~1e-4 amp swings while the model as subtracted is
-    unchanged; a raw-amp metric then never converges (measured
-    on the two-ladder pair test)"""
-    nap, nmom, nrows = _nrows()
+    """
+    The per-object change of the model's row predictions.
+
+    Relative to the flux scale (times the weight T for the T row).
+    The raw amp vectors carry prior-dominated degenerate directions
+    that amplify ~1e-8 frame noise into ~1e-4 amp swings while the
+    model as subtracted is unchanged; a raw-amp metric then never
+    converges (measured on the two-ladder pair test).
+    """
+    nap, nrows = row_layout()
     nlad = len(idx)
-    das = np.zeros(nlad)
+    changes = np.zeros(nlad)
     for b in range(deb.nband):
-        rows_b = np.repeat(wsum[:, b], nrows)
-        rowchange = (Mt * rows_b[:, None]) @ (
+        epoch_weights = np.repeat(wsum[:, b], nrows)
+        row_change = (Mt * epoch_weights[:, None]) @ (
             new_full[b] - old_full[b]
         )
         for io in range(nlad):
-            den = wsum[io, b] * max(Fhat[io, b], 1.0e-30)
-            if den <= 0:
+            scale = wsum[io, b] * max(Fhat[io, b], 1.0e-30)
+            if scale <= 0:
                 continue
             r0 = io * nrows
-            da = np.abs(rowchange[r0:r0 + nap]).max() / den
-            if nmom:
-                da = max(da, np.abs(
-                    rowchange[r0 + nap:r0 + nrows]
-                ).max() / (den * Tws[io]))
-            das[io] = max(das[io], da)
-    return das
+            change = np.abs(row_change[r0:r0 + nap]).max() / scale
+            if nrows > nap:
+                change = max(change, np.abs(
+                    row_change[r0 + nap:r0 + nrows]
+                ).max() / (scale * Tws[io]))
+            changes[io] = max(changes[io], change)
+    return changes
 
 
 def ladder_write_amps(deb, idx, new_full):
+    """
+    Store the (nband, Z) group amps on the models.
+    """
     K = LADDER_RUNGS.size
     for io, i in enumerate(idx):
         deb.models[i]['amps'] = new_full[:, io * K:(io + 1) * K].copy()
@@ -936,101 +981,107 @@ def ladder_write_amps(deb, idx, new_full):
 
 def solve_group_amps(deb):
     """
-    the scene-wide joint amplitude solve for all ladder objects
-    of the group, in place.
+    The scene-wide joint amplitude solve for the group's ladder objects.
 
-    Rows are, per ladder object, the per-aperture, per-band
-    measured flux sums and (with LADDER_MOMENT_ROWS) the T sum
-    under the object's own adaptive weight, with non-ladder
-    members and fixed externals subtracted in closed form,
-    noise-weighted by the analytic aperture-sum sigmas; columns
-    are all ladder objects' per-band fraction vectors with
-    closed-form cross-object blocks; the priors are described in
-    the module docstring.  Updates the models' amps and
-    deb.ladder_last_da (see ladder_change) and returns the
-    maximum change, or None when there are no ladder objects or
-    a non-finite input made the solve unsafe (the amps are then
-    left unchanged)
+    In place.  Rows are, per ladder object, the per-aperture, per-band
+    measured flux sums and (with LADDER_MOMENT_ROWS) the T sum under
+    the object's own adaptive weight, with non-ladder members and
+    fixed externals subtracted in closed form, noise-weighted by the
+    analytic aperture-sum sigmas; columns are all ladder objects'
+    per-band fraction vectors with closed-form cross-object blocks;
+    the priors are described in the module docstring.  Updates the
+    models' amps and deb.ladder_last_da (see ladder_change) and
+    returns the maximum change, or None when there are no ladder
+    objects or a non-finite input made the solve unsafe (the amps are
+    then left unchanged).
     """
-    idx, aps, Sws, Tws, Fhat = ladder_context(deb)
+    R = ladder_rows(deb, use_cache=True)
+    idx = R['idx']
     if not idx:
         return None
-    d, var, wsum, _ = ladder_measure_rows(deb, idx, aps, Sws, Tws)
-    ladder_subtract_others(deb, idx, aps, Sws, wsum, d)
-    Mt = ladder_template(deb, idx, aps, Sws)
     new_full = ladder_solve_rows(
-        deb, idx, d, var, wsum, Sws, Fhat, Mt, prior_tol=1.0e-2,
+        deb, idx, R['d'], R['var'], R['wsum'], R['Sws'], R['Fhat'],
+        R['Mt'], prior_tol=1.0e-2,
     )
     if new_full is None:
         return None
     old_full = np.concatenate(
         [deb.models[i]['amps'] for i in idx], axis=1,
     )
-    das = ladder_change(
-        deb, idx, Mt, wsum, Fhat, Tws, old_full, new_full,
+    changes = ladder_change(
+        deb, idx, R['Mt'], R['wsum'], R['Fhat'], R['Tws'],
+        old_full, new_full,
     )
     for io, i in enumerate(idx):
-        deb.ladder_last_da[i] = das[io]
+        deb.ladder_last_da[i] = changes[io]
     ladder_write_amps(deb, idx, new_full)
-    return das.max()
+    return changes.max()
 
+
+# ---------------------------------------------------------------
+# derived flux functionals
 
 def ladder_fixed_weight(Tsmooth):
-    """the fixed round aperture weight in the smoothed plane and
-    the unit point-source (smoothing gaussian) flux sum under
-    it, the star normalization"""
+    """
+    The fixed round aperture weight and its star normalization.
+
+    Returns the weight W2 in the smoothed plane and the unit
+    point-source (smoothing gaussian) flux sum under it.
+    """
     from ngmix.moments import fwhm_to_T
     T2 = fwhm_to_T(LADDER_FIXED_FWHM)
     W2 = np.diag([T2 / 2, T2 / 2])
     sm = Tsmooth / 2
-    s_star = pairs_sums(sm, 0.0, sm, 0.0, 0.0, W2[0, 0], W2[0, 1],
-                        W2[1, 1])[5]
+    s_star = unit_flux_sums([sm], [0.0], [sm], W2)[0]
     return W2, float(s_star)
 
 
+def ladder_fixed_units(deb, idx, W2, s_star):
+    """
+    The star-normalized unit rung flux sums under the fixed aperture.
+
+    For every ladder object, (nlad, K).
+    """
+    K = LADDER_RUNGS.size
+    S00, S01, S11, _ = _rung_comps(deb, idx)
+    return unit_flux_sums(S00, S01, S11, W2).reshape(len(idx), K) / s_star
+
+
 def ladder_fixed_fluxes(deb, idx, amps_full, W2, s_star):
-    """the star-normalized fixed-aperture fluxes of all ladder
-    objects, (nlad, nband), from the (nband, nlad K) amps in one
-    batched evaluation"""
+    """
+    The star-normalized fixed-aperture fluxes of all ladder objects.
+
+    Returns (nlad, nband) from the (nband, nlad K) amps.
+    """
     K = LADDER_RUNGS.size
     nlad = len(idx)
-    u = ladder_fixed_units(deb, idx, W2, s_star)  # (nlad, K)
+    units = ladder_fixed_units(deb, idx, W2, s_star)     # (nlad, K)
     out = np.empty((nlad, deb.nband))
     for io in range(nlad):
-        out[io] = amps_full[:, io * K:(io + 1) * K] @ u[io]
+        out[io] = amps_full[:, io * K:(io + 1) * K] @ units[io]
     return out
 
 
-def ladder_fixed_units(deb, idx, W2, s_star):
-    """the star-normalized unit rung flux sums under the fixed
-    aperture for every ladder object, (nlad, K)"""
-    K = LADDER_RUNGS.size
-    S00, S01, S11, _ = _rung_comps(deb, idx)
-    zero = np.zeros((1, S00.size))
-    u = grid_sums(
-        S00, S01, S11, np.array([W2[0, 0]]), np.array([W2[0, 1]]),
-        np.array([W2[1, 1]]), zero, zero,
-    )[0, :, 5]
-    return u.reshape(len(idx), K) / s_star
-
-
 def ladder_fixed_flux(amps, rungs, W2, s_star):
-    """the star-normalized fixed-aperture flux per band of a
-    ladder model: its flux sum under W2 at its own center
-    divided by the point-source sum"""
+    """
+    The star-normalized fixed-aperture flux per band of one ladder model.
+
+    Its flux sum under W2 at its own center divided by the
+    point-source sum.
+    """
     S00, S01, S11 = rungs
-    u = pairs_sums(S00, S01, S11, 0.0, 0.0, W2[0, 0], W2[0, 1],
-                   W2[1, 1])[..., 5]
-    return (amps @ u) / s_star
+    return (amps @ unit_flux_sums(S00, S01, S11, W2)) / s_star
 
 
 def ladder_total_var(d, var):
     """
-    the row variances of the total-flux solve: the aperture rows
-    beyond LADDER_TOTAL_MAX_AP deweighted relative to noise and
-    signal so the prior completes them (the row layout is shared
-    with the subtraction solve, so the rows stay in place); var
-    itself when there is no cap.  d, var: (nlad, nrows, nband)
+    The row variances of the total-flux solve.
+
+    The aperture rows beyond LADDER_TOTAL_MAX_AP are deweighted
+    relative to noise and signal so the prior completes them (the row
+    layout is shared with the subtraction solve, so the rows stay in
+    place); var itself when there is no cap.  d, var: (nlad, nrows,
+    nband).
     """
     if LADDER_TOTAL_MAX_AP is None:
         return var
@@ -1042,50 +1093,48 @@ def ladder_total_var(d, var):
 
 def ladder_derived(deb):
     """
-    the derived flux functionals of every ladder object at the
-    current (converged) state, as {i: {'total_flux', 'fixed_flux'}}
-    with (nband,) arrays: the total flux is sum(amps) of a second
-    joint solve of the freshly measured rows with the
+    The derived flux functionals of every ladder object.
+
+    At the current (converged) state, as {i: {'total_flux',
+    'fixed_flux'}} with (nband,) arrays: the total flux is sum(amps)
+    of a second joint solve of the freshly measured rows with the
     LADDER_TAU_TOTAL prior (free core, prior-completed wings;
-    sum(amps) of the subtraction solve itself is wing-dominated
-    and never reported), the fixed flux is ladder_fixed_flux of
-    the subtraction amps.  None values when the total solve is
-    unsafe
+    sum(amps) of the subtraction solve itself is wing-dominated and
+    never reported), the fixed flux is ladder_fixed_flux of the
+    subtraction amps.  Nan totals when the total solve is unsafe.
     """
-    idx, aps, Sws, Tws, Fhat = ladder_context(deb)
-    out = {}
+    R = ladder_rows(deb, use_cache=False)
+    idx = R['idx']
     if not idx:
-        return out
+        return {}
     K = LADDER_RUNGS.size
-    d, var, wsum, _ = ladder_measure_rows(
-        deb, idx, aps, Sws, Tws, use_cache=False,
-    )
-    ladder_subtract_others(deb, idx, aps, Sws, wsum, d)
-    Mt = ladder_template(deb, idx, aps, Sws)
-    tot = ladder_solve_rows(
-        deb, idx, d, ladder_total_var(d, var), wsum, Sws, Fhat, Mt,
-        tau0=LADDER_TAU_TOTAL,
+    totals = ladder_solve_rows(
+        deb, idx, R['d'], ladder_total_var(R['d'], R['var']), R['wsum'],
+        R['Sws'], R['Fhat'], R['Mt'], tau0=LADDER_TAU_TOTAL,
     )
     W2, s_star = ladder_fixed_weight(deb.Tsmooth)
+    out = {}
     for io, i in enumerate(idx):
         m = deb.models[i]
-        ent = {
+        out[i] = {
             'fixed_flux': ladder_fixed_flux(
                 m['amps'], m['rungs'], W2, s_star,
             ),
             'total_flux': (
-                tot[:, io * K:(io + 1) * K].sum(axis=1)
-                if tot is not None else np.full(deb.nband, np.nan)
+                totals[:, io * K:(io + 1) * K].sum(axis=1)
+                if totals is not None else np.full(deb.nband, np.nan)
             ),
         }
-        out[i] = ent
     return out
 
 
 def color_gradient(fixed_flux, flux):
-    """the per adjacent-band-pair color gradient in magnitudes:
-    the fixed-aperture color minus the adaptive-aperture color,
-    nan where a flux is not positive"""
+    """
+    The per adjacent-band-pair color gradient in magnitudes.
+
+    The fixed-aperture color minus the adaptive-aperture color, nan
+    where a flux is not positive.
+    """
     nband = flux.size
     out = np.full(max(nband - 1, 0), np.nan)
     for c in range(nband - 1):

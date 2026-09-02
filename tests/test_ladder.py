@@ -11,12 +11,33 @@ from ngmix.prepsfadmom.prepsfadmom_nb import admom_ksums
 
 from kdeblend import deblend
 from kdeblend.deblender import build_deblender
-from kdeblend.ladder import (
-    solve_group_amps, band_comps, _comps_flux_sum,
-)
+from ngmix.prepsfadmom.models_nb import gauss_comps_ksums
+from kdeblend.ladder import solve_group_amps, band_comps
 from kdeblend.flags import RESTARTED, DEBLENDED_AS_PSF
 
 from _sims import make_blend_obs, make_blend_mbobs
+
+
+def _comps_sums(F, S00, S01, S11, dv, du, W):
+    """reference closed-form moment sums [v, u, M1, M2, T, flux]
+    of gaussian components offset (dv, du) from the center of
+    weight W, at detAtinv=1, straight from ngmix's kernel"""
+    F = np.atleast_1d(np.asarray(F, dtype='f8'))
+    n = F.size
+    sums = np.zeros(6)
+    gauss_comps_ksums(
+        F,
+        np.atleast_1d(np.asarray(S00, dtype='f8')),
+        np.atleast_1d(np.asarray(S01, dtype='f8')),
+        np.atleast_1d(np.asarray(S11, dtype='f8')),
+        np.full(n, float(dv)), np.full(n, float(du)),
+        W[0, 0], W[0, 1], W[1, 1], 1.0, sums,
+    )
+    return sums
+
+
+def _comps_flux_sum(F, S00, S01, S11, dv, du, W):
+    return _comps_sums(F, S00, S01, S11, dv, du, W)[5]
 
 
 def _data_flux_sum(ep, v, u, W):
@@ -238,7 +259,6 @@ def test_ladder_consistency_rows():
     frame's deweighted ellipticity, see kdeblend.ladder)"""
     from ngmix.prepsfadmom import deweight
     from kdeblend.deblender import _moment_matrix, _shape_from_cov
-    from kdeblend.ladder import _comps_sums
     import kdeblend.ladder as L
 
     def mismatch_T(obs, flag):

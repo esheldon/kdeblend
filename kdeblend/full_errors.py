@@ -59,15 +59,12 @@ from ngmix.prepsfadmom.models_nb import gauss_comps_ksums
 import functools
 
 from .ladder import (
-    ladder_context, ladder_measure_rows, ladder_subtract_others,
-    ladder_template, ladder_solve_rows, ladder_write_amps,
-    ladder_assemble, ladder_solve_pieces, ladder_neighbor_unit_sums,
-    ladder_total_var,
-    ladder_prior, ladder_fixed_weight, ladder_fixed_flux,
-    ladder_fixed_fluxes, ladder_fixed_units, ladder_context,
-    ladder_template, ladder_subtract_others, ladder_exp_fracs,
-    ladder_rung_covs, pairs_sums, LADDER_TAU0,
-    LADDER_AP_FACS, LADDER_RUNGS, LADDER_MOMENT_ROWS, _MOM_IDX,
+    ladder_context, ladder_rows, ladder_subtract_others,
+    ladder_template, ladder_write_amps, ladder_assemble,
+    ladder_solve_pieces, ladder_neighbor_unit_sums, ladder_total_var,
+    ladder_fixed_weight, ladder_fixed_fluxes, ladder_fixed_units,
+    ladder_exp_fracs, ladder_rung_covs, unit_flux_sums,
+    t_row_indices, LADDER_TAU0, LADDER_AP_FACS, LADDER_RUNGS,
     LADDER_TAU_TOTAL,
 )
 
@@ -100,9 +97,10 @@ MUTABLE_ATTRS = (
 
 def apply_full_errors(deb, mbobs, res, anchor_sigma=0.0):
     """
-    replace the per-object flux and structure errors of a
-    converged deblend with the full (fixed-point) values, and add
-    the cross-band flux covariance.
+    Replace a converged deblend's per-object errors with the full values.
+
+    The full (fixed-point) flux and structure errors replace the
+    per-object ones, and the cross-band flux covariance is added.
 
     Parameters
     ----------
@@ -295,12 +293,12 @@ def apply_full_errors(deb, mbobs, res, anchor_sigma=0.0):
 def full_covariance(deb, mbobs, anchor_sigma=0.0,
                     use_chain=None):
     """
-    the full covariance of the packed deblend state at the
-    converged fixed point, in physical units, the per-object
-    state offsets, and the derived gauss-estimator flux values
-    and covariances as a dict of per-object lists
-    {'gauss_flux', 'gauss_flux_cov'} (None entries for stars).
-    See the module docstring.
+    The full covariance of the packed deblend state at the fixed point.
+
+    In physical units, with the per-object state offsets, and the
+    derived gauss-estimator flux values and covariances as a dict of
+    per-object lists {'gauss_flux', 'gauss_flux_cov'} (None entries
+    for stars).  See the module docstring.
 
     use_chain=True (the default) assembles the Jacobian and
     data response by the chain rule: analytic data-sum
@@ -455,13 +453,15 @@ def _full_covariance(deb, mbobs, anchor_sigma, use_chain):
 
 def _flux_kernel_and_dtheta(ep, W, v0, u0):
     """
-    the flux-sum kernel row (nmodes, complex; the sum is
-    Re(G @ kim)) of weight W at center offset (v0, u0), and the
-    analytic (5,) derivative of the flux sum with respect to
-    (W00, W01, W11, v, u): the flux rows of moment_kernels and
-    dsums_dtheta from one evaluation of the shared ingredients.
-    The aperture members of a ladder group need only these
-    rows, and the full routines cost 6x more
+    The flux-sum kernel row of one weight and its state derivative.
+
+    Returns the kernel row (nmodes, complex; the sum is Re(G @ kim))
+    of weight W at center offset (v0, u0), and the analytic (5,)
+    derivative of the flux sum with respect to (W00, W01, W11, v, u):
+    the flux rows of moment_kernels and dsums_dtheta from one
+    evaluation of the shared ingredients.  The aperture members of a
+    ladder group need only these rows, and the full routines cost 6x
+    more.  The referee of _flux_kernels_and_dtheta_dyadic.
     """
     Sv, Su, base, yf, xf, dim, _ = _ingredients(ep, W, v0, u0)
     kv, ku, kim = ep['kv'], ep['ku'], ep['kim']
@@ -480,14 +480,15 @@ def _flux_kernel_and_dtheta(ep, W, v0, u0):
 
 def _flux_kernels_and_dtheta_dyadic(ep, Sw, v0, u0):
     """
-    _flux_kernel_and_dtheta for the eight dyadic apertures
-    a Sw, a = LADDER_AP_FACS, from one evaluation of the shared
-    ingredients: the phase and the quadratic form are common,
-    the a=1 weight is one exact exponential and the others its
-    square roots and squares, each with the same cutoff the
-    per-aperture route applies.  Returns G (8, nmodes) and
-    D (8, 5), the flux-sum derivatives with respect to each
-    aperture's own covariance components and the center
+    The flux kernel rows and derivatives of the eight dyadic apertures.
+
+    _flux_kernel_and_dtheta for the apertures a Sw, a = LADDER_AP_FACS,
+    from one evaluation of the shared ingredients: the phase and the
+    quadratic form are common, the a=1 weight is one exact
+    exponential and the others its square roots and squares, each
+    with the same cutoff the per-aperture route applies.  Returns G
+    (8, nmodes) and D (8, 5), the flux-sum derivatives with respect
+    to each aperture's own covariance components and the center.
     """
     alpha, beta = get_phase_angles(ep, v0, u0)
     dim = ep['dim']
@@ -529,23 +530,24 @@ def _flux_kernels_and_dtheta_dyadic(ep, Sw, v0, u0):
 
 def _ladder_setup(deb, epochs):
     """
-    the ladder error context at the solution.  The amps are not
-    state: they are the closed-form response of the joint solve
-    to the state (apertures, rungs, flux scales, priors, the
-    non-ladder members' models) and to two kinds of data modes,
-    the aperture flux sums and the T-row moment sum.  The
-    context holds the objects, the exact aperture-row variances
-    and epoch weights, the raw per-epoch aperture flux sums,
-    their analytic derivatives with respect to the object's
-    weight and center (the flux row of dsums_dtheta at the
-    aperture weight; the aperture is a fixed multiple of the
-    weight, so the chain factor is that multiple) and their
-    kernel rows for the covariance construction
+    The ladder error context at the solution.
+
+    The amps are not state: they are the closed-form response of the
+    joint solve to the state (apertures, rungs, flux scales, priors,
+    the non-ladder members' models) and to two kinds of data modes,
+    the aperture flux sums and the T-row moment sum.  The context
+    holds the objects, the exact aperture-row variances and epoch
+    weights, the raw per-epoch aperture flux sums and their analytic
+    derivatives with respect to the object's weight and center (the
+    flux row of dsums_dtheta at the aperture weight; the aperture is
+    a fixed multiple of the weight, so the chain factor is that
+    multiple).  The kernel rows themselves are not kept: (8, nmodes)
+    complex per object-epoch is GBs on a large group, so _cov_sums
+    rebuilds them where they are consumed.
     """
-    idx, aps, Sws, Tws, Fhat = ladder_context(deb)
-    d, var, wsum, raw = ladder_measure_rows(
-        deb, idx, aps, Sws, Tws, use_cache=False,
-    )
+    R = ladder_rows(deb, use_cache=False)
+    idx, aps, Sws = R['idx'], R['aps'], R['Sws']
+    d, var, wsum, raw = R['d'], R['var'], R['wsum'], R['raw']
     nap = LADDER_AP_FACS.size
     Dap = []
     for io, i in enumerate(idx):
@@ -569,19 +571,22 @@ def _ladder_setup(deb, epochs):
 
 
 def _ladder_rows_at(deb, L, caches, Ds, theta0s, dap, dT):
-    """the linearized rows, template and prior at the CURRENT
-    (unpacked) deblender state: the aperture sums move with the
-    object's weight and center through the analytic kernel
-    derivatives, the T row through the moment sum derivatives,
-    and the deltas dap[(io, j, iep)] and dT[(i, iep, a)] inject
-    data-mode perturbations.  Everything a solve at any prior
-    width needs; the row weights are frozen at the solution"""
+    """
+    The linearized rows, template and prior at the current state.
+
+    At the CURRENT (unpacked) deblender state: the aperture sums move
+    with the object's weight and center through the analytic kernel
+    derivatives, the T row through the moment sum derivatives, and
+    the deltas dap[(io, j, iep)] and dT[(i, iep, a)] inject data-mode
+    perturbations.  Everything a solve at any prior width needs; the
+    row weights are frozen at the solution.
+    """
     idx = L['idx']
     nap = L['nap']
     _, aps, Sws, Tws, Fhat = ladder_context(deb)
     nband = deb.nband
     nlad = len(idx)
-    nmom = len(_MOM_IDX) if LADDER_MOMENT_ROWS else 0
+    nmom = len(t_row_indices())
     d = np.zeros((nlad, nap + nmom, nband))
     for io, i in enumerate(idx):
         dth = _theta_of(deb, i) - theta0s[i]
@@ -597,7 +602,7 @@ def _ladder_rows_at(deb, L, caches, Ds, theta0s, dap, dT):
                     + dap.get((io, j, iep), 0.0)
                 )
                 d[io, j, band] += fac * s
-            for r, a in enumerate(_MOM_IDX[:nmom]):
+            for r, a in enumerate(t_row_indices()):
                 s = (
                     caches[i][iep][a] + Ds[i][iep][a] @ dth
                     + dT.get((i, iep, a), 0.0)
@@ -623,17 +628,24 @@ def _ladder_rows_at(deb, L, caches, Ds, theta0s, dap, dT):
 
 
 def _pieces_for(ctx, tau0):
-    """the assembled pieces of the solve at prior width tau0:
-    the total-flux solve (tau0 == LADDER_TAU_TOTAL) has its own,
-    from the capped rows"""
+    """
+    The assembled solve pieces for a prior width.
+
+    The total-flux solve (tau0 == LADDER_TAU_TOTAL) has its own, from
+    the capped rows.
+    """
     if tau0 is not None and tau0 == LADDER_TAU_TOTAL:
         return ctx['pieces_total']
     return ctx['pieces']
 
 
 def _ladder_solve_at(deb, L, ctx, tau0=None):
-    """the amps from the rows of _ladder_rows_at at the given
-    prior width; the tau-independent assembly is shared"""
+    """
+    The amps from the rows of _ladder_rows_at at a prior width.
+
+    The tau-independent assembly is shared; a failed solve raises
+    LadderResolveError.
+    """
     new_full = ladder_solve_pieces(
         deb, L['idx'], ctx['d'], _pieces_for(ctx, tau0), tau0=tau0,
     )
@@ -642,31 +654,33 @@ def _ladder_solve_at(deb, L, ctx, tau0=None):
     return new_full
 
 
-def _ladder_resolve(deb, L, caches, Ds, theta0s, dap, dT,
-                    tau0=None, write=True):
-    """re-solve the ladder amps at the CURRENT (unpacked)
-    deblender state (see _ladder_rows_at).  Returns the
-    (nband, Z) amps and, with write, stores them in the models;
-    tau0 overrides the prior width (the derived total flux)"""
+def _ladder_resolve(deb, L, caches, Ds, theta0s, dap, dT, tau0=None):
+    """
+    Re-solve the ladder amps at the current deblender state.
+
+    At the CURRENT (unpacked) state (see _ladder_rows_at); stores the
+    amps in the models and returns them as (nband, Z).  tau0
+    overrides the prior width (the derived total flux).
+    """
     ctx = _ladder_rows_at(deb, L, caches, Ds, theta0s, dap, dT)
     new_full = _ladder_solve_at(deb, L, ctx, tau0)
-    if write:
-        ladder_write_amps(deb, L['idx'], new_full)
+    ladder_write_amps(deb, L['idx'], new_full)
     return new_full
 
 
 def _ladder_state_derivs(deb, snap, x0, L, caches, Ds, theta0s,
                          cols, W2, s_star):
     """
-    one central-FD loop over the packed state columns for
-    everything the ladder needs per state: the neighbor sums
-    with the re-solved subtraction amps (dNS[(i, col)], physical
-    units per unit physical change) and the derived flux
-    functionals -- the fixed-aperture flux of the subtraction
-    amps and the total flux of the LADDER_TAU_TOTAL solve -- as
-    (nlad, nband, npars) responses in the normalized columns,
-    plus their values at the solution.  One row/template/prior
-    build per evaluation serves both solves
+    The FD referee of the ladder's state response.
+
+    One central-FD loop over the packed state columns for everything
+    the ladder needs per state: the neighbor sums with the re-solved
+    subtraction amps (dNS[(i, col)], physical units per unit physical
+    change) and the derived flux functionals -- the fixed-aperture
+    flux of the subtraction amps and the total flux of the
+    LADDER_TAU_TOTAL solve -- as (nlad, nband, npars) responses in
+    the normalized columns, plus their values at the solution.  One
+    row/template/prior build per evaluation serves both solves.
     """
     nobj = deb.nobj
     idx = L['idx']
@@ -718,18 +732,19 @@ def _ladder_state_derivs(deb, snap, x0, L, caches, Ds, theta0s,
 def _ladder_state_response(deb, snap, x0, L, caches, Ds, theta0s,
                            cols, W2, s_star, dNS_direct):
     """
-    the analytic state response of the ladder: for every packed
-    state column, the amps' response through the solve chain
-    dX = A^-1 (d rhs - dA X) at both prior widths, with the
-    template, prior and subtracted-row derivatives from central
+    The analytic state response of the ladder.
+
+    For every packed state column, the amps' response through the
+    solve chain dX = A^-1 (d rhs - dA X) at both prior widths, with
+    the template, prior and subtracted-row derivatives from central
     micro-FD on the batched closed-form kernels and the data-row
     derivatives from the analytic kernel derivatives; then the
     neighbor sums (the fixed-amps direct part dNS_direct plus the
     amps channel through the unit rung sums) and the derived
     functionals.  Returns dNS (physical units per unit physical
-    change) and the lstate dict of _ladder_state_derivs, of
-    which this is the fast replacement (that FD loop stays as
-    the referee)
+    change) and the lstate dict of _ladder_state_derivs, of which
+    this is the fast replacement (that FD loop stays as the
+    referee).
     """
     _restore_state(deb, snap)
     idx = L['idx']
@@ -740,7 +755,7 @@ def _ladder_state_response(deb, snap, x0, L, caches, Ds, theta0s,
     nband = deb.nband
     npars = x0.size
     scales = deb.scales
-    nmom = len(_MOM_IDX) if LADDER_MOMENT_ROWS else 0
+    nmom = len(t_row_indices())
     nrows = nap + nmom
     Z = nlad * K
     N = nband * Z
@@ -777,16 +792,22 @@ def _ladder_state_response(deb, snap, x0, L, caches, Ds, theta0s,
     ])
 
     def others_rows():
-        """the subtracted rows (minus the others' contribution)
-        at the current in-place state"""
+        """
+        The subtracted rows at the current in-place state.
+
+        Minus the others' contribution only, on zero data rows.
+        """
         dd = np.zeros((nlad, nrows, nband))
         ladder_subtract_others(deb, idx, aps, Sws, wsum, dd)
         return dd
 
     def chain(dMt, dd, da0, dcss):
-        """the amps' response at both widths for the given
-        derivatives of the template, rows, prior and column
-        scales"""
+        """
+        The amps' response at both prior widths.
+
+        For the given derivatives of the template, rows, prior and column
+        scales.
+        """
         out = {}
         for tau in taus:
             lam0 = 1.0 / tau ** 2
@@ -865,10 +886,7 @@ def _ladder_state_response(deb, snap, x0, L, caches, Ds, theta0s,
                     ))
                     dds.append(others_rows())
                     S00, S01, S11 = m['rungs']
-                    us.append(pairs_sums(
-                        S00, S01, S11, 0.0, 0.0,
-                        W2[0, 0], W2[0, 1], W2[1, 1],
-                    )[..., 5] / s_star)
+                    us.append(unit_flux_sums(S00, S01, S11, W2) / s_star)
                 deb.Sw[k] = Sw0
                 m['rungs'] = rungs0
                 Sws[io] = Sw0
@@ -886,7 +904,7 @@ def _ladder_state_response(deb, snap, x0, L, caches, Ds, theta0s,
                             fac * LADDER_AP_FACS[j]
                             * L['Dap'][io][j][iep][sub]
                         )
-                    for rr, a in enumerate(_MOM_IDX[:nmom]):
+                    for rr, a in enumerate(t_row_indices()):
                         dd[io, nap + rr, b] += (
                             fac * Ds[k][iep][a, sub]
                         )
@@ -910,7 +928,7 @@ def _ladder_state_response(deb, snap, x0, L, caches, Ds, theta0s,
                         dd[io, j, b] += (
                             fac * L['Dap'][io][j][iep][3 + sub]
                         )
-                    for rr, a in enumerate(_MOM_IDX[:nmom]):
+                    for rr, a in enumerate(t_row_indices()):
                         dd[io, nap + rr, b] += (
                             fac * Ds[k][iep][a, 3 + sub]
                         )
@@ -988,22 +1006,23 @@ def _ladder_state_response(deb, snap, x0, L, caches, Ds, theta0s,
 
 
 def _ladder_derivs(deb, snap, x0, L, caches, Ds, theta0s, cols,
-                   covS, epochs, W2, s_star, dNS_direct=None,
-                   use_fd=False):
+                   covS, epochs, W2, s_star, dNS_direct=None):
     """
-    the neighbor-sum derivatives for a ladder group:
-    dNS[(i, col)] per packed state column by central FD of the
-    re-solve (physical units per unit physical change, the
-    complete dependence including the non-ladder members'
-    direct terms, the rung frames and the amps), and
-    dNSm[(i, col)] per data mode (the aperture sums and the
-    T-row moment sums of the ladder objects) analytically: the
-    rows enter the solve's right-hand side linearly, so the amp
-    response to a row is a column of A^-1 Mw^T / sigma times the
-    epoch factor, and the neighbor sums respond to the amps
-    through the unit rung sums (ladder_neighbor_unit_sums).
-    Also returns the derived-functional state responses from
-    the shared FD loop (_ladder_state_derivs)
+    The neighbor-sum derivatives of a ladder group.
+
+    dNS[(i, col)] per packed state column (physical units per unit
+    physical change, the complete dependence including the non-ladder
+    members' direct terms, the rung frames and the amps), and
+    dNSm[(i, col)] per data mode (the aperture sums and the T-row
+    moment sums of the ladder objects) analytically: the rows enter
+    the solve's right-hand side linearly, so the amp response to a
+    row is a column of A^-1 Mw^T / sigma times the epoch factor, and
+    the neighbor sums respond to the amps through the unit rung sums
+    (ladder_neighbor_unit_sums).  Also returns the derived-functional
+    state responses.  With dNS_direct (the fixed-amps direct part
+    from _model_sum_derivs) the state channel is the analytic
+    _ladder_state_response; without it the FD referee
+    _ladder_state_derivs.
     """
     nobj = deb.nobj
     nep = len(epochs)
@@ -1011,7 +1030,7 @@ def _ladder_derivs(deb, snap, x0, L, caches, Ds, theta0s, cols,
     nap = L['nap']
     nS0 = 6 * nobj * nep
 
-    if use_fd or dNS_direct is None:
+    if dNS_direct is None:
         dNS, lstate = _ladder_state_derivs(
             deb, snap, x0, L, caches, Ds, theta0s, cols, W2, s_star,
         )
@@ -1023,7 +1042,7 @@ def _ladder_derivs(deb, snap, x0, L, caches, Ds, theta0s, cols,
 
     # data modes, analytic through the solve at the solution
     _restore_state(deb, snap)
-    nmom = len(_MOM_IDX) if LADDER_MOMENT_ROWS else 0
+    nmom = len(t_row_indices())
     K = LADDER_RUNGS.size
     nband = deb.nband
     nlad = len(idx)
@@ -1034,7 +1053,6 @@ def _ladder_derivs(deb, snap, x0, L, caches, Ds, theta0s, cols,
     A, Mws, sigs, css, _ = ladder_assemble(
         deb, idx, L['var'], L['wsum'], Sws, Fhat, Mt,
     )
-    from .ladder import LADDER_TAU0
     Ainv = np.linalg.inv(A + np.eye(nband * Z) / LADDER_TAU0 ** 2)
     R = [
         Ainv[:, b * Z:(b + 1) * Z] @ (Mws[b].T / sigs[b][None, :])
@@ -1063,7 +1081,7 @@ def _ladder_derivs(deb, snap, x0, L, caches, Ds, theta0s, cols,
                 col = nS0 + (io * nap + j) * nep + iep
                 for k, d in mode_resp(b, io * nrows + j, fac).items():
                     dNSm[(k, col)] = d
-            for r, a in enumerate(_MOM_IDX[:nmom]):
+            for r, a in enumerate(t_row_indices()):
                 col = (i * nep + iep) * 6 + a
                 for k, d in mode_resp(
                         b, io * nrows + nap + r, fac).items():
@@ -1075,18 +1093,16 @@ def _ladder_functional_covs(deb, snap, x0, L, caches, Ds, theta0s,
                             cols, covS, epochs, Tx, Ra, anchor_cov,
                             slices, lstate, W2, s_star):
     """
-    the covariances of the derived flux functionals of the
-    ladder objects: the fixed-aperture flux (a linear functional
-    of the subtraction amps) and the total flux (sum of the amps
-    of the LADDER_TAU_TOTAL solve of the same rows), each with
-    the direct data channel analytic through the solve matrix
-    and the state channel from the shared FD loop
-    (_ladder_state_derivs), chained through the state response
-    Tx; and the variance of the color
-    gradient (fixed minus adaptive color per adjacent band pair)
-    from the fixed-flux response and the flux rows of Tx.
-    Returns {i: {'fixed_flux_cov', 'total_flux_cov',
-    'gradient_var'}}
+    The covariances of the ladder objects' derived flux functionals.
+
+    The fixed-aperture flux (a linear functional of the subtraction
+    amps) and the total flux (sum of the amps of the LADDER_TAU_TOTAL
+    solve of the same rows), each with the direct data channel
+    analytic through the solve matrix and the state channel from the
+    state response, chained through Tx; and the variance of the color
+    gradient (fixed minus adaptive color per adjacent band pair) from
+    the fixed-flux response and the flux rows of Tx.  Returns
+    {i: {'fixed_flux_cov', 'total_flux_cov', 'gradient_var'}}.
     """
     idx = L['idx']
     nap = L['nap']
@@ -1096,7 +1112,7 @@ def _ladder_functional_covs(deb, snap, x0, L, caches, Ds, theta0s,
     nlad = len(idx)
     K = LADDER_RUNGS.size
     Z = nlad * K
-    nmom = len(_MOM_IDX) if LADDER_MOMENT_ROWS else 0
+    nmom = len(t_row_indices())
     nrows = nap + nmom
     nS0 = 6 * nobj * nep
     nS = covS.shape[0]
@@ -1112,7 +1128,6 @@ def _ladder_functional_covs(deb, snap, x0, L, caches, Ds, theta0s,
         'fixed': np.zeros((nlad, nband, nS)),
         'total': np.zeros((nlad, nband, nS)),
     }
-    from .ladder import LADDER_TAU0
     for which, tau, var_w in (('fixed', LADDER_TAU0, L['var']),
                               ('total', LADDER_TAU_TOTAL,
                                L['var_total'])):
@@ -1133,7 +1148,7 @@ def _ladder_functional_covs(deb, snap, x0, L, caches, Ds, theta0s,
                     for j in range(nap)
                 ] + [
                     ((i * nep + iep) * 6 + a, io * nrows + nap + r)
-                    for r, a in enumerate(_MOM_IDX[:nmom])
+                    for r, a in enumerate(t_row_indices())
                 ]
                 for col, row in modes:
                     dX = R[b][:, row] * fac
@@ -1206,10 +1221,12 @@ def _ladder_functional_covs(deb, snap, x0, L, caches, Ds, theta0s,
 
 def _fd_jacobian(deb, snap, x0, patched0, slices, pers,
                  resolve0=None):
-    """the Jacobi-form sweep Jacobian by central FD over the
-    packed state; the reference implementation for the chain.
-    For ladder groups resolve0 re-solves the amps at each
-    perturbed state"""
+    """
+    The Jacobi-form sweep Jacobian by central FD over the packed state.
+
+    The reference implementation for the chain.  For ladder groups
+    resolve0 re-solves the amps at each perturbed state.
+    """
     npars = x0.size
     J = np.zeros((npars, npars))
     for j in range(npars):
@@ -1227,10 +1244,13 @@ def _fd_jacobian(deb, snap, x0, patched0, slices, pers,
 
 def _fd_dFdS(deb, snap, x0, caches, Ds, theta0s, slices, pers,
              covS, epochs, L=None):
-    """the data response by central FD; the reference
-    implementation for the chain.  For ladder groups the T-row
-    modes of the ladder objects and the aperture modes reach
-    every member through the re-solved amps"""
+    """
+    The data response by central FD.
+
+    The reference implementation for the chain.  For ladder groups
+    the T-row modes of the ladder objects and the aperture modes
+    reach every member through the re-solved amps.
+    """
     nobj = deb.nobj
     npars = x0.size
     nep = len(epochs)
@@ -1238,7 +1258,7 @@ def _fd_dFdS(deb, snap, x0, caches, Ds, theta0s, slices, pers,
     dsteps = DS_FAC * np.sqrt(np.diag(covS))
     dFdS = np.zeros((npars, nS))
     lidx = L['idx'] if L is not None else []
-    nmom = len(_MOM_IDX) if LADDER_MOMENT_ROWS else 0
+    nmom = len(t_row_indices())
 
     def resolver(dap, dT):
         return functools.partial(
@@ -1268,7 +1288,7 @@ def _fd_dFdS(deb, snap, x0, caches, Ds, theta0s, slices, pers,
                 )
                 amp_mode = (
                     L is not None and i in lidx
-                    and a in _MOM_IDX[:nmom]
+                    and a in t_row_indices()
                 )
                 if amp_mode:
                     rp = resolver({}, {(i, iep, a): h})
@@ -1310,9 +1330,12 @@ def _fd_dFdS(deb, snap, x0, caches, Ds, theta0s, slices, pers,
 
 
 def _fastcopy(obj):
-    """a cheap recursive copy for the small deblender state
-    (arrays, dicts, lists, tuples, scalars); much faster than
-    copy.deepcopy for this shape of data"""
+    """
+    A cheap recursive copy for the small deblender state.
+
+    Arrays, dicts, lists, tuples and scalars; much faster than
+    copy.deepcopy for this shape of data.
+    """
     if isinstance(obj, np.ndarray):
         return obj.copy()
     if isinstance(obj, dict):
@@ -1338,12 +1361,13 @@ def _restore_state(deb, snap):
 
 def _anchor_cov(anchor_sigma, nobj):
     """
-    the (2 nobj, 2 nobj) block-diagonal anchor covariance from
-    the anchor_sigma input: a scalar sigma in arcsec (isotropic,
+    The block-diagonal anchor covariance from the anchor_sigma input.
+
+    (2 nobj, 2 nobj), from a scalar sigma in arcsec (isotropic,
     shared), an (nobj,) array of per-object sigmas, or an
     (nobj, 2, 2) array of per-object position covariances in
-    arcsec^2 with (v, u) ordering.  None when every entry is
-    zero (the errors then condition on the anchors)
+    arcsec^2 with (v, u) ordering.  None when every entry is zero
+    (the errors then condition on the anchors).
     """
     a = np.asarray(anchor_sigma, dtype=float)
     if not np.any(a != 0):
@@ -1378,8 +1402,11 @@ def _anchor_cov(anchor_sigma, nobj):
 
 
 def _object_layout(deb):
-    """per-object offsets and sizes in the packed state,
-    replaying the _pack_state layout"""
+    """
+    Per-object offsets and sizes in the packed state.
+
+    Replays the _pack_state layout.
+    """
     slices = []
     pers = []
     k = 0
@@ -1408,8 +1435,9 @@ def _theta_of(deb, i):
 
 
 def _data_esums(deb, i, ep):
-    """the raw data sums for object i on one epoch at the
-    converged state"""
+    """
+    The raw data sums for object i on one epoch at the converged state.
+    """
     vi, ui = deb.positions[i]
     alpha, beta = get_phase_angles(
         ep, vi - ep['vcen'], ui - ep['ucen'],
@@ -1446,17 +1474,19 @@ _KERNEL_CHUNK = 16
 # the full grid, so the construction is exact by construction.
 # Extent per row: KERNEL_EXTENT_SIGMA sigma + KERNEL_EXTENT_FWHM
 # smoothing fwhm, conservative (5 sigma alone holds 99.998)
-KERNEL_SUBSAMPLE = True
 KERNEL_EXTENT_SIGMA = 5.0
 KERNEL_EXTENT_FWHM = 3.0
 _SUBSAMPLE_FACTORS = (8, 6, 5, 4, 3, 2)
 
 
 def _kernels_subsampled(ep, G, shape, s):
-    """influence_kernels on the (dim/s)^2 grid from every s-th
-    mode; equals the full-grid kernel periodized with period
-    dim/s, restricted to the image, with the apodization mask
-    applied as in ngmix"""
+    """
+    The influence kernels on the (dim/s)^2 grid from every s-th mode.
+
+    Equals the full-grid kernel periodized with period dim/s,
+    restricted to the image, with the apodization mask applied as in
+    ngmix.
+    """
     dim = ep['dim']
     iy, ix = ep['iy'], ep['ix']
     D = dim // s
@@ -1485,8 +1515,11 @@ def _kernels_subsampled(ep, G, shape, s):
 
 
 def _subsample_factor(dim, shape, extent):
-    """the largest factor whose grid clears the image plus the
-    kernel extent (pixels); 1 when none does"""
+    """
+    The largest subsampling factor whose grid clears image plus extent.
+
+    extent in pixels; 1 when none does.
+    """
     need = max(shape) + extent
     for s in _SUBSAMPLE_FACTORS:
         if dim % s == 0 and dim // s >= need:
@@ -1495,11 +1528,14 @@ def _subsample_factor(dim, shape, extent):
 
 
 def _influence_kernels_chunked(ep, G, shape, extents=None):
-    """the real-space kernels of the rows of G in chunks (the
-    full-grid arrays of a large group are GBs); with extents
-    (pixels per row) each row uses the coarsest exact grid"""
+    """
+    The real-space influence kernels of the rows of G, in chunks.
+
+    The full-grid arrays of a large group are GBs; with extents
+    (pixels per row) each row uses the coarsest exact grid.
+    """
     nrows = G.shape[0]
-    if extents is None or not KERNEL_SUBSAMPLE:
+    if extents is None:
         fac = np.ones(nrows, dtype=np.int64)
     else:
         fac = np.array([
@@ -1517,15 +1553,19 @@ def _influence_kernels_chunked(ep, G, shape, extents=None):
     return out
 
 
-def _cov_sums(deb, obs_flat, epochs, L=None):
-    """the covariance of the stacked data sums: the 6 moment
-    sums per object per epoch, followed (for ladder groups) by
-    the aperture flux sums per ladder object, aperture and
-    epoch.  Epoch-block-diagonal (independent noise per epoch),
-    full cross-member within an epoch via the ngmix influence
-    kernels; the aperture sums are flux sums under further
-    weights, so they are extra kernel rows of the same
-    construction"""
+def _cov_sums(deb, obs_flat, epochs, L=None, subsample=True):
+    """
+    The covariance of the stacked data sums.
+
+    The 6 moment sums per object per epoch, followed (for ladder
+    groups) by the aperture flux sums per ladder object, aperture and
+    epoch.  Epoch-block-diagonal (independent noise per epoch), full
+    cross-member within an epoch via the ngmix influence kernels; the
+    aperture sums are flux sums under further weights, so they are
+    extra kernel rows of the same construction.  subsample=False
+    builds every kernel on the full padded grid (the referee of the
+    coarser exact grids).
+    """
     nobj = deb.nobj
     nep = len(epochs)
     nS0 = 6 * nobj * nep
@@ -1559,7 +1599,7 @@ def _cov_sums(deb, obs_flat, epochs, L=None):
             parts.append(
                 _influence_kernels_chunked(
                     ep, np.vstack(pend), obs.image.shape,
-                    extents=np.concatenate(pext),
+                    extents=np.concatenate(pext) if subsample else None,
                 )
             )
             pend.clear()
@@ -1613,14 +1653,17 @@ def _make_patched(deb, caches, Ds, theta0s, deltas,
                   nsums_cache=None, psums_cache=None,
                   nsums_delta=None, psums_delta=None,
                   freeze_theta=False):
-    """a _get_object_sums replacement: the linearized data sums
-    plus the cheap closed-form neighbor/predicted sums, so
-    Jacobian evaluations never touch the data modes.  With
-    nsums_cache/psums_cache the model sums are not recomputed
-    either (pure update algebra); the delta arguments inject
-    perturbations for derivative evaluations, and freeze_theta
-    holds the data sums at the cached values (the theta channel
-    is then added analytically by the chain)"""
+    """
+    A _get_object_sums replacement built from linearized data sums.
+
+    The linearized data sums plus the cheap closed-form
+    neighbor/predicted sums, so Jacobian evaluations never touch
+    the data modes.  With nsums_cache/psums_cache the model sums
+    are not recomputed either (pure update algebra); the delta
+    arguments inject perturbations for derivative evaluations, and
+    freeze_theta holds the data sums at the cached values (the
+    theta channel is then added analytically by the chain).
+    """
 
     def patched(i):
         m = deb.models[i]
@@ -1671,10 +1714,13 @@ def _make_patched(deb, caches, Ds, theta0s, deltas,
 
 
 def _jacobi_block(deb, snap, x, i, patched, resolve=None):
-    """object i's update evaluated from state x with the patched
-    sums (the Jacobi map: every object from the same state).
-    resolve, when given, re-solves the ladder amps at the state
-    (and injected data deltas) before the update"""
+    """
+    Object i's update evaluated from state x with the patched sums.
+
+    The Jacobi map: every object from the same state.  resolve, when
+    given, re-solves the ladder amps at the state (and injected data
+    deltas) before the update.
+    """
     _restore_state(deb, snap)
     deb._unpack_state(x)
     if resolve is not None:
@@ -1688,8 +1734,11 @@ def _jacobi_block(deb, snap, x, i, patched, resolve=None):
 
 
 def _jacobi_block_anchor(deb, snap, x, i, patched, danchor):
-    """object i's Jacobi update with the anchor positions
-    perturbed by danchor (nobj, 2) arcsec"""
+    """
+    Object i's Jacobi update with the anchor positions perturbed.
+
+    danchor is (nobj, 2) in arcsec.
+    """
     _restore_state(deb, snap)
     det0 = deb.det_positions
     deb.det_positions = [
@@ -1707,10 +1756,12 @@ def _jacobi_block_anchor(deb, snap, x, i, patched, danchor):
 
 
 def _dF_danchor(deb, snap, x0, patched, slices, pers):
-    """the Jacobi-map response to the anchor (detection)
-    positions, per arcsec, by central FD; the anchor enters
-    through the recentering regularization and the packed
-    center convention"""
+    """
+    The Jacobi-map response to the anchor positions, per arcsec.
+
+    By central FD; the anchor enters through the recentering
+    regularization and the packed center convention.
+    """
     nobj = deb.nobj
     npars = x0.size
     ha = 1.0e-4
@@ -1731,9 +1782,12 @@ def _dF_danchor(deb, snap, x0, patched, slices, pers):
 
 
 def _column_map(deb):
-    """per packed column: (object, kind, sub) with kind one of
-    'F' (sub = band), 'cen' (sub 0 = v, 1 = u), 'cov'
-    (sub = 00, 01, 11 component), 'fracdev', 'sw'"""
+    """
+    The (object, kind, sub) description of every packed column.
+
+    kind is one of 'F' (sub = band), 'cen' (sub 0 = v, 1 = u), 'cov'
+    (sub = 00, 01, 11 component), 'fracdev', 'sw'.
+    """
     cols = []
     for k, m in enumerate(deb.models):
         cols += [(k, 'F', b) for b in range(deb.nband)]
@@ -1755,25 +1809,13 @@ def _covkey(m):
 _SYM = [(0, 0), (0, 1), (1, 1)]
 
 
-# the model-sum derivatives: the pairwise form differences only
-# the perturbed object's own term of each neighbor sum (the sums
-# are additive, so the difference of the full sets is the
-# difference of the pair, exactly), O(nobj^2) small kernel calls
-# per group instead of O(nobj^3) model expansions -- on a
-# 39-member field band_comps was called 2.2 million times, 15-18
-# s for either model.  The full-set form is kept as the referee
-MODEL_SUM_DERIVS_PAIRWISE = True
-
-
-def _model_sum_derivs(deb, cols):
-    if MODEL_SUM_DERIVS_PAIRWISE:
-        return _model_sum_derivs_pairwise(deb, cols)
-    return _model_sum_derivs_full(deb, cols)
-
-
 def _pair_sums(deb, i, j, Sw=None):
-    """the sums of model j alone under object i's weight (or the
-    given weight), at detAtinv=1: one term of _get_neighbor_sums"""
+    """
+    The sums of model j alone under object i's weight.
+
+    Or under the given weight, at detAtinv=1: one term of
+    _get_neighbor_sums.
+    """
     from .ladder import band_comps
     vi, ui = deb.positions[i]
     if Sw is None:
@@ -1791,10 +1833,21 @@ def _pair_sums(deb, i, j, Sw=None):
     return out
 
 
-def _model_sum_derivs_pairwise(deb, cols):
-    """_model_sum_derivs_full with the FD taken on the perturbed
-    object's own pair term wherever it is a neighbor; the full
-    set only under the object's own weight or center"""
+def _model_sum_derivs(deb, cols):
+    """
+    Closed-form model-sum derivatives by micro central FD.
+
+    dNS[(i, col)] and dPS[(i, col)] as (nband, 6) arrays per affected
+    object, in physical units per unit physical change of the column
+    quantity.  The FD is taken on the perturbed object's own pair
+    term wherever it is a neighbor (the sums are additive, so the
+    difference of the full sets is the difference of the pair,
+    exactly): O(nobj^2) small kernel calls per group instead of
+    O(nobj^3) model expansions (on a 39-member field the full form
+    called band_comps 2.2 million times, 15-18 s for either model).
+    The full set is only differenced under the object's own weight
+    or center.  _model_sum_derivs_full is the full-set referee.
+    """
     nobj = deb.nobj
     nband = deb.nband
     Tw = deb.Sw[0][0, 0] + deb.Sw[0][1, 1]
@@ -1915,11 +1968,15 @@ def _model_sum_derivs_pairwise(deb, cols):
 
 
 def _model_sum_derivs_full(deb, cols):
-    """closed-form model-sum derivatives by micro central FD on
-    the (cheap, analytic) neighbor and predicted sum functions:
-    dNS[(i, col)] and dPS[(i, col)] as (nband, 6) arrays per
-    affected object, in physical units per unit physical change
-    of the column quantity.  The referee of the pairwise form"""
+    """
+    The full-set referee of _model_sum_derivs.
+
+    Closed-form model-sum derivatives by micro central FD on the
+    (cheap, analytic) neighbor and predicted sum functions of the
+    whole neighbor set: dNS[(i, col)] and dPS[(i, col)] as (nband, 6)
+    arrays per affected object, in physical units per unit physical
+    change of the column quantity.
+    """
     nobj = deb.nobj
     Tw = deb.Sw[0][0, 0] + deb.Sw[0][1, 1]
     h_cov = 1.0e-6 * max(Tw, 0.1)
@@ -2043,17 +2100,20 @@ def _model_sum_derivs_full(deb, cols):
 def _gauss_flux_covs(deb, caches, Ds, dNS, cols, slices,
                      epochs, Tx, covS, Ra, anchor_cov,
                      dNS_modes=None):
-    """the gauss-estimator fluxes F_b = 4 pi sqrt(det Sw)
-    fs_b / ws_b and their (nband, nband) covariance per object,
-    as {'gauss_flux', 'gauss_flux_cov'} lists with None entries
-    for stars.  fs_b is linear in the data at the converged
-    state, so the response is the direct data channel plus the
-    chain through the state: the own kernel (weight and center)
-    via the analytic data-sum derivatives, the neighbor
-    subtraction via the model-sum derivatives, and the explicit
-    sqrt(det Sw) normalization; the anchor response is added
-    when present.  The per-epoch weights ws_b are fixed at prep,
-    so they carry no state dependence"""
+    """
+    The gauss-estimator fluxes and their cross-band covariance per object.
+
+    F_b = 4 pi sqrt(det Sw) fs_b / ws_b and its (nband, nband)
+    covariance, as {'gauss_flux', 'gauss_flux_cov'} lists with None
+    entries for stars.  fs_b is linear in the data at the converged
+    state, so the response is the direct data channel plus the chain
+    through the state: the own kernel (weight and center) via the
+    analytic data-sum derivatives, the neighbor subtraction via the
+    model-sum derivatives, and the explicit sqrt(det Sw)
+    normalization; the anchor response is added when present.  The
+    per-epoch weights ws_b are fixed at prep, so they carry no state
+    dependence.
+    """
     nobj = deb.nobj
     nband = deb.nband
     nep = len(epochs)
@@ -2137,12 +2197,15 @@ def _gauss_flux_covs(deb, caches, Ds, dNS, cols, slices,
 
 def _chain_pieces(deb, snap, x0, caches, Ds, theta0s, slices,
                   pers, covS, epochs, L=None, W2=None, s_star=None):
-    """the Jacobi Jacobian, data response and anchor response
-    assembled by the chain rule: micro finite differences of the
-    pure update algebra (all sums cached) chained with the
-    analytic data-sum derivatives and the closed-form model-sum
-    derivatives.  Structural zeros (a member's update does not
-    depend on other members' weights) are never evaluated"""
+    """
+    The Jacobi Jacobian, data response and anchor response by the chain rule.
+
+    Micro finite differences of the pure update algebra (all sums
+    cached) chained with the analytic data-sum derivatives and the
+    closed-form model-sum derivatives.  Structural zeros (a member's
+    update does not depend on other members' weights) are never
+    evaluated.
+    """
     nobj = deb.nobj
     npars = x0.size
     nep = len(epochs)
@@ -2404,8 +2467,11 @@ def _chain_pieces(deb, snap, x0, caches, Ds, theta0s, slices,
 
 
 def _dmm_dsums(sums):
-    """the moment matrix in sym3 and its (3, 6) derivative with
-    respect to the raw sums"""
+    """
+    The moment matrix in sym3 and its derivative with respect to the raw sums.
+
+    The derivative is (3, 6).
+    """
     finv = 1.0 / sums[5]
     m = 0.5 * finv * np.array([
         sums[4] - sums[2], sums[3], sums[4] + sums[2],
@@ -2429,11 +2495,14 @@ def _ddetsqrt(A):
 
 
 def _phi_healthy(deb, i, sums, fs, ws, pred, fs_pred):
-    """the analytic update-algebra derivatives for object i at
-    the given converged inputs, or None when the evaluation
-    takes a guarded branch.  Output rows follow the packed block
-    layout [F, (cen), cov, Sw] in PHYSICAL units; the caller
-    applies the packing scales"""
+    """
+    The analytic update-algebra derivatives for object i.
+
+    At the given converged inputs, or None when the evaluation takes
+    a guarded branch.  Output rows follow the packed block layout
+    [F, (cen), cov, Sw] in PHYSICAL units; the caller applies the
+    packing scales.
+    """
     from .deblender import (
         RECENTER_CLIP_FAC, ZERO_WEIGHT, mixture_model_valid,
     )
@@ -2635,9 +2704,12 @@ def _phi_healthy(deb, i, sums, fs, ws, pred, fs_pred):
 
 def _base_inputs(deb, i, caches, nsums_cache, psums_cache,
                  epochs):
-    """the converged (sums, fs, ws, pred, fs_pred) for object i
-    from the cached raw data and model sums, replicating the
-    _get_object_sums accumulation"""
+    """
+    The converged (sums, fs, ws, pred, fs_pred) for object i.
+
+    From the cached raw data and model sums, replicating the
+    _get_object_sums accumulation.
+    """
     nband = deb.nband
     is_mix = deb.models[i]['type'] in ('exp', 'dev', 'bdf')
     sums = np.zeros(6)
@@ -2662,9 +2734,12 @@ def _base_inputs(deb, i, caches, nsums_cache, psums_cache,
 
 
 def _analytic_ABPC(deb, i, phi, epochs, slices, pers):
-    """map the physical update-algebra derivatives to the
-    packed-normalized A (data sums), B (neighbor sums), P
-    (predicted sums) and C (own state) matrices"""
+    """
+    Map the physical update-algebra derivatives to the packed matrices.
+
+    A (data sums), B (neighbor sums), P (predicted sums) and C (own
+    state), in the packed-normalized units.
+    """
     nband = deb.nband
     nep = len(epochs)
     per = pers[i]

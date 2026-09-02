@@ -37,7 +37,8 @@ NAME_MAP = {
 
 def get_flags_str(val):
     """
-    the names of the bits set in val, joined with |, as
-    ngmix.flags.get_flags_str
+    The names of the bits set in val, joined with |.
+
+    As ngmix.flags.get_flags_str.
     """
     return ngmix.flags.get_flags_str(val, name_map=NAME_MAP)

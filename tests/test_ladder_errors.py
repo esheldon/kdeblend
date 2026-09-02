@@ -242,9 +242,9 @@ def test_ladder_state_response_matches_fd(types):
         assert np.allclose(ls_an[name], ls_fd[name], rtol=1e-10)
 
 
-def test_cov_sums_subsampled_matches_full_grid(monkeypatch):
+def test_cov_sums_subsampled_matches_full_grid():
     """the influence kernels built on the coarser exact grids
-    (every s-th mode, KERNEL_SUBSAMPLE) give the same Cov(S) as
+    (every s-th mode) give the same Cov(S) as
     the full padded grid"""
     import kdeblend.full_errors as FE
 
@@ -263,8 +263,7 @@ def test_cov_sums_subsampled_matches_full_grid(monkeypatch):
     ) >= 2
     L = FE._ladder_setup(deb, epochs)
     c_sub = FE._cov_sums(deb, obs_flat, epochs, L)
-    monkeypatch.setattr(FE, 'KERNEL_SUBSAMPLE', False)
-    c_full = FE._cov_sums(deb, obs_flat, epochs, L)
+    c_full = FE._cov_sums(deb, obs_flat, epochs, L, subsample=False)
     sc = np.sqrt(np.outer(np.diag(c_full), np.diag(c_full)))
     assert np.all(np.abs(c_sub - c_full) < 1.0e-5 * sc)
     assert np.allclose(np.diag(c_sub), np.diag(c_full), rtol=1.0e-6)
@@ -288,7 +287,7 @@ def test_model_sum_derivs_pairwise_matches_full(types):
     )
     assert deb.go()['converged']
     cols = FE._column_map(deb)
-    dA, pA = FE._model_sum_derivs_pairwise(deb, cols)
+    dA, pA = FE._model_sum_derivs(deb, cols)
     dB, pB = FE._model_sum_derivs_full(deb, cols)
     assert set(dA) == set(dB)
     assert set(pA) == set(pB)

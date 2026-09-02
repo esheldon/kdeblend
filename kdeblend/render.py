@@ -20,8 +20,9 @@ from ngmix.prepsfadmom.models import (
 
 def render_model(objects, obs, band):
     """
-    Render the summed fitted models for one band in real space,
-    convolved with the psf of the given observation.
+    Render the summed fitted models for one band in real space.
+
+    Convolved with the psf of the given observation.
 
     Parameters
     ----------
@@ -54,8 +55,11 @@ def render_model(objects, obs, band):
 
 
 def _object_profile(obj, band):
-    """pre-psf galsim profile of a fitted object in one band; the exp
-    model is the 6-gaussian expansion used in the fit"""
+    """
+    The pre-psf galsim profile of a fitted object in one band.
+
+    The exp model is the 6-gaussian expansion used in the fit.
+    """
     flux = obj['flux'][band]
     if obj['type'] == 'star':
         p = galsim.DeltaFunction() * flux
@@ -83,9 +87,12 @@ def _object_profile(obj, band):
 
 
 def _gauss_profile(e1, e2, T):
-    """galsim gaussian with covariance cov_from_e(e1, e2, T); the
-    size and |e| are limited, and flagged nan shapes render round,
-    so noisy and partially flagged fits still render"""
+    """
+    A galsim gaussian with covariance cov_from_e(e1, e2, T).
+
+    The size and |e| are limited, and flagged nan shapes render
+    round, so noisy and partially flagged fits still render.
+    """
     if not np.isfinite(T):
         T = 0.0
     T = max(T, 1.0e-6)
@@ -101,8 +108,10 @@ def _gauss_profile(e1, e2, T):
 
 
 def _get_psf_interp(psf_obs):
-    """interpolated image of the psf, centered at its jacobian
-    center; includes the pixel, so draw models with method='no_pixel'
+    """
+    The interpolated image of the psf, centered at its jacobian center.
+
+    Includes the pixel, so draw models with method='no_pixel'.
     """
     nrow, ncol = psf_obs.image.shape
     jrow, jcol = psf_obs.jacobian.get_cen()

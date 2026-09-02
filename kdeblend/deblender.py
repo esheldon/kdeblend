@@ -204,12 +204,12 @@ def build_deblender(
     defer_flux_init=False,
 ):
     """
-    prep the epochs and construct the deblender without running
-    it.  Parameters are as for deblend; full_errors here only
-    controls the per-epoch transfer storage.  Extracted from
-    deblend so external harnesses (e.g. the port differential
-    rig) can drive the exact production construction and access
-    the deblender state directly.
+    Prep the epochs and construct the deblender without running it.
+
+    Parameters are as for deblend; full_errors here only controls the
+    per-epoch transfer storage.  Extracted from deblend so external
+    harnesses (e.g. the port differential rig) can drive the exact
+    production construction and access the deblender state directly.
 
     epochs, optional, is a caller-prepared epoch list (with vcen/
     ucen stamped) that replaces the internal _prep_epochs; the
@@ -549,8 +549,7 @@ def deblend_stamps(
     cen_tol=None,
 ):
     """
-    Deblend a set of objects with fixed centers, with a postage stamp
-    per object.
+    Deblend objects with fixed centers from a postage stamp per object.
 
     Each object is measured from its own stamps; neighbor light in a
     stamp is subtracted in closed form using the neighbor models,
@@ -625,8 +624,10 @@ def deblend_stamps(
 
 def _get_smoothing(mbobs, fwhm_smooth, smooth_fac, rng):
     """
-    the common smoothing fwhm, chosen from the largest psf when not
-    sent (see ngmix.prepsfadmom), and its T
+    The common smoothing fwhm and its T.
+
+    Chosen from the largest psf when not sent (see
+    ngmix.prepsfadmom).
     """
     fwhm_smooth = choose_fwhm_smooth(
         mbobs, fwhm_smooth=fwhm_smooth, smooth_fac=smooth_fac, rng=rng,
@@ -640,12 +641,12 @@ def _prep_epochs(
     store_transfer=False,
 ):
     """
-    the prepared epochs for all bands (see
-    ngmix.prepsfadmom.prep.prep_epoch), with the phase center
-    entries stamped in.  In shared-image mode the phase origin is
-    the jacobian center (vcen = ucen = 0); in stamp mode it is the
-    object position, since each stamp jacobian is centered on its
-    object
+    The prepared epochs for all bands, with the phase centers stamped in.
+
+    See ngmix.prepsfadmom.prep.prep_epoch.  In shared-image mode the
+    phase origin is the jacobian center (vcen = ucen = 0); in stamp
+    mode it is the object position, since each stamp jacobian is
+    centered on its object.
     """
     epochs = []
     for band, obslist in enumerate(mbobs):
@@ -670,9 +671,10 @@ def _prep_epochs(
 
 class _Deblender(object):
     """
-    the Gauss-Seidel iteration over objects, with a per-object list
-    of prepared epochs; in shared-image mode all objects have the
-    same list
+    The Gauss-Seidel iteration over the objects of one group.
+
+    Each object has its own list of prepared epochs; in shared-image
+    mode all objects have the same list.
 
     The slow tail of the sweep iteration is a collective mode of the
     most blended objects, with their fluxes and structures locked in
@@ -914,11 +916,12 @@ class _Deblender(object):
 
     def _init_fluxes(self):
         """
-        initialize the fluxes by solving the per-band linear system
-        at the guess structures: the measured flux sums for each
-        object are linear in all object fluxes with closed-form
-        overlap coefficients.  The fixed external models are
-        subtracted from the measured side
+        Initialize the fluxes from the per-band linear system at the guesses.
+
+        At the guess structures the measured flux sums for each object
+        are linear in all object fluxes with closed-form overlap
+        coefficients.  The fixed external models are subtracted from the
+        measured side.
         """
         nobj = self.nobj
 
@@ -1023,9 +1026,10 @@ class _Deblender(object):
 
     def _sweep(self):
         """
-        one Gauss-Seidel sweep over the objects, returning the
-        maximum relative parameter change per class (flux,
-        structure, center)
+        One Gauss-Seidel sweep over the objects.
+
+        Returns the maximum relative parameter change per class (flux,
+        structure, center).
         """
         self._sweep_changes = {'flux': 0.0, 'struct': 0.0, 'cen': 0.0}
         for i in range(self.nobj):
@@ -1036,41 +1040,49 @@ class _Deblender(object):
             self.isweep >= self._ladder_next
             and any(m['type'] == 'ladder' for m in self.models)
         ):
-            x = self._pack_state()
-            xl = self._ladder_last_x
-            if (
-                xl is None or xl.size != x.size
-                or np.abs(x - xl).max() > LADDER_GATE_TOL
-            ):
-                da = solve_group_amps(self)
-                if da is not None:
-                    self._note_change('struct', da)
-                    self._ladder_last_x = x
-                self._ladder_next = self.isweep + LADDER_SOLVE_EVERY
-            else:
-                # the state has not moved enough since the last
-                # solve to change the amps: the carried change
-                # is retired so it cannot hold up convergence
-                for i, m in enumerate(self.models):
-                    if m['type'] == 'ladder':
-                        self.ladder_last_da[i] = 0.0
-                self._ladder_next = self.isweep + LADDER_SOLVE_EVERY
+            self._ladder_solve_step()
         return dict(self._sweep_changes)
+
+    def _ladder_solve_step(self):
+        """
+        The scene-wide ladder amp solve at a cadence point.
+
+        Gated on the packed state having moved since the last solve
+        (LADDER_GATE_TOL); when it has not, the carried change of the
+        last solve is retired so it cannot hold up convergence.
+        """
+        x = self._pack_state()
+        x_last = self._ladder_last_x
+        moved = (
+            x_last is None or x_last.size != x.size
+            or np.abs(x - x_last).max() > LADDER_GATE_TOL
+        )
+        if moved:
+            change = solve_group_amps(self)
+            if change is not None:
+                self._note_change('struct', change)
+                self._ladder_last_x = x
+        else:
+            for i, m in enumerate(self.models):
+                if m['type'] == 'ladder':
+                    self.ladder_last_da[i] = 0.0
+        self._ladder_next = self.isweep + LADDER_SOLVE_EVERY
 
     def _converged(self, changes):
         """
-        projected-residual stopping: from the per-class contraction
-        ratio of consecutive sweeps, the remaining distance to the
-        fixed point is ~ change * rho / (1 - rho); converged when
-        that projection is below the class tolerance for EVERY
-        class.  This bounds the distance to the answer rather than
-        the step size, so the guarantee is uniform across easy and
-        strongly-coupled groups, and stopping cannot freeze in a
-        guess-side systematic.  A sweep without a ratio estimate
-        (or with a growing change) is treated at RHO_CAP and
-        cannot stop unless the change is already tiny; the history
-        is reset wherever the sweep map is discontinuous
-        (extrapolation jumps, restarts, demotions)
+        Projected-residual stopping over the per-class changes.
+
+        From the per-class contraction ratio of consecutive sweeps, the
+        remaining distance to the fixed point is ~ change * rho /
+        (1 - rho); converged when that projection is below the class
+        tolerance for EVERY class.  This bounds the distance to the
+        answer rather than the step size, so the guarantee is uniform
+        across easy and strongly-coupled groups, and stopping cannot
+        freeze in a guess-side systematic.  A sweep without a ratio
+        estimate (or with a growing change) is treated at RHO_CAP and
+        cannot stop unless the change is already tiny; the history is
+        reset wherever the sweep map is discontinuous (extrapolation
+        jumps, restarts, demotions).
         """
         conv = True
         for cls, tol in (
@@ -1093,9 +1105,10 @@ class _Deblender(object):
 
     def _check_noncontraction(self):
         """
-        demote-or-restart the worst object whose windowed change
-        is above tolerance and failed to contract versus the
-        previous window; see NONCONTRACT_WINDOW
+        Demote or restart the worst object that failed to contract.
+
+        The object whose windowed change is above tolerance and failed to
+        contract versus the previous window; see NONCONTRACT_WINDOW.
         """
         w = self._win_max.copy()
         prev = self._prev_win_max
@@ -1129,14 +1142,20 @@ class _Deblender(object):
             self._prev_win_max = None
 
     def _reset_change_hist(self):
-        """the sweep map is discontinuous here; contraction ratios
-        across the discontinuity are meaningless"""
+        """
+        Reset the contraction history at a discontinuity of the sweep map.
+
+        Contraction ratios across the discontinuity are meaningless.
+        """
         for hist in self._change_hist.values():
             del hist[:]
 
     def _note_change(self, cls, value):
-        """record a parameter change in the per-sweep class maxima
-        and return it, for the per-object bookkeeping"""
+        """
+        Record a parameter change in the per-sweep class maxima.
+
+        Returns the change, for the per-object bookkeeping.
+        """
         if value > self._sweep_changes[cls]:
             self._sweep_changes[cls] = value
         return value
@@ -1152,11 +1171,12 @@ class _Deblender(object):
 
     def _update_object(self, i):
         """
-        update object i from its neighbor-corrected sums, returning
-        its maximum relative parameter change.  On a failed structure
-        update the previous structure is kept but the flux, which is
-        linear and always well defined, is still updated, so a bad
-        early structure state cannot deadlock the blend.
+        Update object i from its neighbor-corrected sums.
+
+        Returns its maximum relative parameter change.  On a failed
+        structure update the previous structure is kept but the flux,
+        which is linear and always well defined, is still updated, so a
+        bad early structure state cannot deadlock the blend.
 
         With recentering the center update runs after the
         other updates, so within the sweep they all see the center
@@ -1197,9 +1217,10 @@ class _Deblender(object):
 
     def _update_center(self, i, sums):
         """
-        the regularized center update: move by the
-        measured pull blended with a spring back to the detection
-        position,
+        The regularized center update.
+
+        Move by the measured pull blended with a spring back to the
+        detection position,
 
             pos += k pull + (1 - k)(pos_det - pos)
 
@@ -1249,9 +1270,9 @@ class _Deblender(object):
 
     def _shrink_family_shift(self, i, sums, shift):
         """
-        regularize the ellipticity of the proposed family
-        covariance toward round at fixed trace: the update target
-        cov + shift is replaced by
+        Regularize the proposed family covariance's ellipticity toward round.
+
+        At fixed trace: the update target cov + shift is replaced by
 
             k (cov + shift) + (1 - k) (tr(cov + shift)/2) I
 
@@ -1294,10 +1315,11 @@ class _Deblender(object):
 
     def _deweight_measured(self, i, sums):
         """
-        the deweight update of object i's weight from the measured
-        moment sums (single gaussian, all object types), or None if
-        the sums do not admit one or the new weight exceeds the
-        stamp bound (a runaway, see MAX_WEIGHT_SIGMA_FAC)
+        The deweight update of object i's weight from the measured sums.
+
+        A single gaussian, all object types; None if the sums do not
+        admit one or the new weight exceeds the stamp or footprint bound
+        (a runaway, see MAX_WEIGHT_SIGMA_FAC and WEIGHT_TMAX_FAC).
         """
         if sums[5] > 0 and sums[4] > 0:
             newSw, flags = deweight(_moment_matrix(sums), self.Sw[i])
@@ -1317,9 +1339,11 @@ class _Deblender(object):
 
     def _skip_structure_update(self, i, fs, ws, fs_pred):
         """
-        a failed structure update: keep the previous structure but
-        still update the linear flux, and count the failure toward
-        containment.  Returns the relative change, always 1
+        A failed structure update: keep the structure, update the flux.
+
+        The previous structure is kept but the linear flux is still
+        updated, and the failure counts toward containment.  Returns the
+        relative change, always 1.
         """
         m = self.models[i]
         self._count_skip(i)
@@ -1336,9 +1360,10 @@ class _Deblender(object):
 
     def _update_gauss(self, i, newSw, fs, ws):
         """
-        accept the weight update for a gauss object, whose smoothed
-        model covariance is the weight, and update the matched flux.
-        Returns the relative change
+        Accept the weight update for a gauss object and update its flux.
+
+        The gauss object's smoothed model covariance is the weight.
+        Returns the relative change.
         """
         m = self.models[i]
         newF = _matched_flux(fs, ws, self.Sw[i], newSw)
@@ -1372,16 +1397,17 @@ class _Deblender(object):
 
     def _update_mixture(self, i, newSw, sums, pred, fs, fs_pred):
         """
-        exp/dev: deweight-style update on the family covariance
-        matrix, as in ngmix PAdmomFitter._run_admom_mixture.  Map
-        both the measured and the model-predicted moments through
-        the deweight transform and shift the family covariance by
-        the difference.  For a single-gaussian family this is
-        exactly the standard deweight update; for the mixture it has
-        near-unit gain, unlike a plain Picard update on the weighted
-        moments which converges at rate ~1/2.  The smoothing
-        covariance cancels in the difference.  newSw is the deweight
-        of the measured moments.  Returns the relative change
+        The deweight-style update of an exp/dev family covariance.
+
+        As in ngmix PAdmomFitter._run_admom_mixture: map both the
+        measured and the model-predicted moments through the deweight
+        transform and shift the family covariance by the difference.
+        For a single-gaussian family this is exactly the standard
+        deweight update; for the mixture it has near-unit gain, unlike a
+        plain Picard update on the weighted moments which converges at
+        rate ~1/2.  The smoothing covariance cancels in the difference.
+        newSw is the deweight of the measured moments.  Returns the
+        relative change.
         """
         m = self.models[i]
 
@@ -1440,19 +1466,19 @@ class _Deblender(object):
 
     def _update_bdf_split(self, i, fs1):
         """
-        the per-sweep flux split update for a bdf object: a
-        two-aperture linear solve for the component fluxes.  The
-        apertures are the object's adaptive weight and the
-        smoothing weight, whose different scales separate the exp
-        and dev templates; the measured side is the
-        neighbor-corrected flux sum under each aperture and the
-        template side is closed form.  The first aperture's sums
-        are reused from the structure step's measurement (fs1),
-        so only the smoothing aperture needs a data pass.  The
-        band-combined split is then optionally shrunk toward the
-        prior (see the deblend docstring) before it updates the
-        model; the component fluxes and the raw split are kept
-        for the result.  Returns the absolute split change
+        The per-sweep flux split update for a bdf object.
+
+        A two-aperture linear solve for the component fluxes.  The
+        apertures are the object's adaptive weight and the smoothing
+        weight, whose different scales separate the exp and dev
+        templates; the measured side is the neighbor-corrected flux sum
+        under each aperture and the template side is closed form.  The
+        first aperture's sums are reused from the structure step's
+        measurement (fs1), so only the smoothing aperture needs a data
+        pass.  The band-combined split is then optionally shrunk toward
+        the prior (see the deblend docstring) before it updates the
+        model; the component fluxes and the raw split are kept for the
+        result.  Returns the absolute split change.
 
         The shrinkage weight uses one-time per-aperture noise
         variances computed at the first call (the weight evolves
@@ -1553,11 +1579,12 @@ class _Deblender(object):
 
     def _get_bdf_noise_vars(self, i, weights):
         """
-        one-time per-aperture per-band noise variances of the flux
-        sums, for the shrinkage weight (diagonal approximation:
-        the cross covariance between the apertures is neglected,
-        which underestimates their correlation but only affects
-        the regularization strength)
+        One-time per-aperture per-band noise variances of the flux sums.
+
+        For the shrinkage weight (diagonal approximation: the cross
+        covariance between the apertures is neglected, which
+        underestimates their correlation but only affects the
+        regularization strength).
         """
         if i not in self._bdf_noise_cache:
             vi, ui = self.positions[i]
@@ -1585,13 +1612,13 @@ class _Deblender(object):
 
     def _bdf_split_response(self, i):
         """
-        d fd_gls / d (M1, M2, T) of the family covariance at the
-        model consistent point: the two-aperture solve of the
+        d fd_gls / d (M1, M2, T) of the family covariance.
+
+        At the model consistent point: the two-aperture solve of the
         converged model itself (closed form template sums on both
         sides), re-solved with the template matrix at perturbed
         structure.  Central differences over the mbasis.  The band
-        weight sums cancel between the two sides, so they are
-        omitted
+        weight sums cancel between the two sides, so they are omitted.
         """
         m = self.models[i]
         info = self.bdf_info.get(i)
@@ -1653,10 +1680,11 @@ class _Deblender(object):
 
     def _bdf_error_terms(self, i, fvar_raw, fmcov):
         """
-        the joint-sandwich inputs for a bdf object at the converged
-        state: the split response G, the shrinkage factor k, the
-        full noise variance of the raw split and its cross
-        covariance with the object's moment and flux sums.
+        The joint-sandwich inputs for a bdf object at the converged state.
+
+        The split response G, the shrinkage factor k, the full noise
+        variance of the raw split and its cross covariance with the
+        object's moment and flux sums.
 
         The split noise is a linear functional of the same modes
         as the moment sums: eta = sum_band w_band . (dfs1, dfs2)
@@ -1786,12 +1814,13 @@ class _Deblender(object):
 
     def _mixture_shift(self, i, newSw, sums, pred):
         """
-        the proposed shift of the family covariance: the difference
-        of the deweighted measured and predicted moments.  When the
-        predicted moments do not admit a deweight, fall back to a
-        gain-1 update on the weighted moment ratios, composed in
-        matrix form: scale by the T ratio and shift the anisotropy
-        by the ratio differences
+        The proposed shift of the family covariance.
+
+        The difference of the deweighted measured and predicted moments.
+        When the predicted moments do not admit a deweight, fall back to
+        a gain-1 update on the weighted moment ratios, composed in
+        matrix form: scale by the T ratio and shift the anisotropy by
+        the ratio differences.
         """
         Sp, pflags = deweight(_moment_matrix(pred), self.Sw[i])
         if pflags == 0:
@@ -1811,9 +1840,10 @@ class _Deblender(object):
 
     def _damped_step(self, i, shift):
         """
-        the largest step from the family covariance, damping if
-        needed, for which the smoothed components stay valid under
-        the zero weight.  Returns (proposed, shift, accepted, idamp)
+        The largest valid step from the family covariance, damping if needed.
+
+        The smoothed components must stay valid under the zero weight.
+        Returns (proposed, shift, accepted, idamp).
         """
         m = self.models[i]
         accepted = False
@@ -1830,8 +1860,7 @@ class _Deblender(object):
 
     def _count_skip(self, i):
         """
-        count a skipped structure update against the group-level
-        backstop limit
+        Count a skipped structure update against the group-level backstop.
         """
         self.nskip += 1
         if self.nskip > 100 * self.nobj:
@@ -1841,7 +1870,8 @@ class _Deblender(object):
 
     def _contain_failure(self, i, force=False):
         """
-        count a consecutive failed structure update for object i.
+        Count a consecutive failed structure update for object i.
+
         At NFAIL_LIMIT failures, restart the object from the compact
         delta state, where the neighbor contamination that drives
         weight runaways is minimized, so a transient runaway can
@@ -1913,13 +1943,17 @@ class _Deblender(object):
 
     def _extrapolate(self):
         """
-        guarded Steffensen boost on the packed global state: three
-        consecutive plain sweeps give the contraction ratio of the
-        dominant mode and the remaining geometric series is applied
+        The guarded Steffensen boost on the packed global state.
+
+        Three consecutive plain sweeps give the contraction ratio of
+        the dominant mode and the remaining geometric series is applied
         in one step, rolled back if it leaves the valid region.
-        Convergence is always decided by a subsequent plain sweep.
-        See ngmix.prepsfadmom PAdmomFitter._run_admom_mixture for
-        the Aitken/Steffensen/Sidi references
+        Convergence is always decided by a subsequent plain sweep.  A
+        boost whose following sweep changes no less than the sweep
+        before it is unproductive; EXTRAP_MAX_UNPRODUCTIVE consecutive
+        ones retire the booster for the run.  See ngmix.prepsfadmom
+        PAdmomFitter._run_admom_mixture for the Aitken/Steffensen/Sidi
+        references.
         """
         self.hist.append(self._pack_state())
         if self._boost_pre is not None:
@@ -1980,9 +2014,10 @@ class _Deblender(object):
 
     def _pack_state(self):
         """
-        the global deblend state as a normalized vector, for the
-        sweep map extrapolation.  The layout is the concatenation
-        over objects, in order, of
+        The global deblend state as a normalized vector.
+
+        For the sweep map extrapolation.  The layout is the
+        concatenation over objects, in order, of
 
             F[0], ..., F[nband-1]         per-band fluxes
             C[0, 0], C[0, 1], C[1, 1]     model covariance
@@ -2041,8 +2076,9 @@ class _Deblender(object):
 
     def _unpack_state(self, x):
         """
-        write a packed state vector back into the models and
-        weights, inverting the layout described in _pack_state
+        Write a packed state vector back into the models and weights.
+
+        Inverts the layout described in _pack_state.
         """
         x = x * self.scales
         k = 0
@@ -2084,9 +2120,10 @@ class _Deblender(object):
 
     def _state_valid(self):
         """
-        every weight and model in the state gives well defined
-        sums, and with recentering every center is inside
-        its displacement clip box
+        Whether every weight, model and center of the state is usable.
+
+        Every weight and model gives well defined sums, and with
+        recentering every center is inside its displacement clip box.
         """
         for i, (m, sw) in enumerate(zip(self.models, self.Sw)):
             if sw[0, 0] <= 0 or sw[1, 1] <= 0 or det2(sw) <= 0:
@@ -2114,10 +2151,11 @@ class _Deblender(object):
 
     def _get_object_sums(self, i):
         """
-        neighbor-corrected weighted moment sums for object i,
-        accumulated over the object's epochs, plus the model's own
-        predicted sums for exp/dev objects.  Returns
-        (sums, fs, ws, pred, fs_pred) with fs, ws, fs_pred per band
+        The neighbor-corrected weighted moment sums for object i.
+
+        Accumulated over the object's epochs, plus the model's own
+        predicted sums for exp/dev objects.  Returns (sums, fs, ws,
+        pred, fs_pred) with fs, ws, fs_pred per band.
         """
         vi, ui = self.positions[i]
         is_mix = self.models[i]['type'] in ('exp', 'dev', 'bdf')
@@ -2160,13 +2198,13 @@ class _Deblender(object):
 
     def _get_neighbor_sums(self, i, Sw=None):
         """
-        per-band weighted sums of the neighbor and fixed external
-        models under object i's weight (or the given weight), at
-        detAtinv=1.  The model sums scale exactly as 1/detAtinv,
-        so expand the components once, run the kernel once per
-        band, and rescale per epoch; the fixed externals are
-        subtracted exactly like in-group neighbors and join the
-        same kernel call
+        The per-band sums of the neighbor and fixed external models under a weight.
+
+        Under object i's weight (or the given weight), at detAtinv=1.
+        The model sums scale exactly as 1/detAtinv, so expand the
+        components once, run the kernel once per band, and rescale per
+        epoch; the fixed externals are subtracted exactly like in-group
+        neighbors and join the same kernel call.
         """
         vi, ui = self.positions[i]
         if Sw is None:
@@ -2210,8 +2248,9 @@ class _Deblender(object):
 
     def _get_predicted_sums(self, i):
         """
-        per-band weighted sums predicted by object i's own model
-        under its weight, at detAtinv=1
+        The per-band sums predicted by object i's own model under its weight.
+
+        At detAtinv=1.
         """
         m = self.models[i]
         Sw = self.Sw[i]
@@ -2230,8 +2269,9 @@ class _Deblender(object):
 
     def _get_object_result(self, i):
         """
-        the result dict for object i at the converged state; see
-        deblend for the entries
+        The result dict for object i at the converged state.
+
+        See deblend for the entries.
         """
         m = self.models[i]
 
@@ -2309,11 +2349,12 @@ class _Deblender(object):
 
     def _accumulate_error_sums(self, i):
         """
-        noise propagation at the converged weight: the neighbor
-        corrections are deterministic, so the raw kernel cross sums
-        give the covariances of the corrected sums.  Returns the
-        per-band flux variances, the per-band flux-structure
-        covariances and the covariance of the combined sums
+        Noise propagation at the converged weight.
+
+        The neighbor corrections are deterministic, so the raw kernel
+        cross sums give the covariances of the corrected sums.  Returns
+        the per-band flux variances, the per-band flux-structure
+        covariances and the covariance of the combined sums.
         """
         vi, ui = self.positions[i]
         Sw = self.Sw[i]
@@ -2343,7 +2384,9 @@ class _Deblender(object):
 
     def _run_sandwiches(self, i, sums_i, covj, fs, fvar_raw, fmcov):
         """
-        for the weight-adaptive types the sandwich over the moment
+        The moment-matching sandwiches for the flux and structure errors.
+
+        For the weight-adaptive types the sandwich over the moment
         matching conditions (ngmix model_sandwich) gives the flux
         variances including the weight and family responses, plus
         the family covariance for the structure errors; for a gauss
@@ -2440,10 +2483,11 @@ class _Deblender(object):
 
     def _set_shape(self, res, i, fam_cov):
         """
-        the family structure entries T, e1, e2 and their errors from
-        the family covariance sandwich.  e_flags == 0 iff the
-        ellipticities and their errors are usable, following the
-        ngmix prepsfadmom convention
+        The family structure entries T, e1, e2 and their errors.
+
+        From the family covariance sandwich.  e_flags == 0 iff the
+        ellipticities and their errors are usable, following the ngmix
+        prepsfadmom convention.
         """
         m = self.models[i]
 
@@ -2485,19 +2529,19 @@ class _Deblender(object):
     def _set_gauss_entries(self, res, i, fs, ws, gfvar, gfam_cov,
                            gfcov_raw):
         """
-        gauss-estimator entries from the converged weight.  The
-        weight iteration is exactly the adaptive-moments gauss fixed
-        point on the neighbor-corrected data (the family state only
-        enters through the matching conditions), so the lowest-noise
-        gauss shape estimator is available for every model type at
-        no extra fitting cost: the family models do the subtraction,
-        the gauss weight does the measurement, and the metacal
-        response calibrates the estimator.  The gauss-aperture
+        The gauss-estimator entries from the converged weight.
+
+        The weight iteration is exactly the adaptive-moments gauss
+        fixed point on the neighbor-corrected data (the family state
+        only enters through the matching conditions), so the
+        lowest-noise gauss shape estimator is available for every model
+        type at no extra fitting cost: the family models do the
+        subtraction, the gauss weight does the measurement, and the
+        metacal response calibrates the estimator.  The gauss-aperture
         fluxes and flux s/n are the analogs of the gauss-model
-        deblender's outputs, for selection studies against the
-        family quantities.  The primary fluxes should come from the
-        family models; for a gauss object these equal the primary
-        entries
+        deblender's outputs, for selection studies against the family
+        quantities.  The primary fluxes should come from the family
+        models; for a gauss object these equal the primary entries.
         """
         m = self.models[i]
 
@@ -2542,12 +2586,14 @@ class _Deblender(object):
 
 def _any_model_ksums(model, band, dv, du, Sw, detAtinv, Tsmooth):
     """
-    model_ksums extended with the ladder type, whose per-band
-    amplitudes replace the flux-times-fractions scaling
+    model_ksums extended with the ladder type.
+
+    A ladder's per-band amplitudes replace the flux-times-fractions
+    scaling.
     """
     if model['type'] == 'ladder':
-        S00, S01, S11 = model['rungs']
-        F = model['amps'][band]
+        Fb, S00, S01, S11 = band_comps(model, Tsmooth)
+        F = np.ascontiguousarray(Fb[band])
         n = F.size
         sums = np.zeros(6)
         gauss_comps_ksums(
@@ -2561,11 +2607,12 @@ def _any_model_ksums(model, band, dv, du, Sw, detAtinv, Tsmooth):
 
 def _convert_fixed_models(fixed_models, nband, Tsmooth):
     """
-    internal (positions, models) lists for the fixed external
-    sources; entries carry v, u, type, flux and for non-star types
-    the pre-psf e1, e2, T (for a ladder the gauss-estimator frame
-    plus amps, see below).  Nonfinite parameters raise: a poisoned
-    fixed model would silently corrupt every subtraction
+    Internal (positions, models) lists for the fixed external sources.
+
+    Entries carry v, u, type, flux and for non-star types the pre-psf
+    e1, e2, T (for a ladder the gauss-estimator frame plus amps, see
+    below).  Nonfinite parameters raise: a poisoned fixed model would
+    silently corrupt every subtraction.
     """
     if not fixed_models:
         return [], []
@@ -2651,19 +2698,19 @@ def _moment_matrix(sums):
 
 def _matched_flux(fs, ws, Sigma, cov):
     """
-    the matched-aperture flux from the per-band flux sums and weight
-    normalizations, for a gaussian model covariance under a gaussian
-    weight
+    The matched-aperture flux from the per-band flux sums and weight sums.
+
+    For a gaussian model covariance under a gaussian weight.
     """
     return fs / ws * 2 * np.pi * np.sqrt(det2(Sigma + cov))
 
 
 def _flux_cov_phys(F, fs, fcov_raw):
     """
-    the physical cross-band flux covariance from the raw flux-sum
-    covariance, with the same per-band normalization as
-    _flux_errors (diag equals flux_err ** 2 where defined).
-    None in, None out
+    The physical cross-band flux covariance from the raw flux-sum covariance.
+
+    With the same per-band normalization as _flux_errors (diag
+    equals flux_err ** 2 where defined).  None in, None out.
     """
     if fcov_raw is None:
         return None
@@ -2681,15 +2728,15 @@ _joint_s2n = joint_flux_s2n
 
 def _flux_errors(F, fs, fvar, fcov=None):
     """
-    per-band flux errors and the combined flux s/n from the flux
-    sums and their variances.  Bands with no positive variance or a
-    zero flux sum are nan, and the s/n is nan when no band is
-    usable.  With fcov (the cross-band covariance of the flux
-    sums) the total s/n is the joint value sqrt(fs^T C^-1 fs)
-    over the usable bands, pricing the positive cross-band
-    correlations from the shared family response; without it, or
-    when the covariance is not positive definite, the
-    independent-band quadrature sum is used
+    Per-band flux errors and the combined flux s/n from the flux sums.
+
+    Bands with no positive variance or a zero flux sum are nan, and
+    the s/n is nan when no band is usable.  With fcov (the
+    cross-band covariance of the flux sums) the total s/n is the
+    joint value sqrt(fs^T C^-1 fs) over the usable bands, pricing
+    the positive cross-band correlations from the shared family
+    response; without it, or when the covariance is not positive
+    definite, the independent-band quadrature sum is used.
     """
     flux_err = np.full(F.size, np.nan)
     wgood = (fvar > 0) & (fs != 0)
@@ -2713,10 +2760,11 @@ def _flux_errors(F, fs, fvar, fcov=None):
 
 def _shape_from_cov(S):
     """
-    T, e1, e2 and shape definedness from a covariance matrix.  The
-    shape is defined for det > 0 with positive trace, which is
+    T, e1, e2 and shape definedness from a covariance matrix.
+
+    The shape is defined for det > 0 with positive trace, which is
     |e| < 1: a positive-size object with a degenerate covariance has
-    no defined shape.  e1 and e2 are nan when undefined
+    no defined shape.  e1 and e2 are nan when undefined.
     """
     T = S[0, 0] + S[1, 1]
     ok = T > 0 and det2(S) > 0
@@ -2731,9 +2779,10 @@ def _shape_from_cov(S):
 
 def _shape_errors(e1, e2, T, fam_cov):
     """
-    delta-method errors of e1, e2 from the family covariance
-    sandwich.  When either implied variance is not positive the
-    errors are nan and NONPOS_SHAPE_VAR is returned in the flags
+    Delta-method errors of e1, e2 from the family covariance sandwich.
+
+    When either implied variance is not positive the errors are nan
+    and NONPOS_SHAPE_VAR is returned in the flags.
     """
     ev1 = (
         fam_cov[0, 0]
@@ -2752,10 +2801,11 @@ def _shape_errors(e1, e2, T, fam_cov):
 
 def _fchange(newF, oldF, scale):
     """
-    maximum flux change relative to a FIXED per-band scale (the
-    ratcheted historical maximum), not the current flux: a
-    component converging toward or oscillating through zero flux
-    would never satisfy a current-relative tolerance and would
-    run the group to maxiter
+    The maximum flux change relative to a fixed per-band scale.
+
+    The scale is the ratcheted historical maximum, not the current
+    flux: a component converging toward or oscillating through zero
+    flux would never satisfy a current-relative tolerance and would
+    run the group to maxiter.
     """
     return (np.abs(newF - oldF) / scale).max()
