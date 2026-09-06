@@ -2514,13 +2514,13 @@ def _adaptive(m):
     return m['type'] != 'star'
 
 
-def _matched_flux(fs, ws, Sigma, cov):
+def _matched_flux(fs, ws, wt_cov, cov):
     """
     The matched-aperture flux from the per-band flux sums and weight sums.
 
     For a gaussian model covariance under a gaussian weight.
     """
-    return fs / ws * 2 * np.pi * np.sqrt(det2(Sigma + cov))
+    return fs / ws * 2 * np.pi * np.sqrt(det2(wt_cov + cov))
 
 
 def _flux_cov_phys(F, fs, fcov_raw):
