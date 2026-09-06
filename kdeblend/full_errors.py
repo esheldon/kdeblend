@@ -259,12 +259,12 @@ def _apply_structure_errors(robj, cov, ic, L):
     cblock = cov[np.ix_(
         [ic, ic + 1, ic + 2], [ic, ic + 1, ic + 2],
     )]
-    fam_cov = L @ cblock @ L.T
-    if np.all(np.isfinite(fam_cov)) and fam_cov[2, 2] > 0:
-        robj['T_err'] = np.sqrt(fam_cov[2, 2])
+    fam_err_cov = L @ cblock @ L.T
+    if np.all(np.isfinite(fam_err_cov)) and fam_err_cov[2, 2] > 0:
+        robj['T_err'] = np.sqrt(fam_err_cov[2, 2])
         if np.isfinite(robj['e1']) and robj['T'] > 0:
             e1e, e2e, eflags = _shape_errors(
-                robj['e1'], robj['e2'], robj['T'], fam_cov,
+                robj['e1'], robj['e2'], robj['T'], fam_err_cov,
             )
             if eflags == 0:
                 robj['e1_err'] = e1e
@@ -284,13 +284,13 @@ def _apply_structure_errors(robj, cov, ic, L):
     gblock = cov[np.ix_(
         [isw, isw + 1, isw + 2], [isw, isw + 1, isw + 2],
     )]
-    gfam_cov = L @ gblock @ L.T
-    if np.all(np.isfinite(gfam_cov)) and gfam_cov[2, 2] > 0:
-        robj['gauss_T_err'] = np.sqrt(gfam_cov[2, 2])
+    gfam_err_cov = L @ gblock @ L.T
+    if np.all(np.isfinite(gfam_err_cov)) and gfam_err_cov[2, 2] > 0:
+        robj['gauss_T_err'] = np.sqrt(gfam_err_cov[2, 2])
         if np.isfinite(robj['gauss_e1']) and robj['gauss_T'] > 0:
             e1e, e2e, eflags = _shape_errors(
                 robj['gauss_e1'], robj['gauss_e2'],
-                robj['gauss_T'], gfam_cov,
+                robj['gauss_T'], gfam_err_cov,
             )
             if eflags == 0:
                 robj['gauss_e1_err'] = e1e
@@ -2608,17 +2608,17 @@ def _phi_healthy(deb, i, sums, fs, ws, pred, fs_pred):
             ])
         else:
             # gain-1 ratio fallback
-            Sfam = m['cov']
+            fam_cov = m['cov']
             Tp = pred[4] / pred[5]
-            Tf = Sfam[0, 0] + Sfam[1, 1]
+            Tf = fam_cov[0, 0] + fam_cov[1, 1]
             fac = sums[4] / sums[5] / Tp
             de1 = sums[2] / sums[4] - pred[2] / pred[4]
             de2 = sums[3] / sums[4] - pred[3] / pred[4]
             base = 0.5 * fac * Tf
             shift3 = np.array([
-                (fac - 1) * Sfam[0, 0] - base * de1,
-                (fac - 1) * Sfam[0, 1] + base * de2,
-                (fac - 1) * Sfam[1, 1] + base * de1,
+                (fac - 1) * fam_cov[0, 0] - base * de1,
+                (fac - 1) * fam_cov[0, 1] + base * de2,
+                (fac - 1) * fam_cov[1, 1] + base * de1,
             ])
             sgn = np.array([-1.0, 1.0, 1.0])
             # d fac
@@ -2642,7 +2642,7 @@ def _phi_healthy(deb, i, sums, fs, ws, pred, fs_pred):
             dde2_dp[3] = -1.0 / pred[4]
             dde2_dp[4] = pred[3] / pred[4] ** 2
             Sf3 = np.array([
-                Sfam[0, 0], Sfam[0, 1], Sfam[1, 1],
+                fam_cov[0, 0], fam_cov[0, 1], fam_cov[1, 1],
             ])
             dde_ds = [dde1_ds, dde2_ds, dde1_ds]
             dde_dp = [dde1_dp, dde2_dp, dde1_dp]

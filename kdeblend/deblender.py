@@ -1325,13 +1325,13 @@ class _Deblender(object):
         kept for the result.  Returns the absolute split change.
         """
         m = self.models[i]
-        Sfam = m['cov']
+        fam_cov = m['cov']
         vi, ui = self.positions[i]
         weights = [self.Sw[i], self.smooth_cov]
         parts = [
-            {'type': 'exp', 'cov': Sfam,
+            {'type': 'exp', 'cov': fam_cov,
              'F': np.ones(self.nband)},
-            {'type': 'dev', 'cov': m['TdByTe'] * Sfam,
+            {'type': 'dev', 'cov': m['TdByTe'] * fam_cov,
              'F': np.ones(self.nband)},
         ]
 
@@ -1461,12 +1461,12 @@ class _Deblender(object):
         """
         m = self.models[i]
         info = self.bdf_info.get(i)
-        Sfam = m['cov']
+        fam_cov = m['cov']
         Td = m['TdByTe']
 
         fam0 = np.array([
-            Sfam[1, 1] - Sfam[0, 0], 2 * Sfam[0, 1],
-            Sfam[0, 0] + Sfam[1, 1],
+            fam_cov[1, 1] - fam_cov[0, 0], 2 * fam_cov[0, 1],
+            fam_cov[0, 0] + fam_cov[1, 1],
         ])
         h = 1.0e-6 * max((1.0 + Td) * fam0[2], 1.0e-3)
 
@@ -1485,7 +1485,7 @@ class _Deblender(object):
                     )[5]
             return base
 
-        base0 = base_at(Sfam)
+        base0 = base_at(fam_cov)
         # model-consistent measured side: the converged raw
         # components through the unperturbed template sums
         bmod = info['F2'] @ base0.T
@@ -1655,13 +1655,13 @@ class _Deblender(object):
         if pflags == 0:
             return newSw - Sp
 
-        Sfam = self.models[i]['cov']
+        fam_cov = self.models[i]['cov']
         Tp = pred[4] * (1.0 / pred[5])
-        Tf = Sfam[0, 0] + Sfam[1, 1]
+        Tf = fam_cov[0, 0] + fam_cov[1, 1]
         fac = sums[4] / sums[5] / Tp
         de1 = sums[2] / sums[4] - pred[2] / pred[4]
         de2 = sums[3] / sums[4] - pred[3] / pred[4]
-        return (fac - 1) * Sfam \
+        return (fac - 1) * fam_cov \
             + 0.5 * fac * Tf * np.array([
                 [-de1, de2],
                 [de2, de1],
@@ -2097,7 +2097,7 @@ class _Deblender(object):
 
         sums_i, fs, ws, _, _ = self._get_object_sums(i)
         fvar_raw, fmcov, covj = self._accumulate_error_sums(i)
-        (fvar, fam_cov, fcov_raw, gfvar, gfam_cov, gfcov_raw,
+        (fvar, fam_err_cov, fcov_raw, gfvar, gfam_err_cov, gfcov_raw,
          fd_var_tot) = self._run_sandwiches(
             i, sums_i, covj, fs, fvar_raw, fmcov,
         )
@@ -2113,9 +2113,9 @@ class _Deblender(object):
             'cen': np.array(self.positions[i]),
             'cen_pull': self.cen_pull[i],
         }
-        self._set_shape(res, i, fam_cov)
+        self._set_shape(res, i, fam_err_cov)
         self._set_gauss_entries(
-            res, i, fs, ws, gfvar, gfam_cov, gfcov_raw,
+            res, i, fs, ws, gfvar, gfam_err_cov, gfcov_raw,
         )
 
         if m['type'] == 'bdf':
@@ -2218,7 +2218,7 @@ class _Deblender(object):
 
         Returns
         -------
-        fvar, fam_cov, fcov_raw, gfvar, gfam_cov, gfcov_raw, fd_var_tot
+        fvar, fam_err_cov, fcov_raw, gfvar, gfam_err_cov, gfcov_raw, fd_var_tot
             fcov_raw is the full cross-band covariance of the flux sums
             (None on the star, bdf-joint and fallback paths) and gfcov_raw
             the gauss-estimator analog
@@ -2226,10 +2226,10 @@ class _Deblender(object):
         m = self.models[i]
 
         fvar = fvar_raw
-        fam_cov = None
+        fam_err_cov = None
         fcov_raw = None
         gfvar = None
-        gfam_cov = None
+        gfam_err_cov = None
         gfcov_raw = None
         fd_var_tot = None
         if m['type'] != 'star' and sums_i[5] > 0:
@@ -2239,20 +2239,20 @@ class _Deblender(object):
                 # only do the subtraction here); the ladder-aware
                 # fixed-point errors are the follow-on
                 mtype = 'gauss'
-                Sfam = m['cov_sm'] - self.smooth_cov
+                fam_cov = m['cov_sm'] - self.smooth_cov
             elif m['type'] == 'bdf':
                 # the spec dict carries the split state
                 mtype = m
-                Sfam = m['cov']
+                fam_cov = m['cov']
             else:
                 mtype = m['type']
-                Sfam = m['cov']
+                fam_cov = m['cov']
             fvar = None
             if m['type'] == 'bdf':
                 terms = self._bdf_error_terms(i, fvar_raw, fmcov)
                 if terms is not None:
                     G, k, fdv, eta_scov, eta_fcovs = terms
-                    fvar, fam_cov, fd_var_tot = bdf_joint_sandwich(
+                    fvar, fam_err_cov, fd_var_tot = bdf_joint_sandwich(
                         m, self.Sw[i], self.Tsmooth,
                         sums_i, covj, fs, fvar_raw, fmcov,
                         split_grad=G, shrink_k=k,
@@ -2261,8 +2261,8 @@ class _Deblender(object):
                     )
             if fvar is None:
                 fd_var_tot = None
-                fvar, fam_cov, fcov_raw = model_sandwich(
-                    mtype, Sfam, self.Sw[i], self.Tsmooth,
+                fvar, fam_err_cov, fcov_raw = model_sandwich(
+                    mtype, fam_cov, self.Sw[i], self.Tsmooth,
                     sums_i, covj, fs, fvar_raw, fmcov,
                 )
             if fvar is None:
@@ -2270,30 +2270,30 @@ class _Deblender(object):
                 # to the fixed weight variances, with the
                 # structure errors flagged downstream
                 fvar = fvar_raw
-                fam_cov = None
+                fam_err_cov = None
                 fcov_raw = None
             if mtype == 'gauss':
                 # the weight equals the gauss family covariance, so
                 # the sandwiches coincide
                 gfvar = fvar
-                gfam_cov = fam_cov
+                gfam_err_cov = fam_err_cov
                 gfcov_raw = fcov_raw
             else:
                 # gauss-estimator errors under the same weight, for
                 # the low-noise shape entries
-                gfvar, gfam_cov, gfcov_raw = model_sandwich(
+                gfvar, gfam_err_cov, gfcov_raw = model_sandwich(
                     'gauss', self.Sw[i] - self.smooth_cov,
                     self.Sw[i], self.Tsmooth,
                     sums_i, covj, fs, fvar_raw, fmcov,
                 )
                 if gfvar is None:
                     gfvar = fvar_raw
-                    gfam_cov = None
+                    gfam_err_cov = None
                     gfcov_raw = None
-        return (fvar, fam_cov, fcov_raw, gfvar, gfam_cov,
+        return (fvar, fam_err_cov, fcov_raw, gfvar, gfam_err_cov,
                 gfcov_raw, fd_var_tot)
 
-    def _set_shape(self, res, i, fam_cov):
+    def _set_shape(self, res, i, fam_err_cov):
         """
         The family structure entries T, e1, e2 and their errors.
 
@@ -2325,12 +2325,12 @@ class _Deblender(object):
         res['T_err'] = np.nan
         res['e1_err'] = np.nan
         res['e2_err'] = np.nan
-        if fam_cov is not None:
-            if fam_cov[2, 2] > 0:
-                res['T_err'] = np.sqrt(fam_cov[2, 2])
+        if fam_err_cov is not None:
+            if fam_err_cov[2, 2] > 0:
+                res['T_err'] = np.sqrt(fam_err_cov[2, 2])
             if shape_ok:
                 res['e1_err'], res['e2_err'], eflags = _shape_errors(
-                    res['e1'], res['e2'], res['T'], fam_cov,
+                    res['e1'], res['e2'], res['T'], fam_err_cov,
                 )
                 res['e_flags'] |= eflags
         elif shape_ok:
@@ -2338,7 +2338,7 @@ class _Deblender(object):
             # otherwise defined
             res['e_flags'] |= ngmix.flags.NONPOS_SHAPE_VAR
 
-    def _set_gauss_entries(self, res, i, fs, ws, gfvar, gfam_cov,
+    def _set_gauss_entries(self, res, i, fs, ws, gfvar, gfam_err_cov,
                            gfcov_raw):
         """
         The gauss-estimator entries from the converged weight.
@@ -2368,14 +2368,14 @@ class _Deblender(object):
                 _shape_from_cov(Sgal_w)
             if not gok:
                 res['gauss_e_flags'] |= ngmix.flags.NONPOS_SIZE
-            if gfam_cov is not None:
-                if gfam_cov[2, 2] > 0:
-                    res['gauss_T_err'] = np.sqrt(gfam_cov[2, 2])
+            if gfam_err_cov is not None:
+                if gfam_err_cov[2, 2] > 0:
+                    res['gauss_T_err'] = np.sqrt(gfam_err_cov[2, 2])
                 if gok:
                     res['gauss_e1_err'], res['gauss_e2_err'], \
                         geflags = _shape_errors(
                             res['gauss_e1'], res['gauss_e2'],
-                            res['gauss_T'], gfam_cov,
+                            res['gauss_T'], gfam_err_cov,
                         )
                     res['gauss_e_flags'] |= geflags
             elif gok:
@@ -2594,7 +2594,7 @@ def _shape_from_cov(S):
     return T, e1, e2, ok
 
 
-def _shape_errors(e1, e2, T, fam_cov):
+def _shape_errors(e1, e2, T, fam_err_cov):
     """
     Delta-method errors of e1, e2 from the family covariance sandwich.
 
@@ -2602,14 +2602,14 @@ def _shape_errors(e1, e2, T, fam_cov):
     and NONPOS_SHAPE_VAR is returned in the flags.
     """
     ev1 = (
-        fam_cov[0, 0]
-        - 2 * e1 * fam_cov[0, 2]
-        + e1 ** 2 * fam_cov[2, 2]
+        fam_err_cov[0, 0]
+        - 2 * e1 * fam_err_cov[0, 2]
+        + e1 ** 2 * fam_err_cov[2, 2]
     ) / T ** 2
     ev2 = (
-        fam_cov[1, 1]
-        - 2 * e2 * fam_cov[1, 2]
-        + e2 ** 2 * fam_cov[2, 2]
+        fam_err_cov[1, 1]
+        - 2 * e2 * fam_err_cov[1, 2]
+        + e2 ** 2 * fam_err_cov[2, 2]
     ) / T ** 2
     if ev1 > 0 and ev2 > 0:
         return np.sqrt(ev1), np.sqrt(ev2), 0
