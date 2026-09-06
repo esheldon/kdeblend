@@ -1547,7 +1547,7 @@ class _Deblender(object):
             return None
 
         wt_cov = self.wt_cov[i]
-        Sm = self.smooth_cov
+        smooth_cov = self.smooth_cov
 
         # cross-aperture kernel overlaps: the smoothing-aperture
         # flux kernel against the adaptive-weight (M1, M2, T, flux)
@@ -1567,8 +1567,8 @@ class _Deblender(object):
             uuk = (wt_cov[1, 1] - Su * Su) * wk1
             kern = (uuk - vvk, 2 * vuk, uuk + vvk, wk1)
 
-            Sv2 = Sm[0, 0] * kv + Sm[0, 1] * ku
-            Su2 = Sm[0, 1] * kv + Sm[1, 1] * ku
+            Sv2 = smooth_cov[0, 0] * kv + smooth_cov[0, 1] * ku
+            Su2 = smooth_cov[0, 1] * kv + smooth_cov[1, 1] * ku
             chi22 = kv * Sv2 + ku * Su2
             wk2 = np.exp(
                 -0.5 * np.clip(chi22, 0, FASTEXP_MAX_CHI2)
@@ -1594,7 +1594,7 @@ class _Deblender(object):
             {'type': 'dev', 'cov': m['TdByTe'] * m['cov'],
              'F': np.ones(self.nband)},
         ]
-        for a, wt_cov_a in enumerate((wt_cov, Sm)):
+        for a, wt_cov_a in enumerate((wt_cov, smooth_cov)):
             for c, part in enumerate(parts):
                 base[a, c] = model_ksums(
                     part, 0, 0.0, 0.0, wt_cov_a, 1.0, self.Tsmooth,
@@ -1651,6 +1651,8 @@ class _Deblender(object):
         matrix form: scale by the T ratio and shift the anisotropy by
         the ratio differences.
         """
+        # Sp: the family covariance implied by the predicted
+        # moments (the deweight image)
         Sp, pflags = deweight(_moment_matrix(pred), self.wt_cov[i])
         if pflags == 0:
             return new_wt_cov - Sp
@@ -2034,15 +2036,15 @@ class _Deblender(object):
         for j in range(self.nobj):
             if j == i:
                 continue
-            Fb, So00, So01, So11 = band_comps(
+            Fb, cov_sm00, cov_sm01, cov_sm11 = band_comps(
                 self.models[j], self.Tsmooth,
             )
             ncomps.append((
-                self.positions[j], Fb, So00, So01, So11,
+                self.positions[j], Fb, cov_sm00, cov_sm01, cov_sm11,
             ))
         for p, fm in zip(self.fpositions, self.fmodels):
-            Fb, So00, So01, So11 = band_comps(fm, self.Tsmooth)
-            ncomps.append((p, Fb, So00, So01, So11))
+            Fb, cov_sm00, cov_sm01, cov_sm11 = band_comps(fm, self.Tsmooth)
+            ncomps.append((p, Fb, cov_sm00, cov_sm01, cov_sm11))
 
         base_nsums = np.zeros((self.nband, 6))
         if ncomps:
@@ -2076,11 +2078,11 @@ class _Deblender(object):
         wt_cov = self.wt_cov[i]
 
         base_psums = np.zeros((self.nband, 6))
-        fracs, So00, So01, So11 = model_comps(m, self.Tsmooth)
+        fracs, cov_sm00, cov_sm01, cov_sm11 = model_comps(m, self.Tsmooth)
         zeros = np.zeros(fracs.size)
         for band in range(self.nband):
             gauss_comps_ksums(
-                m['F'][band] * fracs, So00, So01, So11,
+                m['F'][band] * fracs, cov_sm00, cov_sm01, cov_sm11,
                 zeros, zeros,
                 wt_cov[0, 0], wt_cov[0, 1], wt_cov[1, 1], 1.0,
                 base_psums[band],

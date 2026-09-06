@@ -1845,14 +1845,14 @@ def _pair_sums(deb, i, j, wt_cov=None):
     vi, ui = deb.positions[i]
     if wt_cov is None:
         wt_cov = deb.wt_cov[i]
-    Fb, So00, So01, So11 = band_comps(deb.models[j], deb.Tsmooth)
+    Fb, cov_sm00, cov_sm01, cov_sm11 = band_comps(deb.models[j], deb.Tsmooth)
     pj = deb.positions[j]
-    dv = np.full(So00.size, pj[0] - vi)
-    du = np.full(So00.size, pj[1] - ui)
+    dv = np.full(cov_sm00.size, pj[0] - vi)
+    du = np.full(cov_sm00.size, pj[1] - ui)
     out = np.zeros((deb.nband, 6))
     for band in range(deb.nband):
         gauss_comps_ksums(
-            np.ascontiguousarray(Fb[band]), So00, So01, So11, dv, du,
+            np.ascontiguousarray(Fb[band]), cov_sm00, cov_sm01, cov_sm11, dv, du,
             wt_cov[0, 0], wt_cov[0, 1], wt_cov[1, 1], 1.0, out[band],
         )
     return out
@@ -2594,6 +2594,7 @@ def _phi_healthy(deb, i, sums, fs, ws, pred, fs_pred):
         # exp/dev mixture: shift = new_wt_cov - DW(Mp) (main branch)
         # or the ratio fallback; prop = cov_old + shift
         Mp, dMp = _dmm_dsums(pred)
+        # Sp: the deweight image of the predicted moments
         Sp, DWp_M, DWp_S, pok = _dw_derivs(
             _sym3_mat(Mp), wt_cov_old,
         )

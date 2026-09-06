@@ -223,6 +223,7 @@ def t_row_indices():
 def _frame_base(wt_cov, Tsmooth):
     """the eigenvalue-floored pre-smoothing base covariance"""
     sm = Tsmooth / 2
+    # Sb: the raw pre-smoothing base, floored below
     Sb = np.asarray(wt_cov) - np.diag([sm, sm])
     evals, evecs = np.linalg.eigh(Sb)
     evals = np.maximum(evals, LADDER_BASE_FLOOR * sm)
@@ -345,7 +346,7 @@ def band_comps(model, Tsmooth):
 
     Returns
     -------
-    Fb, So00, So01, So11
+    Fb, cov_sm00, cov_sm01, cov_sm11
         Fb has shape (nband, ncomp): the per-band component fluxes.
         For the standard types this is the outer product of the
         per-band flux with the fixed fractions; for a ladder it is

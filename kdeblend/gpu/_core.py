@@ -248,11 +248,11 @@ def _pack_host_impl(debs, with_modes=True):
         from ngmix.prepsfadmom.models import model_comps
         nf = 0
         for p, fm in zip(deb.fpositions, deb.fmodels):
-            fracs, So00, So01, So11 = model_comps(fm, deb.Tsmooth)
+            fracs, cov_sm00, cov_sm01, cov_sm11 = model_comps(fm, deb.Tsmooth)
             for c in range(fracs.size):
                 fixed.append([
-                    fm['F'][0] * fracs[c], So00[c], So01[c],
-                    So11[c], p[0], p[1],
+                    fm['F'][0] * fracs[c], cov_sm00[c], cov_sm01[c],
+                    cov_sm11[c], p[0], p[1],
                 ])
                 nf += 1
         foff.append(foff[-1] + nf)
