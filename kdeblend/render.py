@@ -107,8 +107,8 @@ def _ladder_profile(obj, band, Tsmooth):
     eigenvalue-floored frame base, exactly as the fit built it.
     """
     sm = Tsmooth / 2
-    Sw = cov_from_e(obj['e1'], obj['e2'], obj['T']) + np.diag([sm, sm])
-    base = _frame_base(Sw, Tsmooth)
+    wt_cov = cov_from_e(obj['e1'], obj['e2'], obj['T']) + np.diag([sm, sm])
+    base = _frame_base(wt_cov, Tsmooth)
     parts = []
     for k, rung in enumerate(LADDER_RUNGS):
         cov = rung * base

@@ -594,7 +594,7 @@ class _Deblender(object):
         # the epoch mode arrays live elsewhere (the device-prep
         # path); see _init_fluxes.  With defer_flux_init the
         # construction stops before _init_fluxes so the caller
-        # can read the guess state (Sw, positions), compute the
+        # can read the guess state (wt_cov, positions), compute the
         # measured sums externally, set _measured_init_sums5 and
         # call _init_fluxes itself.
         self._measured_init_sums5 = measured_init_sums5
@@ -714,7 +714,7 @@ class _Deblender(object):
         """
         self.positions = []
         self.models = []
-        self.Sw = []
+        self.wt_cov = []
         for o in objects:
             self.positions.append((o['v'], o['u']))
             otype = o.get('type', 'gauss')
@@ -724,15 +724,15 @@ class _Deblender(object):
                 # pre-psf delta function: in the smoothed plane the
                 # model and the matched weight are both the smoothing
                 # gaussian
-                self.Sw.append(self.smooth_cov.copy())
+                self.wt_cov.append(self.smooth_cov.copy())
                 m['cov_sm'] = self.smooth_cov.copy()
             elif otype == 'gauss':
-                self.Sw.append(
+                self.wt_cov.append(
                     np.diag([(Tguess + self.Tsmooth) / 2] * 2),
                 )
-                m['cov_sm'] = self.Sw[-1].copy()
+                m['cov_sm'] = self.wt_cov[-1].copy()
             elif otype in ('exp', 'dev'):
-                self.Sw.append(
+                self.wt_cov.append(
                     np.diag([(Tguess + self.Tsmooth) / 2] * 2),
                 )
                 m['cov'] = cov_from_e(0.0, 0.0, Tguess)
@@ -757,26 +757,26 @@ class _Deblender(object):
                 if fd0 is not None:
                     self.fd_shrink[i] = (fd0, sigma0)
                     self.fd_init[i] = fd0
-                self.Sw.append(
+                self.wt_cov.append(
                     np.diag([(Tguess + self.Tsmooth) / 2] * 2),
                 )
                 m['cov'] = cov_from_e(0.0, 0.0, Tguess)
                 m['fracdev'] = self.fd_init[i]
                 m['TdByTe'] = o['TdByTe']
             elif otype == 'ladder':
-                self.Sw.append(
+                self.wt_cov.append(
                     np.diag([(Tguess + self.Tsmooth) / 2] * 2),
                 )
-                m['cov_sm'] = self.Sw[-1].copy()
+                m['cov_sm'] = self.wt_cov[-1].copy()
                 m['rungs'] = ladder_rung_covs(
-                    self.Sw[-1], self.Tsmooth,
+                    self.wt_cov[-1], self.Tsmooth,
                 )
                 # the unit-flux exp profile on the rungs; scaled
                 # to the initialized fluxes at the end of
                 # _init_fluxes (which runs exactly once)
                 m['amps'] = np.tile(
                     ladder_exp_fracs(
-                        m['rungs'], self.Sw[-1], self.Tsmooth,
+                        m['rungs'], self.wt_cov[-1], self.Tsmooth,
                     ),
                     (self.nband, 1),
                 )
@@ -808,7 +808,7 @@ class _Deblender(object):
             bvec = np.zeros(nobj)
             for i in range(nobj):
                 vi, ui = self.positions[i]
-                Sw = self.Sw[i]
+                wt_cov = self.wt_cov[i]
                 for ep in self.epochs_per_obj[i]:
                     if ep['band'] != band:
                         continue
@@ -828,7 +828,7 @@ class _Deblender(object):
                             ep['kim'], ep['iy'], ep['ix'],
                             ep['dim'],
                             alpha, beta, ep['kv'], ep['ku'],
-                            Sw[0, 0], Sw[0, 1], Sw[1, 1],
+                            wt_cov[0, 0], wt_cov[0, 1], wt_cov[1, 1],
                             ep['df2'],
                             self.esums,
                         )
@@ -836,14 +836,14 @@ class _Deblender(object):
                     for p, fm in zip(self.fpositions, self.fmodels):
                         bvec[i] -= fac * _any_model_ksums(
                             fm, band, p[0] - vi, p[1] - ui,
-                            Sw, ep['detAtinv'], self.Tsmooth,
+                            wt_cov, ep['detAtinv'], self.Tsmooth,
                         )[5]
                     for j in range(nobj):
                         A[i, j] += fac * _any_model_ksums(
                             unit_models[j], band,
                             self.positions[j][0] - vi,
                             self.positions[j][1] - ui,
-                            Sw, ep['detAtinv'], self.Tsmooth,
+                            wt_cov, ep['detAtinv'], self.Tsmooth,
                         )[5]
             fsol = np.linalg.solve(A, bvec)
             for i in range(nobj):
@@ -1055,20 +1055,20 @@ class _Deblender(object):
         if not _adaptive(m):
             # structure frozen at the delta-function model; only
             # the linear flux is updated
-            newF = _matched_flux(fs, ws, self.Sw[i], m['cov_sm'])
+            newF = _matched_flux(fs, ws, self.wt_cov[i], m['cov_sm'])
             change = self._flux_change(i, newF, m['F'])
             m['F'] = newF
         else:
-            newSw = self._deweight_measured(i, sums)
-            if newSw is None:
+            new_wt_cov = self._deweight_measured(i, sums)
+            if new_wt_cov is None:
                 change = self._skip_structure_update(
                     i, fs, ws, fs_pred,
                 )
             elif m['type'] in ('gauss', 'ladder'):
-                change = self._update_gauss(i, newSw, fs, ws)
+                change = self._update_gauss(i, new_wt_cov, fs, ws)
             else:
                 change = self._update_mixture(
-                    i, newSw, sums, pred, fs, fs_pred,
+                    i, new_wt_cov, sums, pred, fs, fs_pred,
                 )
 
         if (
@@ -1124,7 +1124,7 @@ class _Deblender(object):
 
         dmax = max(abs(newv - v), abs(newu - u))
         self.positions[i] = (newv, newu)
-        Twt = self.Sw[i][0, 0] + self.Sw[i][1, 1]
+        Twt = self.wt_cov[i][0, 0] + self.wt_cov[i][1, 1]
         return self._note_change('cen', dmax / np.sqrt(Twt))
 
     def _shrink_family_shift(self, i, sums, shift):
@@ -1173,11 +1173,11 @@ class _Deblender(object):
         (a runaway, see MAX_WEIGHT_SIGMA_FAC and WEIGHT_TMAX_FAC).
         """
         if sums[5] > 0 and sums[4] > 0:
-            newSw, flags = deweight(_moment_matrix(sums), self.Sw[i])
+            new_wt_cov, flags = deweight(_moment_matrix(sums), self.wt_cov[i])
             if flags == 0:
-                Tw = newSw[0, 0] + newSw[1, 1]
+                Tw = new_wt_cov[0, 0] + new_wt_cov[1, 1]
                 if Tw <= self.Tw_max[i]:
-                    return newSw
+                    return new_wt_cov
                 # a runaway; rejected like any failed structure
                 # update, so the object holds its structure and the
                 # consecutive-failure containment takes over.
@@ -1199,7 +1199,7 @@ class _Deblender(object):
         m = self.models[i]
         self._count_skip(i)
         if m['type'] in ('gauss', 'ladder'):
-            newF = _matched_flux(fs, ws, self.Sw[i], m['cov_sm'])
+            newF = _matched_flux(fs, ws, self.wt_cov[i], m['cov_sm'])
             self._flux_change(i, newF, m['F'])
             m['F'] = newF
         elif np.all(fs_pred != 0):
@@ -1209,7 +1209,7 @@ class _Deblender(object):
         self._contain_failure(i)
         return self._note_change('struct', 1.0)
 
-    def _update_gauss(self, i, newSw, fs, ws):
+    def _update_gauss(self, i, new_wt_cov, fs, ws):
         """
         Accept the weight update for a gauss object and update its flux.
 
@@ -1217,11 +1217,11 @@ class _Deblender(object):
         Returns the relative change.
         """
         m = self.models[i]
-        newF = _matched_flux(fs, ws, self.Sw[i], newSw)
-        Twt = self.Sw[i][0, 0] + self.Sw[i][1, 1]
+        newF = _matched_flux(fs, ws, self.wt_cov[i], new_wt_cov)
+        Twt = self.wt_cov[i][0, 0] + self.wt_cov[i][1, 1]
         change = max(
             self._note_change(
-                'struct', np.abs(newSw - self.Sw[i]).max() / Twt,
+                'struct', np.abs(new_wt_cov - self.wt_cov[i]).max() / Twt,
             ),
             self._flux_change(i, newF, m['F']),
         )
@@ -1236,17 +1236,17 @@ class _Deblender(object):
             # sweeps vs 29 without it), and it made the amps
             # depend on the flux history, a hidden state the
             # fixed-point errors could not see
-            m['rungs'] = ladder_rung_covs(newSw, self.Tsmooth)
+            m['rungs'] = ladder_rung_covs(new_wt_cov, self.Tsmooth)
             change = max(change, self._note_change(
                 'struct', self.ladder_last_da[i],
             ))
-        m['cov_sm'] = newSw
+        m['cov_sm'] = new_wt_cov
         m['F'] = newF
         self.nfail[i] = 0
-        self.Sw[i] = newSw
+        self.wt_cov[i] = new_wt_cov
         return change
 
-    def _update_mixture(self, i, newSw, sums, pred, fs, fs_pred):
+    def _update_mixture(self, i, new_wt_cov, sums, pred, fs, fs_pred):
         """
         The deweight-style update of an exp/dev family covariance.
 
@@ -1254,12 +1254,12 @@ class _Deblender(object):
         the model-predicted moments go through the deweight transform and
         the family covariance shifts by the difference, which has
         near-unit gain for the mixture (a plain Picard update converges at
-        rate ~1/2).  newSw is the deweight of the measured moments.
+        rate ~1/2).  new_wt_cov is the deweight of the measured moments.
         Returns the relative change.
         """
         m = self.models[i]
 
-        shift = self._mixture_shift(i, newSw, sums, pred)
+        shift = self._mixture_shift(i, new_wt_cov, sums, pred)
         if self.e_sigma0 > 0:
             shift = self._shrink_family_shift(i, sums, shift)
         prop, shift, accepted, idamp = self._damped_step(i, shift)
@@ -1289,7 +1289,7 @@ class _Deblender(object):
             self.nfail[i] = 0
             self._win_nfail[i] += 1
         else:
-            Twt = self.Sw[i][0, 0] + self.Sw[i][1, 1]
+            Twt = self.wt_cov[i][0, 0] + self.wt_cov[i][1, 1]
             change = max(change, self._note_change(
                 'struct', np.abs(shift).max() / Twt,
             ))
@@ -1309,7 +1309,7 @@ class _Deblender(object):
                 'struct', self.bdf_last_dfd[i],
             ))
 
-        self.Sw[i] = newSw
+        self.wt_cov[i] = new_wt_cov
         return change
 
     def _update_bdf_split(self, i, fs1):
@@ -1327,7 +1327,7 @@ class _Deblender(object):
         m = self.models[i]
         fam_cov = m['cov']
         vi, ui = self.positions[i]
-        weights = [self.Sw[i], self.smooth_cov]
+        weights = [self.wt_cov[i], self.smooth_cov]
         parts = [
             {'type': 'exp', 'cov': fam_cov,
              'F': np.ones(self.nband)},
@@ -1342,10 +1342,10 @@ class _Deblender(object):
         # unit-flux template sums per aperture at detAtinv=1; the
         # per-band matrix is this times the band weight sum
         base = np.zeros((2, 2))
-        for a, Sw in enumerate(weights):
+        for a, wt_cov in enumerate(weights):
             for c, part in enumerate(parts):
                 base[a, c] = model_ksums(
-                    part, 0, 0.0, 0.0, Sw, 1.0, self.Tsmooth,
+                    part, 0, 0.0, 0.0, wt_cov, 1.0, self.Tsmooth,
                 )[5]
         det = base[0, 0] * base[1, 1] - base[0, 1] * base[1, 0]
         if abs(det) < 1.0e-10 * abs(base[0, 0] * base[1, 1]):
@@ -1356,8 +1356,8 @@ class _Deblender(object):
         # the smoothing aperture needs its own pass
         fs2 = np.zeros((2, self.nband))
         fs2[0] = fs1
-        Sw = self.smooth_cov
-        nsums = self._get_neighbor_sums(i, Sw=Sw)
+        wt_cov = self.smooth_cov
+        nsums = self._get_neighbor_sums(i, wt_cov=wt_cov)
         for ep in self.epochs_per_obj[i]:
             alpha, beta = get_phase_angles(
                 ep, vi - ep['vcen'], ui - ep['ucen'],
@@ -1365,7 +1365,7 @@ class _Deblender(object):
             admom_ksums(
                 ep['kim'], ep['iy'], ep['ix'], ep['dim'],
                 alpha, beta, ep['kv'], ep['ku'],
-                Sw[0, 0], Sw[0, 1], Sw[1, 1], ep['df2'],
+                wt_cov[0, 0], wt_cov[0, 1], wt_cov[1, 1], ep['df2'],
                 self.esums,
             )
             csums = (
@@ -1429,7 +1429,7 @@ class _Deblender(object):
             vi, ui = self.positions[i]
             var2 = np.zeros((2, self.nband))
             fcov = np.zeros((6, 6))
-            for a, Sw in enumerate(weights):
+            for a, wt_cov in enumerate(weights):
                 for ep in self.epochs_per_obj[i]:
                     alpha, beta = get_phase_angles(
                         ep, vi - ep['vcen'], ui - ep['ucen'],
@@ -1437,7 +1437,7 @@ class _Deblender(object):
                     admom_finalize(
                         ep['kim'], ep['iy'], ep['ix'], ep['dim'],
                         alpha, beta, ep['kv'], ep['ku'],
-                        Sw[0, 0], Sw[0, 1], Sw[1, 1], ep['df2'],
+                        wt_cov[0, 0], wt_cov[0, 1], wt_cov[1, 1], ep['df2'],
                         ep['err_fac2'],
                         self.esums, fcov,
                     )
@@ -1478,10 +1478,10 @@ class _Deblender(object):
                  'F': np.ones(self.nband)},
             ]
             base = np.zeros((2, 2))
-            for a, Sw in enumerate((self.Sw[i], self.smooth_cov)):
+            for a, wt_cov in enumerate((self.wt_cov[i], self.smooth_cov)):
                 for c, part in enumerate(parts):
                     base[a, c] = model_ksums(
-                        part, 0, 0.0, 0.0, Sw, 1.0, self.Tsmooth,
+                        part, 0, 0.0, 0.0, wt_cov, 1.0, self.Tsmooth,
                     )[5]
             return base
 
@@ -1546,7 +1546,7 @@ class _Deblender(object):
         if G is None:
             return None
 
-        Sw = self.Sw[i]
+        wt_cov = self.wt_cov[i]
         Sm = self.smooth_cov
 
         # cross-aperture kernel overlaps: the smoothing-aperture
@@ -1557,14 +1557,14 @@ class _Deblender(object):
         for ep in self.epochs_per_obj[i]:
             kv = ep['kv']
             ku = ep['ku']
-            Sv = Sw[0, 0] * kv + Sw[0, 1] * ku
-            Su = Sw[0, 1] * kv + Sw[1, 1] * ku
+            Sv = wt_cov[0, 0] * kv + wt_cov[0, 1] * ku
+            Su = wt_cov[0, 1] * kv + wt_cov[1, 1] * ku
             chi2 = kv * Sv + ku * Su
             wk1 = np.exp(-0.5 * np.clip(chi2, 0, FASTEXP_MAX_CHI2))
             wk1[(chi2 > FASTEXP_MAX_CHI2) | (chi2 < 0)] = 0.0
-            vvk = (Sw[0, 0] - Sv * Sv) * wk1
-            vuk = (Sw[0, 1] - Sv * Su) * wk1
-            uuk = (Sw[1, 1] - Su * Su) * wk1
+            vvk = (wt_cov[0, 0] - Sv * Sv) * wk1
+            vuk = (wt_cov[0, 1] - Sv * Su) * wk1
+            uuk = (wt_cov[1, 1] - Su * Su) * wk1
             kern = (uuk - vvk, 2 * vuk, uuk + vvk, wk1)
 
             Sv2 = Sm[0, 0] * kv + Sm[0, 1] * ku
@@ -1594,10 +1594,10 @@ class _Deblender(object):
             {'type': 'dev', 'cov': m['TdByTe'] * m['cov'],
              'F': np.ones(self.nband)},
         ]
-        for a, Swa in enumerate((Sw, Sm)):
+        for a, wt_cov_a in enumerate((wt_cov, Sm)):
             for c, part in enumerate(parts):
                 base[a, c] = model_ksums(
-                    part, 0, 0.0, 0.0, Swa, 1.0, self.Tsmooth,
+                    part, 0, 0.0, 0.0, wt_cov_a, 1.0, self.Tsmooth,
                 )[5]
 
         ws = np.zeros(self.nband)
@@ -1641,7 +1641,7 @@ class _Deblender(object):
                 k = 1.0
         return G, k, fd_var, eta_scov, eta_fcovs
 
-    def _mixture_shift(self, i, newSw, sums, pred):
+    def _mixture_shift(self, i, new_wt_cov, sums, pred):
         """
         The proposed shift of the family covariance.
 
@@ -1651,9 +1651,9 @@ class _Deblender(object):
         matrix form: scale by the T ratio and shift the anisotropy by
         the ratio differences.
         """
-        Sp, pflags = deweight(_moment_matrix(pred), self.Sw[i])
+        Sp, pflags = deweight(_moment_matrix(pred), self.wt_cov[i])
         if pflags == 0:
-            return newSw - Sp
+            return new_wt_cov - Sp
 
         fam_cov = self.models[i]['cov']
         Tp = pred[4] * (1.0 / pred[5])
@@ -1719,7 +1719,7 @@ class _Deblender(object):
                 return False
         self.nfail[i] = 0
         m = self.models[i]
-        self.Sw[i] = self.smooth_cov.copy()
+        self.wt_cov[i] = self.smooth_cov.copy()
         # the amps must follow the intervention promptly
         self._ladder_next = self.isweep + 1
         if self.recenter:
@@ -1802,7 +1802,7 @@ class _Deblender(object):
         # boost; the validity rollback guards the large jump
         if 0.2 < rho < 0.998:
             saved_models = [dict(m) for m in self.models]
-            saved_Sw = [sw.copy() for sw in self.Sw]
+            saved_wt_cov = [sw.copy() for sw in self.wt_cov]
             saved_pos = list(self.positions)
             # a full jump amplifies every component of the step by
             # rho/(1-rho); near-unit ratios can push a single
@@ -1822,7 +1822,7 @@ class _Deblender(object):
                 for m, sm in zip(self.models, saved_models):
                     m.update(sm)
                 for k in range(self.nobj):
-                    self.Sw[k] = saved_Sw[k]
+                    self.wt_cov[k] = saved_wt_cov[k]
                 self.positions = saved_pos
             if accepted:
                 # a fresh trio of plain sweeps is needed for the
@@ -1841,7 +1841,7 @@ class _Deblender(object):
 
             F[0], ..., F[nband-1]         per-band fluxes
             C[0, 0], C[0, 1], C[1, 1]     model covariance
-            Sw[0, 0], Sw[0, 1], Sw[1, 1]  weight covariance
+            wt_cov[0, 0], wt_cov[0, 1], wt_cov[1, 1]  weight covariance
 
         where C is cov_sm for gauss and ladder objects and the family cov
         for exp/dev; star structures and frozen ladder frames are not
@@ -1853,7 +1853,7 @@ class _Deblender(object):
         across fluxes and covariances.
         """
         x = []
-        for i, (m, sw) in enumerate(zip(self.models, self.Sw)):
+        for i, (m, sw) in enumerate(zip(self.models, self.wt_cov)):
             x.extend(m['F'])
             if self.recenter:
                 v0, u0 = self.det_positions[i]
@@ -1930,13 +1930,13 @@ class _Deblender(object):
                 m['fracdev'] = x[k + 3] - 2.0
                 k += 4
             if m['type'] != 'star':
-                self.Sw[i] = np.array([
+                self.wt_cov[i] = np.array([
                     [x[k], x[k + 1]], [x[k + 1], x[k + 2]],
                 ])
                 k += 3
                 if m['type'] == 'ladder':
                     m['rungs'] = ladder_rung_covs(
-                        self.Sw[i], self.Tsmooth,
+                        self.wt_cov[i], self.Tsmooth,
                     )
 
     def _state_valid(self):
@@ -1946,7 +1946,7 @@ class _Deblender(object):
         Every weight and model gives well defined sums, and with
         recentering every center is inside its displacement clip box.
         """
-        for i, (m, sw) in enumerate(zip(self.models, self.Sw)):
+        for i, (m, sw) in enumerate(zip(self.models, self.wt_cov)):
             if sw[0, 0] <= 0 or sw[1, 1] <= 0 or det2(sw) <= 0:
                 return False
             if m['type'] in ('exp', 'dev', 'bdf'):
@@ -1980,7 +1980,7 @@ class _Deblender(object):
         """
         vi, ui = self.positions[i]
         is_mix = self.models[i]['type'] in ('exp', 'dev', 'bdf')
-        Sw = self.Sw[i]
+        wt_cov = self.wt_cov[i]
 
         base_nsums = self._get_neighbor_sums(i)
         if is_mix:
@@ -1999,7 +1999,7 @@ class _Deblender(object):
             admom_ksums(
                 ep['kim'], ep['iy'], ep['ix'], ep['dim'],
                 alpha, beta, ep['kv'], ep['ku'],
-                Sw[0, 0], Sw[0, 1], Sw[1, 1], ep['df2'],
+                wt_cov[0, 0], wt_cov[0, 1], wt_cov[1, 1], ep['df2'],
                 self.esums,
             )
             csums = (
@@ -2017,7 +2017,7 @@ class _Deblender(object):
 
         return sums, fs, ws, pred, fs_pred
 
-    def _get_neighbor_sums(self, i, Sw=None):
+    def _get_neighbor_sums(self, i, wt_cov=None):
         """
         The per-band sums of the neighbor and fixed external models under a weight.
 
@@ -2027,8 +2027,8 @@ class _Deblender(object):
         externals join the same kernel call.
         """
         vi, ui = self.positions[i]
-        if Sw is None:
-            Sw = self.Sw[i]
+        if wt_cov is None:
+            wt_cov = self.wt_cov[i]
 
         ncomps = []
         for j in range(self.nobj):
@@ -2061,7 +2061,7 @@ class _Deblender(object):
                 ])
                 gauss_comps_ksums(
                     nF, nSo00, nSo01, nSo11, ndv, ndu,
-                    Sw[0, 0], Sw[0, 1], Sw[1, 1], 1.0,
+                    wt_cov[0, 0], wt_cov[0, 1], wt_cov[1, 1], 1.0,
                     base_nsums[band],
                 )
         return base_nsums
@@ -2073,7 +2073,7 @@ class _Deblender(object):
         At detAtinv=1.
         """
         m = self.models[i]
-        Sw = self.Sw[i]
+        wt_cov = self.wt_cov[i]
 
         base_psums = np.zeros((self.nband, 6))
         fracs, So00, So01, So11 = model_comps(m, self.Tsmooth)
@@ -2082,7 +2082,7 @@ class _Deblender(object):
             gauss_comps_ksums(
                 m['F'][band] * fracs, So00, So01, So11,
                 zeros, zeros,
-                Sw[0, 0], Sw[0, 1], Sw[1, 1], 1.0,
+                wt_cov[0, 0], wt_cov[0, 1], wt_cov[1, 1], 1.0,
                 base_psums[band],
             )
         return base_psums
@@ -2177,7 +2177,7 @@ class _Deblender(object):
         covariances and the covariance of the combined sums.
         """
         vi, ui = self.positions[i]
-        Sw = self.Sw[i]
+        wt_cov = self.wt_cov[i]
 
         fvar = np.zeros(self.nband)
         fmcov = np.zeros((self.nband, 3))
@@ -2190,7 +2190,7 @@ class _Deblender(object):
             admom_finalize(
                 ep['kim'], ep['iy'], ep['ix'], ep['dim'],
                 alpha, beta, ep['kv'], ep['ku'],
-                Sw[0, 0], Sw[0, 1], Sw[1, 1], ep['df2'],
+                wt_cov[0, 0], wt_cov[0, 1], wt_cov[1, 1], ep['df2'],
                 ep['err_fac2'],
                 self.esums, fcov,
             )
@@ -2253,7 +2253,7 @@ class _Deblender(object):
                 if terms is not None:
                     G, k, fdv, eta_scov, eta_fcovs = terms
                     fvar, fam_err_cov, fd_var_tot = bdf_joint_sandwich(
-                        m, self.Sw[i], self.Tsmooth,
+                        m, self.wt_cov[i], self.Tsmooth,
                         sums_i, covj, fs, fvar_raw, fmcov,
                         split_grad=G, shrink_k=k,
                         fd_var_data=fdv,
@@ -2262,7 +2262,7 @@ class _Deblender(object):
             if fvar is None:
                 fd_var_tot = None
                 fvar, fam_err_cov, fcov_raw = model_sandwich(
-                    mtype, fam_cov, self.Sw[i], self.Tsmooth,
+                    mtype, fam_cov, self.wt_cov[i], self.Tsmooth,
                     sums_i, covj, fs, fvar_raw, fmcov,
                 )
             if fvar is None:
@@ -2282,8 +2282,8 @@ class _Deblender(object):
                 # gauss-estimator errors under the same weight, for
                 # the low-noise shape entries
                 gfvar, gfam_err_cov, gfcov_raw = model_sandwich(
-                    'gauss', self.Sw[i] - self.smooth_cov,
-                    self.Sw[i], self.Tsmooth,
+                    'gauss', self.wt_cov[i] - self.smooth_cov,
+                    self.wt_cov[i], self.Tsmooth,
                     sums_i, covj, fs, fvar_raw, fmcov,
                 )
                 if gfvar is None:
@@ -2363,7 +2363,7 @@ class _Deblender(object):
         if m['type'] == 'star':
             res['gauss_e_flags'] |= ngmix.flags.NONPOS_SIZE
         else:
-            Sgal_w = self.Sw[i] - self.smooth_cov
+            Sgal_w = self.wt_cov[i] - self.smooth_cov
             res['gauss_T'], res['gauss_e1'], res['gauss_e2'], gok = \
                 _shape_from_cov(Sgal_w)
             if not gok:
@@ -2385,14 +2385,14 @@ class _Deblender(object):
         res['gauss_flux_err'] = np.full(self.nband, np.nan)
         res['gauss_s2n'] = np.nan
         if m['type'] != 'star' and gfvar is not None:
-            Fg = fs / ws * 4 * np.pi * np.sqrt(det2(self.Sw[i]))
+            Fg = fs / ws * 4 * np.pi * np.sqrt(det2(self.wt_cov[i]))
             res['gauss_flux'] = Fg
             res['gauss_flux_err'], res['gauss_s2n'] = _flux_errors(
                 Fg, fs, gfvar, fcov=gfcov_raw,
             )
 
 
-def _any_model_ksums(model, band, dv, du, Sw, detAtinv, Tsmooth):
+def _any_model_ksums(model, band, dv, du, wt_cov, detAtinv, Tsmooth):
     """
     model_ksums extended with the ladder type.
 
@@ -2407,10 +2407,10 @@ def _any_model_ksums(model, band, dv, du, Sw, detAtinv, Tsmooth):
         gauss_comps_ksums(
             F, S00, S01, S11,
             np.full(n, float(dv)), np.full(n, float(du)),
-            Sw[0, 0], Sw[0, 1], Sw[1, 1], float(detAtinv), sums,
+            wt_cov[0, 0], wt_cov[0, 1], wt_cov[1, 1], float(detAtinv), sums,
         )
         return sums
-    return model_ksums(model, band, dv, du, Sw, detAtinv, Tsmooth)
+    return model_ksums(model, band, dv, du, wt_cov, detAtinv, Tsmooth)
 
 
 def _convert_fixed_models(fixed_models, nband, Tsmooth):
@@ -2454,10 +2454,10 @@ def _convert_fixed_models(fixed_models, nband, Tsmooth):
                     f'fixed ladder amps have shape {amps.shape}, '
                     f'expected {(nband, LADDER_RUNGS.size)}'
                 )
-            Sw = cov_from_e(f['e1'], f['e2'], f['T']) + smooth_cov
+            wt_cov = cov_from_e(f['e1'], f['e2'], f['T']) + smooth_cov
             m = {
-                'type': 'ladder', 'F': F, 'cov_sm': Sw,
-                'rungs': ladder_rung_covs(Sw, Tsmooth),
+                'type': 'ladder', 'F': F, 'cov_sm': wt_cov,
+                'rungs': ladder_rung_covs(wt_cov, Tsmooth),
                 'amps': amps.copy(),
             }
         elif ftype in ('gauss', 'exp', 'dev', 'bdf'):

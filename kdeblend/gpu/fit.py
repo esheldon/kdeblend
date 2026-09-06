@@ -63,7 +63,7 @@ def writeback(deb, out, gi):
         c = cov3[j]
         cov = np.array([[c[0], c[1]], [c[1], c[2]]])
         s = sw3[j]
-        deb.Sw[k] = np.array([[s[0], s[1]], [s[1], s[2]]])
+        deb.wt_cov[k] = np.array([[s[0], s[1]], [s[1], s[2]]])
         if t != m['type']:
             # demoted on device (exp/gauss -> star)
             m['type'] = 'star'

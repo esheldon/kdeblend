@@ -157,7 +157,7 @@ def test_ladder_multiband_perband_amps():
 
     eps = deb.epochs_per_obj[0]
     for af in (1.0, 4.0):
-        W = af * np.asarray(deb.Sw[0])
+        W = af * np.asarray(deb.wt_cov[0])
         for ep in eps:
             band = ep['band']
             tsum = _data_flux_sum(ep, 0.0, 0.0, W)
@@ -255,7 +255,7 @@ def test_ladder_pair_joint():
 def test_ladder_consistency_rows():
     """with the consistency row the converged ladder model
     reproduces the weighted size the deweight step consumed:
-    deweight(model sums under Sw) matches Sw in T, for round and
+    deweight(model sums under wt_cov) matches wt_cov in T, for round and
     elliptical truths, much closer than without the row.  (The
     ellipticity is not made consistent: the rungs share the
     frame's deweighted ellipticity, see kdeblend.ladder)"""
@@ -272,15 +272,15 @@ def test_ladder_consistency_rows():
             L.LADDER_MOMENT_ROWS = saved
         assert res['converged']
         m = deb.models[0]
-        Sw = np.asarray(deb.Sw[0])
+        wt_cov = np.asarray(deb.wt_cov[0])
         S00, S01, S11 = m['rungs']
         msums = _comps_sums(
-            m['amps'][0], S00, S01, S11, 0.0, 0.0, Sw,
+            m['amps'][0], S00, S01, S11, 0.0, 0.0, wt_cov,
         )
-        newSw, flags = deweight(_moment_matrix(msums), Sw)
+        new_wt_cov, flags = deweight(_moment_matrix(msums), wt_cov)
         assert flags == 0
-        Tm = _shape_from_cov(newSw - deb.smooth_cov)[0]
-        Tw = _shape_from_cov(Sw - deb.smooth_cov)[0]
+        Tm = _shape_from_cov(new_wt_cov - deb.smooth_cov)[0]
+        Tw = _shape_from_cov(wt_cov - deb.smooth_cov)[0]
         return abs(Tm / Tw - 1)
 
     for e1, e2 in ((0.1, -0.05), (0.0, 0.0)):
@@ -379,7 +379,7 @@ def test_ladder_apsums_matches_passes():
 )
     deb.go()
     ep = deb.epochs_per_obj[0][0]
-    Sw = np.asarray(deb.Sw[0]) + np.array([[0.0, 0.02], [0.02, 0.0]])
+    wt_cov = np.asarray(deb.wt_cov[0]) + np.array([[0.0, 0.02], [0.02, 0.0]])
     a, b = get_phase_angles(ep, 0.0, 0.0)
     nap = LADDER_AP_FACS.size
     flux = np.zeros(nap)
@@ -387,11 +387,11 @@ def test_ladder_apsums_matches_passes():
     vr = np.zeros(nap + 1)
     ladder_apsums(
         ep['kim'], ep['iy'], ep['ix'], ep['dim'], a, b, ep['kv'],
-        ep['ku'], Sw[0, 0], Sw[0, 1], Sw[1, 1], ep['df2'],
+        ep['ku'], wt_cov[0, 0], wt_cov[0, 1], wt_cov[1, 1], ep['df2'],
         ep['err_fac2'], True, flux, s1, vr,
     )
     for j, af in enumerate(LADDER_AP_FACS):
-        W = af * Sw
+        W = af * wt_cov
         ref = np.zeros(6)
         cov = np.zeros((6, 6))
         admom_finalize(

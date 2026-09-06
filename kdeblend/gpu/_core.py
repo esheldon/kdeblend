@@ -53,7 +53,7 @@ _EXPFRAC = ', '.join(f'{f:.17e}' for f, cT in _EXP_COMPS)
 _EXPCT = ', '.join(f'{cT:.17e}' for f, cT in _EXP_COMPS)
 
 GMAX = 64
-SPO = 9         # packed slots per object (F,1 + cen,2 + cov,3 + Sw,3)
+SPO = 9         # packed slots per object (F,1 + cen,2 + cov,3 + wt_cov,3)
 NT = 256
 
 # padded-fft dim scope, set by the kernel's static shared memory
@@ -265,7 +265,7 @@ def _pack_host_impl(debs, with_modes=True):
             c = m['cov_sm'] if m['type'] in ('gauss', 'star') \
                 else m['cov']
             state['cov'].append([c[0, 0], c[0, 1], c[1, 1]])
-            s = deb.Sw[i]
+            s = deb.wt_cov[i]
             state['sw'].append([s[0, 0], s[0, 1], s[1, 1]])
             state['pos'].append(list(deb.positions[i]))
             state['dpos'].append(list(deb.det_positions[i]))

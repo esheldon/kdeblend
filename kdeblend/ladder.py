@@ -43,8 +43,8 @@ full_errors, per group:
 - idx: the deblender indices of the ladder objects; io indexes
   them (nlad of them), i the deblender's objects
 - K: the number of rungs; Z = nlad K amp columns per band
-- Sws[io], Tws[io]: the object's adaptive weight and its trace;
-  aps[io]: its aperture weights, LADDER_AP_FACS times Sws[io]
+- wt_covs[io], Tws[io]: the object's adaptive weight and its trace;
+  aps[io]: its aperture weights, LADDER_AP_FACS times wt_covs[io]
 - Fhat: (nlad, nband) per-band flux scales of the fraction units
 - nap, nrows: apertures per object and rows per object (the
   apertures plus, with LADDER_MOMENT_ROWS, the T row)
@@ -180,7 +180,7 @@ LADDER_TOTAL_MAX_AP = 4.0
 # consistency row: the T sum under each ladder object's own
 # adaptive weight joins the solve as a soft noise-weighted row,
 # so the model reproduces the weighted size the deweight step
-# consumed (deweight(model sums) matches Sw in T).  The M1/M2
+# consumed (deweight(model sums) matches wt_cov in T).  The M1/M2
 # rows are deliberately NOT included: every rung shares the
 # frame's ellipticity, which is the gaussian-deweighted (hence
 # biased: 0.079 for a true 0.10 on a sersic n=3) ellipticity,
@@ -220,23 +220,23 @@ def t_row_indices():
 # ---------------------------------------------------------------
 # frame and rungs
 
-def _frame_base(Sw, Tsmooth):
+def _frame_base(wt_cov, Tsmooth):
     """the eigenvalue-floored pre-smoothing base covariance"""
     sm = Tsmooth / 2
-    Sb = np.asarray(Sw) - np.diag([sm, sm])
+    Sb = np.asarray(wt_cov) - np.diag([sm, sm])
     evals, evecs = np.linalg.eigh(Sb)
     evals = np.maximum(evals, LADDER_BASE_FLOOR * sm)
     return (evecs * evals) @ evecs.T
 
 
-def ladder_rung_covs(Sw, Tsmooth):
+def ladder_rung_covs(wt_cov, Tsmooth):
     """
     The smoothed rung covariances of the frame implied by a weight.
 
     Returns the arrays (S00, S01, S11) over the rungs.
     """
     sm = Tsmooth / 2
-    Sb = _frame_base(Sw, Tsmooth)
+    Sb = _frame_base(wt_cov, Tsmooth)
     return (
         LADDER_RUNGS * Sb[0, 0] + sm,
         LADDER_RUNGS * Sb[0, 1],
@@ -358,17 +358,17 @@ def band_comps(model, Tsmooth):
     return np.outer(model['F'], fracs), S00, S01, S11
 
 
-def ladder_exp_fracs(rungs, Sw, Tsmooth):
+def ladder_exp_fracs(rungs, wt_cov, Tsmooth):
     """
     The unit-total-flux exp profile expressed on the rungs.
 
     The prior center of the amp solve and the amp initialization.
     Closed form: match the exp model's aperture flux sums under the
     standard aperture set with a tiny ridge; the exp family
-    covariance is the frame base of Sw.
+    covariance is the frame base of wt_cov.
     """
     sm = Tsmooth / 2
-    Sb = _frame_base(Sw, Tsmooth)
+    Sb = _frame_base(wt_cov, Tsmooth)
     exp_comps = get_profile_comps('exp')
     exp_fracs = np.array([c[0] for c in exp_comps])
     exp_size_facs = np.array([c[1] for c in exp_comps])
@@ -378,15 +378,15 @@ def ladder_exp_fracs(rungs, Sw, Tsmooth):
     S00, S01, S11 = rungs
 
     K = LADDER_RUNGS.size
-    Sw = np.asarray(Sw)
+    wt_cov = np.asarray(wt_cov)
     nap = LADDER_AP_FACS.size
     # the rungs and the exp components in one grid call
     zero = np.zeros((nap, K + exp_fracs.size))
     flux_sums = grid_sums(
         np.concatenate([S00, exp_S00]), np.concatenate([S01, exp_S01]),
         np.concatenate([S11, exp_S11]),
-        LADDER_AP_FACS * Sw[0, 0], LADDER_AP_FACS * Sw[0, 1],
-        LADDER_AP_FACS * Sw[1, 1], zero, zero,
+        LADDER_AP_FACS * wt_cov[0, 0], LADDER_AP_FACS * wt_cov[0, 1],
+        LADDER_AP_FACS * wt_cov[1, 1], zero, zero,
     )[..., _FLUX_INDEX]
     rung_sums = flux_sums[:, :K]                    # (nap, K)
     exp_sums = flux_sums[:, K:] @ exp_fracs         # (nap,)
@@ -404,27 +404,27 @@ def ladder_context(deb):
     """
     The ladder objects of a group and their per-object quantities.
 
-    Returns (idx, aps, Sws, Tws, Fhat) at the current state, see the
+    Returns (idx, aps, wt_covs, Tws, Fhat) at the current state, see the
     module docstring.
     """
     idx = [
         i for i, m in enumerate(deb.models) if m['type'] == 'ladder'
     ]
     aps = []
-    Sws = []
+    wt_covs = []
     Tws = np.zeros(len(idx))
     Fhat = np.zeros((len(idx), deb.nband))
     for io, i in enumerate(idx):
-        Sw = np.asarray(deb.Sw[i])
-        Sws.append(Sw)
-        Tws[io] = Sw[0, 0] + Sw[1, 1]
-        aps.append([af * Sw for af in LADDER_AP_FACS])
+        wt_cov = np.asarray(deb.wt_cov[i])
+        wt_covs.append(wt_cov)
+        Tws[io] = wt_cov[0, 0] + wt_cov[1, 1]
+        aps.append([af * wt_cov for af in LADDER_AP_FACS])
         F = deb.models[i]['F']
         Fhat[io] = np.where(
             np.isfinite(F) & (np.abs(F) > 1.0e-12),
             np.abs(F), 1.0e-12,
         )
-    return idx, aps, Sws, Tws, Fhat
+    return idx, aps, wt_covs, Tws, Fhat
 
 
 def _others_comps(deb):
@@ -445,7 +445,7 @@ def _others_comps(deb):
     return others
 
 
-def _row_weights(deb, idx, aps, Sws):
+def _row_weights(deb, idx, aps, wt_covs):
     """
     The row weights of the ladder system in row order.
 
@@ -463,8 +463,8 @@ def _row_weights(deb, idx, aps, Sws):
         for j, w in enumerate(aps[io]):
             W[r0 + j] = (w[0, 0], w[0, 1], w[1, 1])
         for r in range(nap, nrows):
-            Sw = Sws[io]
-            W[r0 + r] = (Sw[0, 0], Sw[0, 1], Sw[1, 1])
+            wt_cov = wt_covs[io]
+            W[r0 + r] = (wt_cov[0, 0], wt_cov[0, 1], wt_cov[1, 1])
             is_t_row[r0 + r] = True
         rpos[r0:r0 + nrows] = deb.positions[i]
     return W[:, 0], W[:, 1], W[:, 2], rpos, is_t_row
@@ -622,7 +622,7 @@ def ladder_apsums(kim, iy, ix, dim, alpha, beta, kv, ku,
         flux[j] *= df2
 
 
-def _measure_object_rows(deb, i, Sw, need_var):
+def _measure_object_rows(deb, i, wt_cov, need_var):
     """
     The rows of one ladder object from the fused pass over its epochs.
 
@@ -653,7 +653,7 @@ def _measure_object_rows(deb, i, Sw, need_var):
         ladder_apsums(
             ep['kim'], ep['iy'], ep['ix'], ep['dim'],
             alpha, beta, ep['kv'], ep['ku'],
-            Sw[0, 0], Sw[0, 1], Sw[1, 1], ep['df2'],
+            wt_cov[0, 0], wt_cov[0, 1], wt_cov[1, 1], ep['df2'],
             ep['err_fac2'], need_var, flux, sums1, var_raw,
         )
         raw_flux[:, iep] = flux
@@ -668,7 +668,7 @@ def _measure_object_rows(deb, i, Sw, need_var):
     return rows, var, wsum, raw_flux
 
 
-def ladder_measure_rows(deb, idx, Sws, Tws, use_cache=True):
+def ladder_measure_rows(deb, idx, wt_covs, Tws, use_cache=True):
     """
     The measured rows of every ladder object, stacked.
 
@@ -705,14 +705,14 @@ def ladder_measure_rows(deb, idx, Sws, Tws, use_cache=True):
     wsum = np.zeros((nlad, nband))
     raw = []
     for io, i in enumerate(idx):
-        Sw = Sws[io]
+        wt_cov = wt_covs[io]
         sig_entry = sig_cache.get(i) if sig_cache is not None else None
         need_var = (
             sig_entry is None or sig_entry[1].shape != (nrows, nband)
             or abs(sig_entry[0] / Tws[io] - 1) > 0.1
         )
         vi, ui = deb.positions[i]
-        state_key = (vi, ui, Sw[0, 0], Sw[0, 1], Sw[1, 1])
+        state_key = (vi, ui, wt_cov[0, 0], wt_cov[0, 1], wt_cov[1, 1])
         row_entry = row_cache.get(i) if row_cache is not None else None
         if (
             row_entry is not None and row_entry[0] == state_key
@@ -724,7 +724,7 @@ def ladder_measure_rows(deb, idx, Sws, Tws, use_cache=True):
             raw.append(row_entry[3])
             continue
         d[io], var_io, wsum[io], raw_flux = _measure_object_rows(
-            deb, i, Sw, need_var,
+            deb, i, wt_cov, need_var,
         )
         if need_var:
             var[io] = var_io
@@ -740,7 +740,7 @@ def ladder_measure_rows(deb, idx, Sws, Tws, use_cache=True):
     return d, var, wsum, raw
 
 
-def ladder_subtract_others(deb, idx, aps, Sws, wsum, d):
+def ladder_subtract_others(deb, idx, aps, wt_covs, wsum, d):
     """
     Subtract the non-ladder members and fixed externals from the rows.
 
@@ -751,7 +751,7 @@ def ladder_subtract_others(deb, idx, aps, Sws, wsum, d):
     if not others or not idx:
         return
     nlad = len(idx)
-    W00, W01, W11, rpos, is_t_row = _row_weights(deb, idx, aps, Sws)
+    W00, W01, W11, rpos, is_t_row = _row_weights(deb, idx, aps, wt_covs)
     epoch_weights = np.repeat(wsum, nrows, axis=0)     # (nlad nrows, nband)
     for pos, (Fb, oS00, oS01, oS11) in others:
         DV = np.repeat(pos[0] - rpos[:, 0:1], oS00.size, axis=1)
@@ -763,7 +763,7 @@ def ladder_subtract_others(deb, idx, aps, Sws, wsum, d):
         d -= (epoch_weights * contrib).reshape(nlad, nrows, -1)
 
 
-def ladder_template(deb, idx, aps, Sws):
+def ladder_template(deb, idx, aps, wt_covs):
     """
     The band-independent unit template matrix Mt.
 
@@ -773,7 +773,7 @@ def ladder_template(deb, idx, aps, Sws):
     """
     if not idx:
         return np.zeros((0, 0))
-    W00, W01, W11, rpos, is_t_row = _row_weights(deb, idx, aps, Sws)
+    W00, W01, W11, rpos, is_t_row = _row_weights(deb, idx, aps, wt_covs)
     S00, S01, S11, cpos = _rung_comps(deb, idx)
     DV = cpos[None, :, 0] - rpos[:, None, 0]
     DU = cpos[None, :, 1] - rpos[:, None, 1]
@@ -797,14 +797,14 @@ def ladder_neighbor_unit_sums(deb, idx):
     if nlad == 0:
         return np.zeros((nobj, nlad, K, 6))
     pos_all = np.array(deb.positions, dtype='f8')
-    Sw_all = np.array(
-        [[sw[0, 0], sw[0, 1], sw[1, 1]] for sw in deb.Sw], dtype='f8',
+    wt_cov_all = np.array(
+        [[sw[0, 0], sw[0, 1], sw[1, 1]] for sw in deb.wt_cov], dtype='f8',
     )
     S00, S01, S11, cpos = _rung_comps(deb, idx)
     DV = cpos[None, :, 0] - pos_all[:, None, 0]
     DU = cpos[None, :, 1] - pos_all[:, None, 1]
     U = grid_sums(
-        S00, S01, S11, Sw_all[:, 0], Sw_all[:, 1], Sw_all[:, 2], DV, DU,
+        S00, S01, S11, wt_cov_all[:, 0], wt_cov_all[:, 1], wt_cov_all[:, 2], DV, DU,
     ).reshape(nobj, nlad, K, 6)
     for jo, i in enumerate(idx):
         U[i, jo] = 0.0
@@ -815,28 +815,28 @@ def ladder_rows(deb, use_cache):
     """
     Everything the joint solve needs at the current state.
 
-    A dict with the context (idx, aps, Sws, Tws, Fhat), the measured
+    A dict with the context (idx, aps, wt_covs, Tws, Fhat), the measured
     rows d with the non-ladder members subtracted, var, wsum, raw (see
     ladder_measure_rows) and the unit template Mt.  The fit uses the
     caches; the derived functionals and the error setup measure
     afresh.
     """
-    idx, aps, Sws, Tws, Fhat = ladder_context(deb)
+    idx, aps, wt_covs, Tws, Fhat = ladder_context(deb)
     d, var, wsum, raw = ladder_measure_rows(
-        deb, idx, Sws, Tws, use_cache=use_cache,
+        deb, idx, wt_covs, Tws, use_cache=use_cache,
     )
-    ladder_subtract_others(deb, idx, aps, Sws, wsum, d)
+    ladder_subtract_others(deb, idx, aps, wt_covs, wsum, d)
     return {
-        'idx': idx, 'aps': aps, 'Sws': Sws, 'Tws': Tws, 'Fhat': Fhat,
+        'idx': idx, 'aps': aps, 'wt_covs': wt_covs, 'Tws': Tws, 'Fhat': Fhat,
         'd': d, 'var': var, 'wsum': wsum, 'raw': raw,
-        'Mt': ladder_template(deb, idx, aps, Sws),
+        'Mt': ladder_template(deb, idx, aps, wt_covs),
     }
 
 
 # ---------------------------------------------------------------
 # the joint amplitude solve
 
-def ladder_prior(deb, idx, Sws, tol=0.0):
+def ladder_prior(deb, idx, wt_covs, tol=0.0):
     """
     The stacked prior center: the exp profile on each object's rungs.
 
@@ -853,22 +853,22 @@ def ladder_prior(deb, idx, Sws, tol=0.0):
         cache = deb._ladder_prior_cache = {}
     a0 = np.zeros(len(idx) * K)
     for io, i in enumerate(idx):
-        Sw = np.asarray(Sws[io])
+        wt_cov = np.asarray(wt_covs[io])
         entry = cache.get(i)
         hit = False
         if entry is not None:
-            dSw = np.abs(Sw - entry[0]).max()
+            d_wt_cov = np.abs(wt_cov - entry[0]).max()
             if tol <= 0:
-                hit = dSw == 0.0
+                hit = d_wt_cov == 0.0
             else:
-                hit = dSw <= tol * (Sw[0, 0] + Sw[1, 1])
+                hit = d_wt_cov <= tol * (wt_cov[0, 0] + wt_cov[1, 1])
         if hit:
             a0_io = entry[1]
         else:
             a0_io = ladder_exp_fracs(
-                deb.models[i]['rungs'], Sw, deb.Tsmooth,
+                deb.models[i]['rungs'], wt_cov, deb.Tsmooth,
             )
-            cache[i] = (Sw.copy(), a0_io)
+            cache[i] = (wt_cov.copy(), a0_io)
         a0[io * K:(io + 1) * K] = a0_io
     return a0
 
@@ -896,7 +896,7 @@ def ladder_prior_lambda(a0, tau0):
     return lam, -2.0 * a0 * lam / s2
 
 
-def ladder_assemble(deb, idx, var, wsum, Sws, Fhat, Mt, prior_tol=0.0):
+def ladder_assemble(deb, idx, var, wsum, wt_covs, Fhat, Mt, prior_tol=0.0):
     """
     The prior-width-independent solve pieces at the current state.
 
@@ -911,7 +911,7 @@ def ladder_assemble(deb, idx, var, wsum, Sws, Fhat, Mt, prior_tol=0.0):
     nband = deb.nband
     nlad = len(idx)
     Z = nlad * K
-    a0 = ladder_prior(deb, idx, Sws, tol=prior_tol)
+    a0 = ladder_prior(deb, idx, wt_covs, tol=prior_tol)
     lamx = 1.0 / LADDER_TAUX ** 2
     N = nband * Z
     A = np.zeros((N, N))
@@ -968,7 +968,7 @@ def ladder_solve_pieces(deb, idx, d, pieces, tau0=None):
     return new_full
 
 
-def ladder_solve_rows(deb, idx, d, var, wsum, Sws, Fhat, Mt,
+def ladder_solve_rows(deb, idx, d, var, wsum, wt_covs, Fhat, Mt,
                       tau0=None, prior_tol=0.0):
     """
     The regularized joint solve from the assembled rows.
@@ -982,7 +982,7 @@ def ladder_solve_rows(deb, idx, d, var, wsum, Sws, Fhat, Mt,
     ):
         return None
     pieces = ladder_assemble(
-        deb, idx, var, wsum, Sws, Fhat, Mt, prior_tol=prior_tol,
+        deb, idx, var, wsum, wt_covs, Fhat, Mt, prior_tol=prior_tol,
     )
     return ladder_solve_pieces(deb, idx, d, pieces, tau0=tau0)
 
@@ -1049,7 +1049,7 @@ def solve_group_amps(deb):
     if not idx:
         return None
     new_full = ladder_solve_rows(
-        deb, idx, R['d'], R['var'], R['wsum'], R['Sws'], R['Fhat'],
+        deb, idx, R['d'], R['var'], R['wsum'], R['wt_covs'], R['Fhat'],
         R['Mt'], prior_tol=1.0e-2,
     )
     if new_full is None:
@@ -1159,7 +1159,7 @@ def ladder_derived(deb):
     K = LADDER_RUNGS.size
     totals = ladder_solve_rows(
         deb, idx, R['d'], ladder_total_var(R['d'], R['var']), R['wsum'],
-        R['Sws'], R['Fhat'], R['Mt'], tau0=LADDER_TAU_TOTAL,
+        R['wt_covs'], R['Fhat'], R['Mt'], tau0=LADDER_TAU_TOTAL,
     )
     W2, s_star = ladder_fixed_weight(deb.Tsmooth)
     out = {}

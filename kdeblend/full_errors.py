@@ -84,7 +84,7 @@ DS_FAC = 0.1
 # restored around every Jacobian evaluation.  The enumeration is
 # guarded by the restore-fidelity test
 MUTABLE_ATTRS = (
-    'models', 'Sw', 'positions', 'cen_pull', '_sweep_changes',
+    'models', 'wt_cov', 'positions', 'cen_pull', '_sweep_changes',
     '_fscales', '_win_max', '_win_nfail', '_prev_win_max',
     '_prev_win_nfail', '_change_hist', 'hist', '_boost_pre',
     '_boost_unprod', 'nskip', 'nfail',
@@ -117,7 +117,7 @@ def apply_full_errors(deb, mbobs, res, anchor_sigma=0.0):
         (quadrature fallback for a non positive definite
         block).  The gauss-estimator entries
         are replaced too: gauss_T_err, gauss_e1_err and
-        gauss_e2_err from the weight (Sw) rows of the state
+        gauss_e2_err from the weight (wt_cov) rows of the state
         covariance, and gauss_flux, gauss_flux_err, gauss_s2n
         plus the new gauss_flux_cov from the flux response.
         Star members get the flux entries only (flux_err,
@@ -279,7 +279,7 @@ def _apply_structure_errors(robj, cov, ic, L):
 
     # gauss-estimator structure errors from the weight rows: the
     # gauss family is the weight minus the constant smoothing, so
-    # its covariance is the Sw block
+    # its covariance is the wt_cov block
     isw = ic + 3
     gblock = cov[np.ix_(
         [isw, isw + 1, isw + 2], [isw, isw + 1, isw + 2],
@@ -352,7 +352,7 @@ def _full_covariance(deb, mbobs, anchor_sigma, use_chain):
     Ds = [
         [
             dsums_dtheta(
-                ep, deb.Sw[i],
+                ep, deb.wt_cov[i],
                 deb.positions[i][0] - ep['vcen'],
                 deb.positions[i][1] - ep['ucen'],
             )
@@ -486,11 +486,11 @@ def _flux_kernel_and_dtheta(ep, W, v0, u0):
     return base, D
 
 
-def _flux_kernels_and_dtheta_dyadic(ep, Sw, v0, u0):
+def _flux_kernels_and_dtheta_dyadic(ep, wt_cov, v0, u0):
     """
     The flux kernel rows and derivatives of the eight dyadic apertures.
 
-    _flux_kernel_and_dtheta for the apertures a Sw, a = LADDER_AP_FACS,
+    _flux_kernel_and_dtheta for the apertures a wt_cov, a = LADDER_AP_FACS,
     from one evaluation of the shared ingredients: the phase and the
     quadratic form are common, the a=1 weight is one exact
     exponential and the others its square roots and squares, each
@@ -503,8 +503,8 @@ def _flux_kernels_and_dtheta_dyadic(ep, Sw, v0, u0):
     iy = ep['iy'].astype(np.int64)
     ix = ep['ix'].astype(np.int64)
     kv, ku, kim = ep['kv'], ep['ku'], ep['kim']
-    Sv = Sw[0, 0] * kv + Sw[0, 1] * ku
-    Su = Sw[0, 1] * kv + Sw[1, 1] * ku
+    Sv = wt_cov[0, 0] * kv + wt_cov[0, 1] * ku
+    Su = wt_cov[0, 1] * kv + wt_cov[1, 1] * ku
     chi2 = kv * Sv + ku * Su
     yf = np.where(iy < (dim + 1) // 2, iy, iy - dim)
     xf = np.where(ix < (dim + 1) // 2, ix, ix - dim)
@@ -554,7 +554,7 @@ def _ladder_setup(deb, epochs):
     rebuilds them where they are consumed.
     """
     R = ladder_rows(deb, use_cache=False)
-    idx, aps, Sws = R['idx'], R['aps'], R['Sws']
+    idx, aps, wt_covs = R['idx'], R['aps'], R['wt_covs']
     d, var, wsum, raw = R['d'], R['var'], R['wsum'], R['raw']
     nap = LADDER_AP_FACS.size
     Dap = []
@@ -566,7 +566,7 @@ def _ladder_setup(deb, epochs):
             # complex per object-epoch is GBs on a large group;
             # _cov_sums rebuilds them where they are consumed
             _, D = _flux_kernels_and_dtheta_dyadic(
-                ep, Sws[io], v0 - ep['vcen'], u0 - ep['ucen'],
+                ep, wt_covs[io], v0 - ep['vcen'], u0 - ep['ucen'],
             )
             for j in range(nap):
                 Dio[j].append(D[j])
@@ -574,7 +574,7 @@ def _ladder_setup(deb, epochs):
     return {
         'idx': idx, 'nap': nap, 'var': var, 'wsum': wsum,
         'var_total': ladder_total_var(d, var),
-        'raw': raw, 'Dap': Dap, 'aps0': aps, 'Sws0': Sws,
+        'raw': raw, 'Dap': Dap, 'aps0': aps, 'wt_covs0': wt_covs,
     }
 
 
@@ -591,7 +591,7 @@ def _ladder_rows_at(deb, L, caches, Ds, theta0s, dap, dT):
     """
     idx = L['idx']
     nap = L['nap']
-    _, aps, Sws, Tws, Fhat = ladder_context(deb)
+    _, aps, wt_covs, Tws, Fhat = ladder_context(deb)
     nband = deb.nband
     nlad = len(idx)
     nmom = len(t_row_indices())
@@ -616,12 +616,12 @@ def _ladder_rows_at(deb, L, caches, Ds, theta0s, dap, dT):
                     + dT.get((i, iep, a), 0.0)
                 )
                 d[io, nap + r, band] += fac * s
-    ladder_subtract_others(deb, idx, aps, Sws, L['wsum'], d)
-    Mt = ladder_template(deb, idx, aps, Sws)
+    ladder_subtract_others(deb, idx, aps, wt_covs, L['wsum'], d)
+    Mt = ladder_template(deb, idx, aps, wt_covs)
     if not (np.all(np.isfinite(d)) and np.all(np.isfinite(Mt))):
         raise LadderResolveError('non-finite ladder rows')
     pieces = ladder_assemble(
-        deb, idx, L['var'], L['wsum'], Sws, Fhat, Mt,
+        deb, idx, L['var'], L['wsum'], wt_covs, Fhat, Mt,
     )
     if L['var_total'] is L['var']:
         pieces_total = pieces
@@ -629,9 +629,9 @@ def _ladder_rows_at(deb, L, caches, Ds, theta0s, dap, dT):
         # the total-flux solve sees the capped rows (frozen
         # weights, like the others)
         pieces_total = ladder_assemble(
-            deb, idx, L['var_total'], L['wsum'], Sws, Fhat, Mt,
+            deb, idx, L['var_total'], L['wsum'], wt_covs, Fhat, Mt,
         )
-    return {'Sws': Sws, 'Fhat': Fhat, 'd': d, 'Mt': Mt,
+    return {'wt_covs': wt_covs, 'Fhat': Fhat, 'd': d, 'Mt': Mt,
             'pieces': pieces, 'pieces_total': pieces_total}
 
 
@@ -777,8 +777,8 @@ def _ladder_state_response(deb, snap, x0, L, caches, Ds, theta0s,
     Mt = ctx['Mt']
     _, _, _, css, a0 = ctx['pieces']
     pieces_of = {tau: _pieces_for(ctx, tau) for tau in taus}
-    Sws = ctx['Sws']
-    aps = [[af * Sws[io] for af in LADDER_AP_FACS] for io in range(nlad)]
+    wt_covs = ctx['wt_covs']
+    aps = [[af * wt_covs[io] for af in LADDER_AP_FACS] for io in range(nlad)]
     Ainv = {}
     X = {}
     amps = {}
@@ -810,7 +810,7 @@ def _ladder_state_response(deb, snap, x0, L, caches, Ds, theta0s,
         Minus the others' contribution only, on zero data rows.
         """
         dd = np.zeros((nlad, nrows, nband))
-        ladder_subtract_others(deb, idx, aps, Sws, wsum, dd)
+        ladder_subtract_others(deb, idx, aps, wt_covs, wsum, dd)
         return dd
 
     def chain(dMt, dd, da0, dcss):
@@ -856,7 +856,7 @@ def _ladder_state_response(deb, snap, x0, L, caches, Ds, theta0s,
             ])
         return out
 
-    Tw0 = deb.Sw[0][0, 0] + deb.Sw[0][1, 1]
+    Tw0 = deb.wt_cov[0][0, 0] + deb.wt_cov[0][1, 1]
     h_cov = 1.0e-6 * max(Tw0, 0.1)
     h_pos = 1.0e-6
     zero_css = [np.zeros(Z) for _ in range(nband)]
@@ -886,31 +886,31 @@ def _ladder_state_response(deb, snap, x0, L, caches, Ds, theta0s,
                 continue
             elif kind == 'sw':
                 r, c = _SYM[sub]
-                Sw0 = deb.Sw[k]
+                wt_cov0 = deb.wt_cov[k]
                 rungs0 = m['rungs']
                 Mts = []
                 a0s = []
                 dds = []
                 us = []
                 for sgn in (1.0, -1.0):
-                    Swp = Sw0.copy()
-                    Swp[r, c] += sgn * h_cov
-                    Swp[c, r] = Swp[r, c]
-                    deb.Sw[k] = Swp
-                    m['rungs'] = ladder_rung_covs(Swp, deb.Tsmooth)
-                    Sws[io] = Swp
-                    aps[io] = [af * Swp for af in LADDER_AP_FACS]
-                    Mts.append(ladder_template(deb, idx, aps, Sws))
+                    wt_cov_p = wt_cov0.copy()
+                    wt_cov_p[r, c] += sgn * h_cov
+                    wt_cov_p[c, r] = wt_cov_p[r, c]
+                    deb.wt_cov[k] = wt_cov_p
+                    m['rungs'] = ladder_rung_covs(wt_cov_p, deb.Tsmooth)
+                    wt_covs[io] = wt_cov_p
+                    aps[io] = [af * wt_cov_p for af in LADDER_AP_FACS]
+                    Mts.append(ladder_template(deb, idx, aps, wt_covs))
                     a0s.append(ladder_exp_fracs(
-                        m['rungs'], Swp, deb.Tsmooth,
+                        m['rungs'], wt_cov_p, deb.Tsmooth,
                     ))
                     dds.append(others_rows())
                     S00, S01, S11 = m['rungs']
                     us.append(unit_flux_sums(S00, S01, S11, W2) / s_star)
-                deb.Sw[k] = Sw0
+                deb.wt_cov[k] = wt_cov0
                 m['rungs'] = rungs0
-                Sws[io] = Sw0
-                aps[io] = [af * Sw0 for af in LADDER_AP_FACS]
+                wt_covs[io] = wt_cov0
+                aps[io] = [af * wt_cov0 for af in LADDER_AP_FACS]
                 dMt = (Mts[0] - Mts[1]) / (2 * h_cov)
                 da0[blk] = (a0s[0] - a0s[1]) / (2 * h_cov)
                 dd += (dds[0] - dds[1]) / (2 * h_cov)
@@ -936,7 +936,7 @@ def _ladder_state_response(deb, snap, x0, L, caches, Ds, theta0s,
                     pp = list(pos0)
                     pp[sub] += sgn * h_pos
                     deb.positions[k] = tuple(pp)
-                    Mts.append(ladder_template(deb, idx, aps, Sws))
+                    Mts.append(ladder_template(deb, idx, aps, wt_covs))
                     dds.append(others_rows())
                 deb.positions[k] = pos0
                 dMt = (Mts[0] - Mts[1]) / (2 * h_pos)
@@ -1068,10 +1068,10 @@ def _ladder_derivs(deb, snap, x0, L, caches, Ds, theta0s, cols,
     nlad = len(idx)
     Z = nlad * K
     nrows = nap + nmom
-    _, aps, Sws, Tws, Fhat = ladder_context(deb)
-    Mt = ladder_template(deb, idx, aps, Sws)
+    _, aps, wt_covs, Tws, Fhat = ladder_context(deb)
+    Mt = ladder_template(deb, idx, aps, wt_covs)
     A, Mws, sigs, css, a0 = ladder_assemble(
-        deb, idx, L['var'], L['wsum'], Sws, Fhat, Mt,
+        deb, idx, L['var'], L['wsum'], wt_covs, Fhat, Mt,
     )
     lam, _ = ladder_prior_lambda(a0, LADDER_TAU0)
     Ainv = np.linalg.inv(A + np.diag(np.tile(lam, nband)))
@@ -1142,8 +1142,8 @@ def _ladder_functional_covs(deb, snap, x0, L, caches, Ds, theta0s,
 
     # direct data channel at the solution
     _restore_state(deb, snap)
-    _, aps, Sws, Tws, Fhat = ladder_context(deb)
-    Mt = ladder_template(deb, idx, aps, Sws)
+    _, aps, wt_covs, Tws, Fhat = ladder_context(deb)
+    Mt = ladder_template(deb, idx, aps, wt_covs)
     us = list(ladder_fixed_units(deb, idx, W2, s_star))
     Rd = {
         'fixed': np.zeros((nlad, nband, nS)),
@@ -1153,7 +1153,7 @@ def _ladder_functional_covs(deb, snap, x0, L, caches, Ds, theta0s,
                               ('total', LADDER_TAU_TOTAL,
                                L['var_total'])):
         A0, Mws, sigs, css, a0_w = ladder_assemble(
-            deb, idx, var_w, L['wsum'], Sws, Fhat, Mt,
+            deb, idx, var_w, L['wsum'], wt_covs, Fhat, Mt,
         )
         lam_w, _ = ladder_prior_lambda(a0_w, tau)
         Ainv = np.linalg.inv(A0 + np.diag(np.tile(lam_w, nband)))
@@ -1452,7 +1452,7 @@ def _object_layout(deb):
 
 
 def _theta_of(deb, i):
-    sw = deb.Sw[i]
+    sw = deb.wt_cov[i]
     v, u = deb.positions[i]
     return np.array([sw[0, 0], sw[0, 1], sw[1, 1], v, u])
 
@@ -1465,7 +1465,7 @@ def _data_esums(deb, i, ep):
     alpha, beta = get_phase_angles(
         ep, vi - ep['vcen'], ui - ep['ucen'],
     )
-    sw = deb.Sw[i]
+    sw = deb.wt_cov[i]
     sums = np.zeros(6)
     admom_ksums(
         ep['kim'], ep['iy'], ep['ix'], ep['dim'], alpha, beta,
@@ -1630,11 +1630,11 @@ def _cov_sums(deb, obs_flat, epochs, L=None, subsample=True):
 
         for i in range(nobj):
             pend.append(moment_kernels(
-                ep, deb.Sw[i],
+                ep, deb.wt_cov[i],
                 deb.positions[i][0] - ep['vcen'],
                 deb.positions[i][1] - ep['ucen'],
             ))
-            pext.append(np.full(6, extent(deb.Sw[i])))
+            pext.append(np.full(6, extent(deb.wt_cov[i])))
             npend += 6
             if npend >= _KERNEL_CHUNK:
                 flush()
@@ -1642,11 +1642,11 @@ def _cov_sums(deb, obs_flat, epochs, L=None, subsample=True):
         for io, i in enumerate(lidx):
             v0, u0 = deb.positions[i]
             G, _ = _flux_kernels_and_dtheta_dyadic(
-                ep, L['Sws0'][io], v0 - ep['vcen'], u0 - ep['ucen'],
+                ep, L['wt_covs0'][io], v0 - ep['vcen'], u0 - ep['ucen'],
             )
             pend.append(G)
             pext.append(np.array([
-                extent(af * L['Sws0'][io]) for af in LADDER_AP_FACS
+                extent(af * L['wt_covs0'][io]) for af in LADDER_AP_FACS
             ]))
             npend += nap
             if npend >= _KERNEL_CHUNK:
@@ -1834,7 +1834,7 @@ def _covkey(m):
 _SYM = [(0, 0), (0, 1), (1, 1)]
 
 
-def _pair_sums(deb, i, j, Sw=None):
+def _pair_sums(deb, i, j, wt_cov=None):
     """
     The sums of model j alone under object i's weight.
 
@@ -1843,8 +1843,8 @@ def _pair_sums(deb, i, j, Sw=None):
     """
     from .ladder import band_comps
     vi, ui = deb.positions[i]
-    if Sw is None:
-        Sw = deb.Sw[i]
+    if wt_cov is None:
+        wt_cov = deb.wt_cov[i]
     Fb, So00, So01, So11 = band_comps(deb.models[j], deb.Tsmooth)
     pj = deb.positions[j]
     dv = np.full(So00.size, pj[0] - vi)
@@ -1853,7 +1853,7 @@ def _pair_sums(deb, i, j, Sw=None):
     for band in range(deb.nband):
         gauss_comps_ksums(
             np.ascontiguousarray(Fb[band]), So00, So01, So11, dv, du,
-            Sw[0, 0], Sw[0, 1], Sw[1, 1], 1.0, out[band],
+            wt_cov[0, 0], wt_cov[0, 1], wt_cov[1, 1], 1.0, out[band],
         )
     return out
 
@@ -1875,15 +1875,15 @@ def _model_sum_derivs(deb, cols):
     """
     nobj = deb.nobj
     nband = deb.nband
-    Tw = deb.Sw[0][0, 0] + deb.Sw[0][1, 1]
+    Tw = deb.wt_cov[0][0, 0] + deb.wt_cov[0][1, 1]
     h_cov = 1.0e-6 * max(Tw, 0.1)
     h_pos = 1.0e-6
 
     dNS = {}
     dPS = {}
 
-    def ns(i, Sw=None):
-        return deb._get_neighbor_sums(i, Sw=Sw)
+    def ns(i, wt_cov=None):
+        return deb._get_neighbor_sums(i, wt_cov=wt_cov)
 
     def pair(i, k):
         return _pair_sums(deb, i, k)
@@ -1892,8 +1892,8 @@ def _model_sum_derivs(deb, cols):
         m = deb.models[k]
         if kind == 'sw':
             r, c = _SYM[sub]
-            swp = deb.Sw[k].copy()
-            swm = deb.Sw[k].copy()
+            swp = deb.wt_cov[k].copy()
+            swm = deb.wt_cov[k].copy()
             swp[r, c] += h_cov
             swp[c, r] = swp[r, c]
             swm[r, c] -= h_cov
@@ -1901,10 +1901,10 @@ def _model_sum_derivs(deb, cols):
             if m['type'] == 'ladder':
                 rungs0 = m['rungs']
                 m['rungs'] = ladder_rung_covs(swp, deb.Tsmooth)
-                nsp = [ns(k, Sw=swp) if i == k else pair(i, k)
+                nsp = [ns(k, wt_cov=swp) if i == k else pair(i, k)
                        for i in range(nobj)]
                 m['rungs'] = ladder_rung_covs(swm, deb.Tsmooth)
-                nsm = [ns(k, Sw=swm) if i == k else pair(i, k)
+                nsm = [ns(k, wt_cov=swm) if i == k else pair(i, k)
                        for i in range(nobj)]
                 m['rungs'] = rungs0
                 for i in range(nobj):
@@ -1913,15 +1913,15 @@ def _model_sum_derivs(deb, cols):
                         dNS[(i, ic)] = d
             else:
                 dNS[(k, ic)] = (
-                    ns(k, Sw=swp) - ns(k, Sw=swm)
+                    ns(k, wt_cov=swp) - ns(k, wt_cov=swm)
                 ) / (2 * h_cov)
             if m['type'] in ('exp', 'dev', 'bdf'):
-                sw0 = deb.Sw[k]
-                deb.Sw[k] = swp
+                sw0 = deb.wt_cov[k]
+                deb.wt_cov[k] = swp
                 psp = deb._get_predicted_sums(k)
-                deb.Sw[k] = swm
+                deb.wt_cov[k] = swm
                 psm = deb._get_predicted_sums(k)
-                deb.Sw[k] = sw0
+                deb.wt_cov[k] = sw0
                 dPS[(k, ic)] = (psp - psm) / (2 * h_cov)
         elif kind == 'cen':
             pos0 = deb.positions[k]
@@ -2003,22 +2003,22 @@ def _model_sum_derivs_full(deb, cols):
     change of the column quantity.
     """
     nobj = deb.nobj
-    Tw = deb.Sw[0][0, 0] + deb.Sw[0][1, 1]
+    Tw = deb.wt_cov[0][0, 0] + deb.wt_cov[0][1, 1]
     h_cov = 1.0e-6 * max(Tw, 0.1)
     h_pos = 1.0e-6
 
     dNS = {}
     dPS = {}
 
-    def ns(i, Sw=None):
-        return deb._get_neighbor_sums(i, Sw=Sw)
+    def ns(i, wt_cov=None):
+        return deb._get_neighbor_sums(i, wt_cov=wt_cov)
 
     for ic, (k, kind, sub) in enumerate(cols):
         m = deb.models[k]
         if kind == 'sw':
             r, c = _SYM[sub]
-            swp = deb.Sw[k].copy()
-            swm = deb.Sw[k].copy()
+            swp = deb.wt_cov[k].copy()
+            swm = deb.wt_cov[k].copy()
             swp[r, c] += h_cov
             swp[c, r] = swp[r, c]
             swm[r, c] -= h_cov
@@ -2029,10 +2029,10 @@ def _model_sum_derivs_full(deb, cols):
                 # own response is the analytic chain)
                 rungs0 = m['rungs']
                 m['rungs'] = ladder_rung_covs(swp, deb.Tsmooth)
-                nsp = [ns(i, Sw=swp if i == k else None)
+                nsp = [ns(i, wt_cov=swp if i == k else None)
                        for i in range(nobj)]
                 m['rungs'] = ladder_rung_covs(swm, deb.Tsmooth)
-                nsm = [ns(i, Sw=swm if i == k else None)
+                nsm = [ns(i, wt_cov=swm if i == k else None)
                        for i in range(nobj)]
                 m['rungs'] = rungs0
                 for i in range(nobj):
@@ -2042,15 +2042,15 @@ def _model_sum_derivs_full(deb, cols):
             else:
                 # only object k's own sums use its weight
                 dNS[(k, ic)] = (
-                    ns(k, Sw=swp) - ns(k, Sw=swm)
+                    ns(k, wt_cov=swp) - ns(k, wt_cov=swm)
                 ) / (2 * h_cov)
             if m['type'] in ('exp', 'dev', 'bdf'):
-                sw0 = deb.Sw[k]
-                deb.Sw[k] = swp
+                sw0 = deb.wt_cov[k]
+                deb.wt_cov[k] = swp
                 psp = deb._get_predicted_sums(k)
-                deb.Sw[k] = swm
+                deb.wt_cov[k] = swm
                 psm = deb._get_predicted_sums(k)
-                deb.Sw[k] = sw0
+                deb.wt_cov[k] = sw0
                 dPS[(k, ic)] = (psp - psm) / (2 * h_cov)
         elif kind == 'cen':
             # object k's own weighted sums move with its center,
@@ -2128,13 +2128,13 @@ def _gauss_flux_covs(deb, caches, Ds, dNS, cols, slices,
     """
     The gauss-estimator fluxes and their cross-band covariance per object.
 
-    F_b = 4 pi sqrt(det Sw) fs_b / ws_b and its (nband, nband)
+    F_b = 4 pi sqrt(det wt_cov) fs_b / ws_b and its (nband, nband)
     covariance, as {'gauss_flux', 'gauss_flux_cov'} lists with None
     entries for stars.  fs_b is linear in the data at the converged
     state, so the response is the direct data channel plus the chain
     through the state: the own kernel (weight and center) via the
     analytic data-sum derivatives, the neighbor subtraction via the
-    model-sum derivatives, and the explicit sqrt(det Sw)
+    model-sum derivatives, and the explicit sqrt(det wt_cov)
     normalization; the anchor response is added when present.  The
     per-epoch weights ws_b are fixed at prep, so they carry no state
     dependence.
@@ -2154,8 +2154,8 @@ def _gauss_flux_covs(deb, caches, Ds, dNS, cols, slices,
     fluxes = []
     covs = []
     for i in range(nobj):
-        Sw = deb.Sw[i]
-        detS = Sw[0, 0] * Sw[1, 1] - Sw[0, 1] ** 2
+        wt_cov = deb.wt_cov[i]
+        detS = wt_cov[0, 0] * wt_cov[1, 1] - wt_cov[0, 1] ** 2
         if deb.models[i]['type'] == 'star' or detS <= 0:
             fluxes.append(None)
             covs.append(None)
@@ -2183,7 +2183,7 @@ def _gauss_flux_covs(deb, caches, Ds, dNS, cols, slices,
 
         # d ln cnorm / d(sw3)
         dlnc = np.array([
-            Sw[1, 1], -2.0 * Sw[0, 1], Sw[0, 0],
+            wt_cov[1, 1], -2.0 * wt_cov[0, 1], wt_cov[0, 0],
         ]) / (2.0 * detS)
 
         gx = np.zeros((nband, npars))
@@ -2525,7 +2525,7 @@ def _phi_healthy(deb, i, sums, fs, ws, pred, fs_pred):
 
     At the given converged inputs, or None when the evaluation takes
     a guarded branch.  Output rows follow the packed block layout
-    [F, (cen), cov, Sw] in PHYSICAL units; the caller applies the
+    [F, (cen), cov, wt_cov] in PHYSICAL units; the caller applies the
     packing scales.
     """
     from .deblender import (
@@ -2544,15 +2544,15 @@ def _phi_healthy(deb, i, sums, fs, ws, pred, fs_pred):
     per = nband + (2 if rc else 0) + 6
     nrow = per
 
-    Swold = deb.Sw[i]
+    wt_cov_old = deb.wt_cov[i]
     Mm, dMm = _dmm_dsums(sums)
-    newSw, DWm_M, DWm_S, ok = _dw_derivs(
-        _sym3_mat(Mm), Swold,
+    new_wt_cov, DWm_M, DWm_S, ok = _dw_derivs(
+        _sym3_mat(Mm), wt_cov_old,
     )
     if not ok:
         return None
 
-    # rows: F [0:nband], cen [nband:nband+2] if rc, cov, Sw
+    # rows: F [0:nband], cen [nband:nband+2] if rc, cov, wt_cov
     icen = nband
     icov = nband + (2 if rc else 0)
     isw = icov + 3
@@ -2566,24 +2566,24 @@ def _phi_healthy(deb, i, sums, fs, ws, pred, fs_pred):
     dswold = np.zeros((nrow, 3))
     dpos = np.zeros((nrow, 2))
 
-    # the weight rows: newSw = DW(Mm, Swold) for every type
+    # the weight rows: new_wt_cov = DW(Mm, wt_cov_old) for every type
     dsums[isw:isw + 3] = DWm_M @ dMm
     dswold[isw:isw + 3] = DWm_S
 
     if mtype in ('gauss', 'ladder'):
-        # cov_sm = Sw = newSw (the ladder's weight/flux update is
+        # cov_sm = wt_cov = new_wt_cov (the ladder's weight/flux update is
         # the gauss path; its amps are not state, see
         # _ladder_setup)
         dsums[icov:icov + 3] = dsums[isw:isw + 3]
         dswold[icov:icov + 3] = dswold[isw:isw + 3]
-        # matched flux: F_b = fs_b / ws_b * 2 pi sqrt(det(Swold
-        # + newSw))
-        dd, sq = _ddetsqrt(Swold + newSw)
+        # matched flux: F_b = fs_b / ws_b * 2 pi sqrt(det(wt_cov_old
+        # + new_wt_cov))
+        dd, sq = _ddetsqrt(wt_cov_old + new_wt_cov)
         fac = 2.0 * np.pi * sq / ws
         for b in range(nband):
             dfs[b, b] = fac[b]
             pref = fs[b] / ws[b] * 2.0 * np.pi
-            # through newSw (sums, Swold) and directly Swold
+            # through new_wt_cov (sums, wt_cov_old) and directly wt_cov_old
             dsums[b] = pref * (
                 dd @ dsums[isw:isw + 3]
             )
@@ -2591,19 +2591,19 @@ def _phi_healthy(deb, i, sums, fs, ws, pred, fs_pred):
                 dd @ (dswold[isw:isw + 3] + np.eye(3))
             )
     else:
-        # exp/dev mixture: shift = newSw - DW(Mp) (main branch)
+        # exp/dev mixture: shift = new_wt_cov - DW(Mp) (main branch)
         # or the ratio fallback; prop = cov_old + shift
         Mp, dMp = _dmm_dsums(pred)
         Sp, DWp_M, DWp_S, pok = _dw_derivs(
-            _sym3_mat(Mp), Swold,
+            _sym3_mat(Mp), wt_cov_old,
         )
         if pok:
             dcov_dsums = DWm_M @ dMm
             dcov_dpred = -(DWp_M @ dMp)
             dcov_dswold = DWm_S - DWp_S
             shift3 = np.array([
-                newSw[0, 0] - Sp[0, 0], newSw[0, 1] - Sp[0, 1],
-                newSw[1, 1] - Sp[1, 1],
+                new_wt_cov[0, 0] - Sp[0, 0], new_wt_cov[0, 1] - Sp[0, 1],
+                new_wt_cov[1, 1] - Sp[1, 1],
             ])
         else:
             # gain-1 ratio fallback
@@ -2805,7 +2805,7 @@ def _analytic_ABPC(deb, i, phi, epochs, slices, pers):
                     colp = colp + wband[band] * dfsp[:, band]
                 Pi[:, band * 6 + a] = colp / rs
 
-    # C: own-block packed columns [F, (cen), cov, Sw]
+    # C: own-block packed columns [F, (cen), cov, wt_cov]
     Ci = np.zeros((per, per))
     icen = phi['icen']
     icov = phi['icov']

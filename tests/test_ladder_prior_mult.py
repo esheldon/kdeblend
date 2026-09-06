@@ -116,8 +116,8 @@ def _single(flux_scale, seed, mode, floor=0.05):
     res = deb.go()
     assert res['converged']
     assert res['objects'][0]['type'] == 'ladder'
-    idx, aps, Sws, Tws, Fhat = ladder_context(deb)
-    a0 = ladder.ladder_prior(deb, idx, Sws)
+    idx, aps, wt_covs, Tws, Fhat = ladder_context(deb)
+    a0 = ladder.ladder_prior(deb, idx, wt_covs)
     x = res['objects'][0]['amps'] / Fhat[0][:, None]
     return x, a0, res
 

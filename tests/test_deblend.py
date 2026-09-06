@@ -28,12 +28,12 @@ def test_closed_form_sums():
 
     # measure with the weight centered on a different location
     vw, uw = -0.1, -1.5
-    Sw = np.diag([(0.5 + TSMOOTH) / 2] * 2)
+    wt_cov = np.diag([(0.5 + TSMOOTH) / 2] * 2)
     esums = np.zeros(6)
     alpha, beta = get_phase_angles(ep, vw, uw)
     admom_ksums(
         ep['kim'], ep['iy'], ep['ix'], ep['dim'], alpha, beta,
-        ep['kv'], ep['ku'], Sw[0, 0], Sw[0, 1], Sw[1, 1], ep['df2'],
+        ep['kv'], ep['ku'], wt_cov[0, 0], wt_cov[0, 1], wt_cov[1, 1], ep['df2'],
         esums,
     )
 
@@ -44,7 +44,7 @@ def test_closed_form_sums():
         'F': np.array([comp['flux']]),
     }
     csums = model_ksums(
-        model, 0, comp['v'] - vw, comp['u'] - uw, Sw,
+        model, 0, comp['v'] - vw, comp['u'] - uw, wt_cov,
         ep['detAtinv'], TSMOOTH,
     )
 

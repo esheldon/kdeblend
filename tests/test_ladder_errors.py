@@ -150,7 +150,7 @@ def test_flux_kernel_and_dtheta_matches_ngmix():
 )
     deb.go()
     for ep in deb.epochs_per_obj[0]:
-        W = 2.7 * np.asarray(deb.Sw[0]) + np.array([[0.0, 0.03],
+        W = 2.7 * np.asarray(deb.wt_cov[0]) + np.array([[0.0, 0.03],
                                                      [0.03, 0.0]])
         v0 = deb.positions[0][0] - ep['vcen']
         u0 = deb.positions[0][1] - ep['ucen']
@@ -178,13 +178,13 @@ def test_flux_kernels_dyadic_match_per_aperture():
     rng=np.random.RandomState(1),
 )
     deb.go()
-    Sw = np.asarray(deb.Sw[0]) + np.array([[0.0, 0.03], [0.03, 0.0]])
+    wt_cov = np.asarray(deb.wt_cov[0]) + np.array([[0.0, 0.03], [0.03, 0.0]])
     for ep in deb.epochs_per_obj[0]:
         v0 = deb.positions[0][0] - ep['vcen']
         u0 = deb.positions[0][1] - ep['ucen']
-        G, D = _flux_kernels_and_dtheta_dyadic(ep, Sw, v0, u0)
+        G, D = _flux_kernels_and_dtheta_dyadic(ep, wt_cov, v0, u0)
         for j, af in enumerate(LADDER_AP_FACS):
-            Gj, Dj = _flux_kernel_and_dtheta(ep, af * Sw, v0, u0)
+            Gj, Dj = _flux_kernel_and_dtheta(ep, af * wt_cov, v0, u0)
             assert np.allclose(G[j], Gj, rtol=1.0e-10, atol=1e-300)
             assert np.allclose(D[j], Dj, rtol=1.0e-8, atol=0)
 
@@ -213,7 +213,7 @@ def test_ladder_state_response_matches_fd(types):
     caches = [[fe._data_esums(deb, i, ep) for ep in epochs]
               for i in range(deb.nobj)]
     from ngmix.prepsfadmom.full_errors import dsums_dtheta
-    Ds = [[dsums_dtheta(ep, deb.Sw[i], deb.positions[i][0] - ep['vcen'],
+    Ds = [[dsums_dtheta(ep, deb.wt_cov[i], deb.positions[i][0] - ep['vcen'],
                         deb.positions[i][1] - ep['ucen'])
            for ep in epochs] for i in range(deb.nobj)]
     theta0s = [fe._theta_of(deb, i) for i in range(deb.nobj)]
