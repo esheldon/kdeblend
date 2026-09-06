@@ -1280,7 +1280,6 @@ def _fd_dFdS(deb, snap, x0, caches, Ds, theta0s, slices, pers,
     dsteps = DS_FAC * np.sqrt(np.diag(covS))
     dFdS = np.zeros((npars, nS))
     lidx = L['idx'] if L is not None else []
-    nmom = len(t_row_indices())
 
     def resolver(dap, dT):
         return functools.partial(
@@ -1656,7 +1655,7 @@ def _cov_sums(deb, obs_flat, epochs, L=None, subsample=True):
         if pend:
             flush()
         hs = np.concatenate(parts, axis=0)
-        del parts
+        parts.clear()
         cb = sums_cov(hs, obs.weight)
         del hs
         rows = []
