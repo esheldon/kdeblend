@@ -96,7 +96,8 @@ def test_bdf_pair():
     ]
     res = deblend(
         obs, objects, fwhm_smooth=FWHM_SMOOTH, tol=TOL,
-    )
+    rng=np.random.RandomState(1),
+)
 
     for c, r in zip(comps, res['objects']):
         assert r['type'] == 'bdf'
@@ -131,7 +132,8 @@ def test_bdf_stamps_single():
         [obs],
         [dict(v=0.0, u=0.0, type='bdf', Tguess=0.4, TdByTe=1.5)],
         fwhm_smooth=FWHM_SMOOTH, tol=TOL,
-    )
+    rng=np.random.RandomState(1),
+)
     r = res['objects'][0]
     assert abs(r['flux'][0] / comp['flux'] - 1) < 2.0e-3
     assert abs(r['T'] / comp['T'] - 1) < 5.0e-3
@@ -157,11 +159,13 @@ def test_bdf_shrinkage_freeze():
         [dict(v=0.0, u=0.0, type='bdf', Tguess=0.4, TdByTe=1.0,
               fracdev0=0.0, fracdev_sigma0=0.0)],
         fwhm_smooth=FWHM_SMOOTH, tol=TOL,
-    )
+    rng=np.random.RandomState(1),
+)
     res_exp = deblend(
         obs, [dict(v=0.0, u=0.0, type='exp', Tguess=0.4)],
         fwhm_smooth=FWHM_SMOOTH, tol=TOL,
-    )
+    rng=np.random.RandomState(1),
+)
     rb = res_bdf['objects'][0]
     re = res_exp['objects'][0]
     assert rb['fracdev'] == 0.0
@@ -199,7 +203,8 @@ def test_bdf_error_calibration():
             [dict(v=0.0, u=0.0, type='bdf', Tguess=0.4,
                   TdByTe=1.0)],
             fwhm_smooth=FWHM_SMOOTH, tol=1.0e-6,
-        )
+    rng=np.random.RandomState(1),
+)
         r = res['objects'][0]
         if r['deblend_flags'] != 0 or r['e_flags'] != 0:
             continue
@@ -232,7 +237,8 @@ def test_bdf_validation():
         deblend(
             obs, [dict(v=0.0, u=0.0, type='bdf', Tguess=0.4)],
             fwhm_smooth=FWHM_SMOOTH,
-        )
+    rng=np.random.RandomState(1),
+)
 
     with pytest.raises(ValueError, match='shrinkage'):
         deblend(
@@ -240,7 +246,8 @@ def test_bdf_validation():
             [dict(v=0.0, u=0.0, type='bdf', Tguess=0.4,
                   TdByTe=1.0, fracdev0=0.0)],
             fwhm_smooth=FWHM_SMOOTH,
-        )
+    rng=np.random.RandomState(1),
+)
 
 
 def test_bdf_fixed_model():
@@ -289,7 +296,8 @@ def test_bdf_fixed_model():
             e1=nbr['e1'], e2=nbr['e2'], T=nbr['T'],
             fracdev=nbr['fracdev'], TdByTe=nbr['TdByTe'],
         )],
-    )
+    rng=np.random.RandomState(1),
+)
     r = res['objects'][0]
     assert abs(r['flux'][0] / target['flux'] - 1) < 5.0e-3
     assert abs(r['e1'] - target['e1']) < 5.0e-3

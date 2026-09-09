@@ -36,8 +36,11 @@ DEFAULT_CHUNK_BYTES = 128 * 1024 ** 2
 
 
 def _prep_class_chunk(reqs, gis, D, entry, kim_parts, ef2_parts):
-    """pad+rfft one chunk of same-(dim, geometry) groups and fill
-    their kim/ef2 slots (see prep_groups)"""
+    """
+    Pad and rfft one chunk of same-(dim, geometry) groups.
+
+    Fills their kim/ef2 slots (see prep_groups).
+    """
     B = len(gis)
     stack = cp.zeros((3 * B, D, D), dtype=cp.float64)
     effs = np.empty(B)
@@ -99,16 +102,19 @@ class _GeomEntry(object):
 
 
 class GeometryCache(object):
-    """device copies of the ngmix k-space grids, keyed like the
-    ngmix lru: (dim, dvdrow, dvdcol, dudrow, dudcol, Tsmooth).
-    The grids are built on the CPU with the exact production code
-    so the retained-mode selection is bitwise the CPU path's,
-    then uploaded once.
+    """
+    Device copies of the ngmix k-space grids.
+
+    Keyed like the ngmix lru: (dim, dvdrow, dvdcol, dudrow, dudcol,
+    Tsmooth).  The grids are built on the CPU with the exact
+    production code so the retained-mode selection is bitwise the
+    CPU path's, then uploaded once.
 
     LRU-bounded: group cutout dims vary freely, so an unbounded
     cache grows for the whole run (a few MB of device arrays per
-    distinct geometry).  Eviction is safe at any time — live
-    PrepSlabs hold direct references to their entries."""
+    distinct geometry).  Eviction is safe at any time -- live
+    PrepSlabs hold direct references to their entries.
+    """
 
     def __init__(self, maxsize=48):
         self._entries = {}
@@ -138,9 +144,12 @@ class GeometryCache(object):
 
 
 class PrepSlab(object):
-    """the resident output of prep_groups: mode CSR device arrays
-    in group order plus per-group geometry references and the
-    host-side measured init sums"""
+    """
+    The resident output of prep_groups.
+
+    Mode CSR device arrays in group order plus per-group geometry
+    references and the host-side measured init sums.
+    """
 
     def __init__(self, kim, ef2, moff, geom_keys, geoms, esums):
         self.kim = kim            # complex128 device, CSR
@@ -307,10 +316,10 @@ def prep_groups(reqs, geom_cache, nt=NT,
 
 def assemble_mode_fields(slab_refs, fp32):
     """
-    concatenate the mode fields of the referenced groups into the
-    kernel-ready device arrays (the device analog of the mode
-    half of to_gpu_multi), casting to the fp32 dtypes when
-    requested.
+    Concatenate the mode fields of the referenced groups for the kernel.
+
+    The device analog of the mode half of to_gpu_multi, casting to
+    the fp32 dtypes when requested.
 
     Parameters
     ----------

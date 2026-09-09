@@ -105,7 +105,7 @@ __device__ int mixture_valid(
     return 1;
 }
 
-// deweight: (M^-1 - Sw^-1)^-1; returns 0 flags ok
+// deweight: (M^-1 - wt_cov^-1)^-1; returns 0 flags ok
 __device__ int deweight(
     double Mvv, double Mvu, double Muu,
     double s00, double s01, double s11,

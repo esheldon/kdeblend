@@ -82,11 +82,12 @@ def view_blend(
     style='dark_background', show=True, file=None,
 ):
     """
-    Show color images of the data, the real-space model and the
-    data - model residual for a deblending result, all with the same
-    asinh mapping, optionally with a segmentation map panel and
-    boxes drawn on every panel.  The object centers are marked on
-    every panel.
+    Show the data, the model and the residual of a deblending result.
+
+    Color images of the data, the real-space model and the data -
+    model residual, all with the same asinh mapping, optionally with
+    a segmentation map panel and boxes drawn on every panel.  The
+    object centers are marked on every panel.
 
     The fitted models are rendered pre-psf and convolved with each
     shown band's psf.  Only the first epoch of each band is shown.
@@ -236,8 +237,9 @@ def view_blend(
 
 def make_color_image(imlist, stretch, Q=DEFAULT_Q):
     """
-    Make an asinh color composite from up to three band images
-    ordered bluest to reddest.
+    Make an asinh color composite from up to three band images.
+
+    The images are ordered bluest to reddest.
 
     Parameters
     ----------
@@ -278,8 +280,9 @@ def make_color_image(imlist, stretch, Q=DEFAULT_Q):
 
 def seg_color_image(seg):
     """
-    Make a categorical color image of a segmentation map, with the
-    background black.
+    Make a categorical color image of a segmentation map.
+
+    The background is black.
 
     Parameters
     ----------
@@ -301,8 +304,11 @@ def seg_color_image(seg):
 
 
 def _get_extent(obs):
-    """imshow extent in sky coordinates relative to the jacobian
-    center, assuming a nearly diagonal jacobian"""
+    """
+    The imshow extent in sky coordinates relative to the jacobian center.
+
+    Assumes a nearly diagonal jacobian.
+    """
     nrow, ncol = obs.image.shape
     jrow, jcol = obs.jacobian.get_cen()
     scale = obs.jacobian.get_scale()
@@ -333,8 +339,11 @@ def _get_image_noise(imlist):
 
 
 def _get_obs_noise(obslist):
-    """median noise sigma from the weight maps, falling back to the
-    images when no weights are set"""
+    """
+    The median noise sigma from the weight maps.
+
+    Falls back to the images when no weights are set.
+    """
     sigmas = []
     for obs in obslist:
         w = obs.weight

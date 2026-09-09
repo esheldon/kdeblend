@@ -336,7 +336,7 @@ __device__ void member_update(
             g.cov[i * 3 + 2] = pr11;
             g.nfail[i] = 0;
         }
-        // Sw moves to measured deweight unless the
+        // wt_cov moves to measured deweight unless the
         // containment intervened
         if (!contained) {
             g.sw[i * 3] = n00;

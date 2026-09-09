@@ -55,7 +55,7 @@ def _make_req(obs, deb, aux, ep_s):
     jac = obs.jacobian
     dv = [p[0] for p in deb.positions]
     du = [p[1] for p in deb.positions]
-    sw = np.array([[s[0, 0], s[0, 1], s[1, 1]] for s in deb.Sw])
+    sw = np.array([[s[0, 0], s[0, 1], s[1, 1]] for s in deb.wt_cov])
     return dict(
         image=np.asarray(obs.image, dtype=np.float64),
         noise=np.asarray(obs.noise, dtype=np.float64),
@@ -136,13 +136,13 @@ def test_init_sums_parity():
         )
         for i in range(deb.nobj):
             vi, ui = deb.positions[i]
-            Sw = deb.Sw[i]
+            wt_cov = deb.wt_cov[i]
             alpha, beta = get_phase_angles(ep, vi, ui)
             sums = np.zeros(6)
             admom_ksums(
                 ep['kim'], ep['iy'], ep['ix'], ep['dim'],
                 alpha, beta, ep['kv'], ep['ku'],
-                Sw[0, 0], Sw[0, 1], Sw[1, 1], ep['df2'],
+                wt_cov[0, 0], wt_cov[0, 1], wt_cov[1, 1], ep['df2'],
                 sums,
             )
             got = slab.esums[0][i]

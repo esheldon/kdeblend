@@ -127,7 +127,7 @@ def test_full_errors_restore_fidelity():
     Ds = [
         [
             dsums_dtheta(
-                ep, deb.Sw[i],
+                ep, deb.wt_cov[i],
                 deb.positions[i][0] - ep['vcen'],
                 deb.positions[i][1] - ep['ucen'],
             )

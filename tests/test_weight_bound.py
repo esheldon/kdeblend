@@ -22,7 +22,8 @@ def make_deblender():
     objects = [dict(v=0.0, u=0.0, type='exp', Tguess=0.5)]
     dbl, _ = build_deblender(
         obs, objects, fwhm_smooth=FWHM_SMOOTH, ap_rad=0,
-    )
+    rng=np.random.RandomState(1),
+)
     return dbl
 
 
@@ -46,13 +47,13 @@ def test_bound_from_stamp():
 
 def test_deweight_rejects_runaway():
     dbl = make_deblender()
-    Sw = dbl.Sw[0]
+    wt_cov = dbl.wt_cov[0]
 
     # measured moments just below the weight: the deweight
-    # (M^-1 - Sw^-1)^-1 is Sw (1 - eps) / eps, a thousand times
+    # (M^-1 - wt_cov^-1)^-1 is wt_cov (1 - eps) / eps, a thousand times
     # the weight, far beyond the stamp
     eps = 1.0e-3
-    sums = sums_for_moments((1 - eps) * Sw)
+    sums = sums_for_moments((1 - eps) * wt_cov)
     assert dbl._deweight_measured(0, sums) is None
     assert dbl.nbound[0] == 1
     assert dbl.dbflags[0] & WEIGHT_BOUNDED
@@ -61,14 +62,14 @@ def test_deweight_rejects_runaway():
     assert dbl.nfail[0] == 0
 
     # the weight itself is untouched by the rejection
-    assert np.array_equal(dbl.Sw[0], Sw)
+    assert np.array_equal(dbl.wt_cov[0], wt_cov)
 
     # measured moments at half the weight deweight to the weight
     # itself, well within the bound
-    sums = sums_for_moments(0.5 * Sw)
-    newSw = dbl._deweight_measured(0, sums)
-    assert newSw is not None
-    assert np.allclose(newSw, Sw)
+    sums = sums_for_moments(0.5 * wt_cov)
+    new_wt_cov = dbl._deweight_measured(0, sums)
+    assert new_wt_cov is not None
+    assert np.allclose(new_wt_cov, wt_cov)
     assert dbl.nbound[0] == 1
 
 
@@ -87,8 +88,9 @@ def test_unbounded_without_entry():
         ),
         [dict(v=0.0, u=0.0, type='exp', Tguess=0.5)],
         fwhm_smooth=FWHM_SMOOTH, ap_rad=0, epochs=epochs,
-    )
+    rng=np.random.RandomState(1),
+)
     assert not np.isfinite(dbl2.Tw_max[0])
-    sums = sums_for_moments((1 - 1.0e-3) * dbl2.Sw[0])
+    sums = sums_for_moments((1 - 1.0e-3) * dbl2.wt_cov[0])
     assert dbl2._deweight_measured(0, sums) is not None
     assert dbl2.nbound[0] == 0

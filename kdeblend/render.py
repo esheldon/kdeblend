@@ -17,11 +17,14 @@ from ngmix.prepsfadmom.models import (
     bdf_comps, cov_from_e, det2, get_profile_comps,
 )
 
+from .ladder import LADDER_RUNGS, _frame_base
 
-def render_model(objects, obs, band):
+
+def render_model(objects, obs, band, Tsmooth=None):
     """
-    Render the summed fitted models for one band in real space,
-    convolved with the psf of the given observation.
+    Render the summed fitted models for one band in real space.
+
+    Convolved with the psf of the given observation.
 
     Parameters
     ----------
@@ -33,12 +36,16 @@ def render_model(objects, obs, band):
         jacobian and image shape.
     band: int
         The band index into the object fluxes.
+    Tsmooth: float, optional
+        The smoothing T of the deblend (the result's 'Tsmooth'
+        entry); required when a ladder object is present, whose
+        rungs are multiples of its frame in the smoothed plane.
 
     Returns
     -------
     image array with the same shape as obs.image
     """
-    parts = [_object_profile(obj, band) for obj in objects]
+    parts = [_object_profile(obj, band, Tsmooth) for obj in objects]
     psf = _get_psf_interp(obs.psf)
     scene = galsim.Convolve(galsim.Add(parts), psf)
 
@@ -53,14 +60,22 @@ def render_model(objects, obs, band):
     ).array
 
 
-def _object_profile(obj, band):
-    """pre-psf galsim profile of a fitted object in one band; the exp
-    model is the 6-gaussian expansion used in the fit"""
+def _object_profile(obj, band, Tsmooth=None):
+    """
+    The pre-psf galsim profile of a fitted object in one band.
+
+    The exp and dev models are the gaussian expansions used in the
+    fit; a ladder is its amplitudes on the rungs of its frame.
+    """
     flux = obj['flux'][band]
     if obj['type'] == 'star':
         p = galsim.DeltaFunction() * flux
     elif obj['type'] == 'gauss':
         p = _gauss_profile(obj['e1'], obj['e2'], obj['T']) * flux
+    elif obj['type'] == 'ladder':
+        if Tsmooth is None:
+            raise ValueError('rendering a ladder object needs Tsmooth')
+        p = _ladder_profile(obj, band, Tsmooth)
     elif obj['type'] == 'bdf':
         # the composite table from the fitted split; a flagged nan
         # split renders as pure exp
@@ -82,10 +97,35 @@ def _object_profile(obj, band):
     return p.shift(dx=obj['cen'][1], dy=obj['cen'][0])
 
 
+def _ladder_profile(obj, band, Tsmooth):
+    """
+    The pre-psf profile of a ladder object in one band.
+
+    The result's e1, e2, T are the gauss-estimator frame the amps
+    were solved in (the weight minus the smoothing), so each rung's
+    pre-smoothing covariance is LADDER_RUNGS[k] times the
+    eigenvalue-floored frame base, exactly as the fit built it.
+    """
+    sm = Tsmooth / 2
+    wt_cov = cov_from_e(obj['e1'], obj['e2'], obj['T']) + np.diag([sm, sm])
+    base = _frame_base(wt_cov, Tsmooth)
+    parts = []
+    for k, rung in enumerate(LADDER_RUNGS):
+        cov = rung * base
+        T = cov[0, 0] + cov[1, 1]
+        e1 = (cov[1, 1] - cov[0, 0]) / T
+        e2 = 2 * cov[0, 1] / T
+        parts.append(_gauss_profile(e1, e2, T) * obj['amps'][band, k])
+    return galsim.Add(parts)
+
+
 def _gauss_profile(e1, e2, T):
-    """galsim gaussian with covariance cov_from_e(e1, e2, T); the
-    size and |e| are limited, and flagged nan shapes render round,
-    so noisy and partially flagged fits still render"""
+    """
+    A galsim gaussian with covariance cov_from_e(e1, e2, T).
+
+    The size and |e| are limited, and flagged nan shapes render
+    round, so noisy and partially flagged fits still render.
+    """
     if not np.isfinite(T):
         T = 0.0
     T = max(T, 1.0e-6)
@@ -101,8 +141,10 @@ def _gauss_profile(e1, e2, T):
 
 
 def _get_psf_interp(psf_obs):
-    """interpolated image of the psf, centered at its jacobian
-    center; includes the pixel, so draw models with method='no_pixel'
+    """
+    The interpolated image of the psf, centered at its jacobian center.
+
+    Includes the pixel, so draw models with method='no_pixel'.
     """
     nrow, ncol = psf_obs.image.shape
     jrow, jcol = psf_obs.jacobian.get_cen()

@@ -53,7 +53,7 @@ _EXPFRAC = ', '.join(f'{f:.17e}' for f, cT in _EXP_COMPS)
 _EXPCT = ', '.join(f'{cT:.17e}' for f, cT in _EXP_COMPS)
 
 GMAX = 64
-SPO = 9         # packed slots per object (F,1 + cen,2 + cov,3 + Sw,3)
+SPO = 9         # packed slots per object (F,1 + cen,2 + cov,3 + wt_cov,3)
 NT = 256
 
 # padded-fft dim scope, set by the kernel's static shared memory
@@ -105,12 +105,15 @@ _CUDA_FILES = (
 
 
 def _load_cuda_source():
-    """read and concatenate the kernel sources, stripping the
-    tooling-only #include/#pragma lines.  Everything lands in the
-    one source string handed to cupy so its on-disk compile cache
-    stays keyed on actual content; an #include resolved by nvrtc
-    at compile time would not be hashed, and editing a header
-    would silently reuse the stale cubin"""
+    """
+    Read and concatenate the kernel sources.
+
+    The tooling-only #include/#pragma lines are stripped.  Everything
+    lands in the one source string handed to cupy so its on-disk
+    compile cache stays keyed on actual content; an #include
+    resolved by nvrtc at compile time would not be hashed, and
+    editing a header would silently reuse the stale cubin.
+    """
     parts = []
     for fname in _CUDA_FILES:
         with open(os.path.join(_CUDA_DIR, fname)) as fobj:
@@ -125,8 +128,11 @@ def _load_cuda_source():
 
 
 def _prologue(nt, dim_tier):
-    """the compile-time configuration and python-derived constant
-    tables, as preprocessor defines prepended to the source"""
+    """
+    The compile-time configuration and python-derived constant tables.
+
+    As preprocessor defines prepended to the source.
+    """
     return '\n'.join([
         f'#define NTHREADS_H {nt}',
         f'#define NEXPC_H {NEXPC}',
@@ -155,9 +161,12 @@ def _get_module(fp32, nt, dim_tier):
 
 
 def get_kernel(fp32=False, nt=NT, dim_max=None):
-    """the deblend kernel compiled at the smallest tier covering
-    dim_max (default: the smallest tier — the common case, also
-    what warmup should compile)"""
+    """
+    The deblend kernel compiled at the smallest tier covering dim_max.
+
+    Default: the smallest tier -- the common case, also what warmup
+    should compile.
+    """
     tier = _tier_for(int(dim_max), fp32) if dim_max is not None \
         else DIM_TIERS[0]
     return _get_module(fp32, nt, tier).get_function(
@@ -165,8 +174,11 @@ def get_kernel(fp32=False, nt=NT, dim_max=None):
 
 
 def get_init_sums_kernel(nt=NT, dim_max=None):
-    """the fp64 per-(group, object) measured-sums kernel used by
-    the device-prep flux initialization (see gpu/prep.py)"""
+    """
+    The fp64 per-(group, object) measured-sums kernel.
+
+    Used by the device-prep flux initialization (see gpu/prep.py).
+    """
     tier = _tier_for(int(dim_max), False) if dim_max is not None \
         else DIM_TIERS[0]
     return _get_module(False, nt, tier).get_function(
@@ -174,9 +186,12 @@ def get_init_sums_kernel(nt=NT, dim_max=None):
 
 
 def _pack_host_impl(debs, with_modes=True):
-    """pack constructed _Deblender instances into host numpy
-    arrays; with_modes=False skips the mode fields (and moff) for
-    deblenders whose mode arrays are device-resident"""
+    """
+    Pack constructed _Deblender instances into host numpy arrays.
+
+    with_modes=False skips the mode fields (and moff) for deblenders
+    whose mode arrays are device-resident.
+    """
     ng = len(debs)
     per = {k: [] for k in
            ['nobj', 'dim', 'df2', 'drow', 'dcol', 'jac', 'wt',
@@ -233,11 +248,11 @@ def _pack_host_impl(debs, with_modes=True):
         from ngmix.prepsfadmom.models import model_comps
         nf = 0
         for p, fm in zip(deb.fpositions, deb.fmodels):
-            fracs, So00, So01, So11 = model_comps(fm, deb.Tsmooth)
+            fracs, cov_sm00, cov_sm01, cov_sm11 = model_comps(fm, deb.Tsmooth)
             for c in range(fracs.size):
                 fixed.append([
-                    fm['F'][0] * fracs[c], So00[c], So01[c],
-                    So11[c], p[0], p[1],
+                    fm['F'][0] * fracs[c], cov_sm00[c], cov_sm01[c],
+                    cov_sm11[c], p[0], p[1],
                 ])
                 nf += 1
         foff.append(foff[-1] + nf)
@@ -250,7 +265,7 @@ def _pack_host_impl(debs, with_modes=True):
             c = m['cov_sm'] if m['type'] in ('gauss', 'star') \
                 else m['cov']
             state['cov'].append([c[0, 0], c[0, 1], c[1, 1]])
-            s = deb.Sw[i]
+            s = deb.wt_cov[i]
             state['sw'].append([s[0, 0], s[0, 1], s[1, 1]])
             state['pos'].append(list(deb.positions[i]))
             state['dpos'].append(list(deb.det_positions[i]))
@@ -339,9 +354,13 @@ def _alloc_scratch(packed, ns, ng, nobj_tot):
 
 
 def _check_dims(h, fp32):
-    """the fp64 module (and init_sums) compiles with the smaller
-    DIM_MAX_FP64 phasor tables; reject over-scope dims up front
-    rather than corrupting shared memory"""
+    """
+    Reject dims beyond the fp64 module's phasor tables up front.
+
+    The fp64 module (and init_sums) compiles with the smaller
+    DIM_MAX_FP64 phasor tables; over-scope dims would corrupt shared
+    memory.
+    """
     dmax = int(np.max(h['dim']))
     _tier_for(dmax, fp32)
     return dmax
@@ -366,10 +385,13 @@ def to_gpu(h, fp32=False):
 
 
 def to_gpu_multi(small_h, mode_list, fp32=False):
-    """assemble a batch from a host-merged SMALL-array pack plus a
-    list of per-submission mode-array dicts: the mode fields (the
-    bulk of the bytes) are copied per submission straight into
-    device slabs, no host merge"""
+    """
+    Assemble a batch from a host-merged small-array pack and mode dicts.
+
+    The mode fields (the bulk of the bytes) are copied per submission
+    straight into device slabs from the list of per-submission
+    mode-array dicts, no host merge.
+    """
     dmax = _check_dims(small_h, fp32)
     dts = _mode_dtypes(fp32)
     ng = int(small_h['ng'])
@@ -394,25 +416,35 @@ def to_gpu_multi(small_h, mode_list, fp32=False):
 
 
 def pack_host_small(debs):
-    """pack_host minus the mode fields, for deblenders whose mode
-    arrays are device-resident (device-prep stub epochs: ep['kim']
-    et al are None).  moff is omitted too — the batch assembler
-    derives it from the resident slabs"""
+    """
+    pack_host minus the mode fields.
+
+    For deblenders whose mode arrays are device-resident
+    (device-prep stub epochs: ep['kim'] et al are None).  moff is
+    omitted too -- the batch assembler derives it from the resident
+    slabs.
+    """
     return _pack_host_impl(debs, with_modes=False)
 
 
 def pack_host(debs):
-    """pack constructed _Deblender instances into host numpy arrays
-    (npz-serializable; convert with to_gpu, or use pack_groups)"""
+    """
+    Pack constructed _Deblender instances into host numpy arrays.
+
+    npz-serializable; convert with to_gpu, or use pack_groups.
+    """
     return _pack_host_impl(debs, with_modes=True)
 
 
 def to_gpu_device_modes(small_h, mode_dev, moff, fp32=False):
-    """assemble a batch whose mode fields are already device
-    arrays (the device-prep resident path): small_h is a
-    pack_host_small (merged) pack, mode_dev the assembled device
-    mode dict (kdeblend.gpu.prep.assemble_mode_fields), moff the
-    host int64 group offsets matching it"""
+    """
+    Assemble a batch whose mode fields are already device arrays.
+
+    The device-prep resident path: small_h is a pack_host_small
+    (merged) pack, mode_dev the assembled device mode dict
+    (kdeblend.gpu.prep.assemble_mode_fields), moff the host int64
+    group offsets matching it.
+    """
     dmax = _check_dims(small_h, fp32)
     dts = _mode_dtypes(fp32)
     ng = int(small_h['ng'])
@@ -454,11 +486,14 @@ def _kernel_args(p):
 
 
 def launch_gpu(packed, nt=NT):
-    """launch the kernel and synchronize the CURRENT STREAM; no
-    output fetch.  Stream-scoped deliberately: a device-wide
-    synchronize would also wait on concurrent async-lane kernels
-    (deep solo groups run 10+ s on their own stream), spreading
-    their duration onto every batch launched beside them"""
+    """
+    Launch the kernel and synchronize the current stream; no output fetch.
+
+    Stream-scoped deliberately: a device-wide synchronize would also
+    wait on concurrent async-lane kernels (deep solo groups run 10+
+    s on their own stream), spreading their duration onto every
+    batch launched beside them.
+    """
     kern = get_kernel(fp32=packed.get('fp32', False), nt=nt,
                       dim_max=packed.get('dimmax'))
     kern((packed['ng'],), (int(nt),), _kernel_args(packed))
@@ -466,12 +501,15 @@ def launch_gpu(packed, nt=NT):
 
 
 def launch_gpu_async(packed, nt=NT, stream=None):
-    """launch WITHOUT synchronizing, on `stream` (default: the
-    current stream), and return a cupy Event recorded after the
-    kernel: poll event.done and then fetch_out.  For deep solo
-    batches that must not stall the caller's serial loop —
-    NOTE the packed arrays must have been uploaded on the same
-    stream (stream-ordered) or be already valid."""
+    """
+    Launch without synchronizing and return an event recorded after the kernel.
+
+    On `stream` (default: the current stream); poll event.done and
+    then fetch_out.  For deep solo batches that must not stall the
+    caller's serial loop -- NOTE the packed arrays must have been
+    uploaded on the same stream (stream-ordered) or be already
+    valid.
+    """
     kern = get_kernel(fp32=packed.get('fp32', False), nt=nt,
                       dim_max=packed.get('dimmax'))
     ev = cp.cuda.Event()

@@ -47,8 +47,11 @@ _CB = (0, 1, 1, 2, 3, 4, 5, 3, 4, 5, 4, 5, 5)
 
 
 def writeback(deb, out, gi):
-    """write the kernel's final state for group gi into the
-    _Deblender exactly as the class updates would have left it"""
+    """
+    Write the kernel's final state for group gi into the _Deblender.
+
+    Exactly as the class updates would have left it.
+    """
     o0 = int(out['ooff'][gi])
     cov3 = out['cov'].reshape(-1, 3)
     sw3 = out['sw'].reshape(-1, 3)
@@ -61,7 +64,7 @@ def writeback(deb, out, gi):
         c = cov3[j]
         cov = np.array([[c[0], c[1]], [c[1], c[2]]])
         s = sw3[j]
-        deb.Sw[k] = np.array([[s[0], s[1]], [s[1], s[2]]])
+        deb.wt_cov[k] = np.array([[s[0], s[1]], [s[1], s[2]]])
         if t != m['type']:
             # demoted on device (exp/gauss -> star)
             m['type'] = 'star'
@@ -87,8 +90,12 @@ def writeback(deb, out, gi):
 
 
 def install_sum_overrides(deb, out, gi):
-    """route the result path's two per-object mode passes to the
-    kernel's final-state measurement outputs"""
+    """
+    Route the result path's per-object mode passes to the kernel outputs.
+
+    The two per-object mode passes read the kernel's final-state
+    measurement outputs instead of re-measuring.
+    """
     o0 = int(out['ooff'][gi])
     sums6 = out['objsums'].reshape(-1, 6)
     cov13 = out['objcov'].reshape(-1, 13)

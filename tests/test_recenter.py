@@ -30,18 +30,21 @@ def test_recenter_single():
 
     ref = deblend(
         obs, [spec(0.0, 0.0)], fwhm_smooth=FWHM_SMOOTH, tol=TOL,
-    )['objects'][0]
+    rng=np.random.RandomState(1),
+)['objects'][0]
 
     r0 = deblend(
         obs, [spec(0.08, -0.06)], fwhm_smooth=FWHM_SMOOTH, tol=TOL,
-    )['objects'][0]
+    rng=np.random.RandomState(1),
+)['objects'][0]
     assert np.allclose(r0['cen'], (0.08, -0.06))
     assert np.sqrt(np.sum(r0['cen_pull'] ** 2)) > 0.02
 
     r = deblend(
         obs, [spec(0.08, -0.06)], fwhm_smooth=FWHM_SMOOTH, tol=TOL,
         recenter=True,
-    )['objects'][0]
+    rng=np.random.RandomState(1),
+)['objects'][0]
     assert np.sqrt(np.sum(np.array(r['cen']) ** 2)) < 1.0e-3
     assert abs(r['T'] / ref['T'] - 1) < 1.0e-3
     assert abs(r['e1'] - ref['e1']) < 1.0e-3
@@ -73,13 +76,15 @@ def test_recenter_pair():
     exact = deblend(
         obs, specs([(0, 0), (0, 0)]),
         fwhm_smooth=FWHM_SMOOTH, tol=TOL,
-    )['objects']
+    rng=np.random.RandomState(1),
+)['objects']
 
     rec = deblend(
         obs, specs([(0.07, -0.02), (-0.05, 0.06)]),
         fwhm_smooth=FWHM_SMOOTH, tol=TOL,
         recenter=True, maxiter=3000,
-    )['objects']
+    rng=np.random.RandomState(1),
+)['objects']
 
     for c, e, r in zip(comps, exact, rec):
         assert np.sqrt(
@@ -106,7 +111,8 @@ def test_recenter_stamps():
         [obs],
         [dict(v=0.0, u=0.0, type='bdf', Tguess=0.4, TdByTe=1.5)],
         fwhm_smooth=FWHM_SMOOTH, tol=TOL, recenter=True,
-    )
+    rng=np.random.RandomState(1),
+)
     r = res['objects'][0]
     assert np.sqrt(
         (r['cen'][0] - comp['v']) ** 2
@@ -129,11 +135,13 @@ def test_recenter_freeze():
 
     r0 = deblend(
         obs, spec, fwhm_smooth=FWHM_SMOOTH, tol=TOL,
-    )['objects'][0]
+    rng=np.random.RandomState(1),
+)['objects'][0]
     r = deblend(
         obs, spec, fwhm_smooth=FWHM_SMOOTH, tol=TOL,
         recenter=True, cen_sigma0=0.0,
-    )['objects'][0]
+    rng=np.random.RandomState(1),
+)['objects'][0]
     assert np.allclose(r['cen'], (0.05, -0.04))
     assert abs(r['T'] - r0['T']) < 1.0e-10
     assert abs(r['e1'] - r0['e1']) < 1.0e-10
