@@ -36,6 +36,7 @@ instances this module has processed.
 import numpy as np
 
 from . import _core
+from ..flags import SKIP_LIMIT
 
 FP32_TOL_FLOOR = 1.0e-6
 
@@ -81,6 +82,11 @@ def writeback(deb, out, gi):
         deb.nrestart[k] = int(out['nrestart'][j])
         deb.nfail[k] = 0
     deb.nskip = int(out['nskip'][gi])
+    deb.skip_limit_hit = bool(out['err'][gi])
+    if deb.skip_limit_hit:
+        # the kernel stopped the group at the backstop limit on
+        # skipped structure updates; flag as go() does
+        deb.dbflags |= SKIP_LIMIT
 
 
 def install_sum_overrides(deb, out, gi):

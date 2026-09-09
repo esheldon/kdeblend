@@ -606,3 +606,39 @@ def test_gauss_s2n():
     assert np.all(np.isfinite(o['gauss_flux']))
     assert np.all(o['gauss_flux_err'] > 0)
     assert o['gauss_s2n'] > 0
+
+
+def test_skip_limit_flags():
+    """
+    when the group-level backstop on skipped structure updates
+    trips, iteration stops with converged False and SKIP_LIMIT set
+    on every object rather than raising
+    """
+    from kdeblend.deblender import build_deblender
+    from kdeblend.flags import SKIP_LIMIT
+
+    rng = np.random.RandomState(5)
+    comps = [
+        {'kind': 'gauss', 'v': 0.0, 'u': 0.0, 'flux': 10.0,
+         'e1': 0.05, 'e2': 0.0, 'T': 0.6},
+        {'kind': 'gauss', 'v': 0.5, 'u': -0.3, 'flux': 5.0,
+         'e1': 0.0, 'e2': -0.05, 'T': 0.4},
+    ]
+    obs = make_blend_obs(comps, 0.9, noise=0.2, rng=rng)
+    objects = [
+        {'v': 0.0, 'u': 0.0, 'type': 'gauss', 'Tguess': 0.6},
+        {'v': 0.5, 'u': -0.3, 'type': 'gauss', 'Tguess': 0.4},
+    ]
+    deb, _ = build_deblender(obs, objects)
+
+    # force the backstop: the counter at the limit, then one more
+    # skip trips it
+    deb.nskip = 100 * deb.nobj
+    deb._count_skip(0)
+    assert deb.skip_limit_hit
+
+    res = deb.go()
+    assert not res['converged']
+    assert res['numiter'] == 1
+    for obj in res['objects']:
+        assert obj['deblend_flags'] & SKIP_LIMIT != 0

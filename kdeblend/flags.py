@@ -26,12 +26,18 @@ EXTERNALS_SUBTRACTED = 2**3
 # see deblender.MAX_WEIGHT_SIGMA_FAC)
 WEIGHT_BOUNDED = 2**4
 
+# the group hit the backstop limit on total skipped structure
+# updates (100 per object) and iteration stopped early; set on
+# every object of the group, whose result also has converged False
+SKIP_LIMIT = 2**5
+
 NAME_MAP = {
     NO_ATTEMPT: 'no attempt',
     DEBLENDED_AS_PSF: 'deblended as psf',
     RESTARTED: 'restarted',
     EXTERNALS_SUBTRACTED: 'externals subtracted',
     WEIGHT_BOUNDED: 'weight bounded',
+    SKIP_LIMIT: 'skip limit',
 }
 
 

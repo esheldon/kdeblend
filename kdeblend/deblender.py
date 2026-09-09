@@ -60,6 +60,7 @@ ZERO_WEIGHT = np.zeros((2, 2))
 # external subtraction scheme)
 from .flags import (  # noqa: E402, F401
     DEBLENDED_AS_PSF, RESTARTED, EXTERNALS_SUBTRACTED, WEIGHT_BOUNDED,
+    SKIP_LIMIT,
 )
 
 # consecutive failed structure updates on one object before
@@ -649,6 +650,7 @@ class _Deblender(object):
         )
 
         self.nskip = 0
+        self.skip_limit_hit = False
         # windowed per-object change maxima and constrained-step
         # (rejected or boundary-damped) counts for the
         # non-contraction demotion
@@ -867,6 +869,13 @@ class _Deblender(object):
         for it in range(self.maxiter):
             self.isweep = it
             changes = self._sweep()
+            if self.skip_limit_hit:
+                # the backstop on total skipped structure updates:
+                # stop iterating and flag the whole group rather
+                # than raising; the state is whatever the sweeps
+                # reached, converged stays False
+                self.dbflags |= SKIP_LIMIT
+                break
             if self._converged(changes):
                 converged = True
                 break
@@ -1694,9 +1703,11 @@ class _Deblender(object):
         Count a skipped structure update against the group-level backstop.
         """
         self.nskip += 1
-        if self.nskip > 100 * self.nobj:
-            raise RuntimeError(
-                f'too many failed structure updates, object {i}'
+        if self.nskip > 100 * self.nobj and not self.skip_limit_hit:
+            self.skip_limit_hit = True
+            print(
+                f'too many failed structure updates (object {i}); '
+                'stopping the group and flagging SKIP_LIMIT'
             )
 
     def _contain_failure(self, i, force=False):
