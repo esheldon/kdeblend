@@ -60,7 +60,9 @@ def test_ladder_errors_applied():
     rng = np.random.RandomState(7)
     mbobs = make_mbobs(rng, OFFSETS)
     objs = _objects(('ladder', 'gauss'))
-    res0 = deblend(mbobs, objs, tol=1.0e-6, maxiter=2000, rng=np.random.RandomState(1))
+    res0 = deblend(
+        mbobs, objs, tol=1.0e-6, maxiter=2000, rng=np.random.RandomState(1),
+    )
     res = deblend(
         mbobs, objs, tol=1.0e-6, maxiter=2000, full_errors=True,
     rng=np.random.RandomState(1),
@@ -303,6 +305,8 @@ def test_model_sum_derivs_pairwise_matches_full(types):
     assert set(pA) == set(pB)
     scale = max(np.abs(v).max() for v in dB.values())
     for key in dB:
-        assert np.allclose(dA[key], dB[key], rtol=1.0e-7, atol=1.0e-7 * scale), key
+        assert np.allclose(
+            dA[key], dB[key], rtol=1.0e-7, atol=1.0e-7 * scale,
+        ), key
     for key in pB:
         assert np.allclose(pA[key], pB[key], rtol=1.0e-9, atol=0)

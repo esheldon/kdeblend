@@ -1852,8 +1852,8 @@ def _pair_sums(deb, i, j, wt_cov=None):
     out = np.zeros((deb.nband, 6))
     for band in range(deb.nband):
         gauss_comps_ksums(
-            np.ascontiguousarray(Fb[band]), cov_sm00, cov_sm01, cov_sm11, dv, du,
-            wt_cov[0, 0], wt_cov[0, 1], wt_cov[1, 1], 1.0, out[band],
+            np.ascontiguousarray(Fb[band]), cov_sm00, cov_sm01, cov_sm11, dv,
+            du, wt_cov[0, 0], wt_cov[0, 1], wt_cov[1, 1], 1.0, out[band],
         )
     return out
 
@@ -2489,8 +2489,6 @@ def _chain_pieces(deb, snap, x0, caches, Ds, theta0s, slices,
 # ---------------------------------------------------------------
 
 
-
-
 def _dmm_dsums(sums):
     """
     The moment matrix in sym3 and its derivative with respect to the raw sums.
@@ -2507,7 +2505,6 @@ def _dmm_dsums(sums):
     D[2, 2], D[2, 4] = 0.5 * finv, 0.5 * finv
     D[:, 5] = -m * finv
     return m, D
-
 
 
 def _ddetsqrt(A):

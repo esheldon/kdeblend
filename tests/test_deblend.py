@@ -33,7 +33,8 @@ def test_closed_form_sums():
     alpha, beta = get_phase_angles(ep, vw, uw)
     admom_ksums(
         ep['kim'], ep['iy'], ep['ix'], ep['dim'], alpha, beta,
-        ep['kv'], ep['ku'], wt_cov[0, 0], wt_cov[0, 1], wt_cov[1, 1], ep['df2'],
+        ep['kv'], ep['ku'], wt_cov[0, 0], wt_cov[0, 1], wt_cov[1, 1],
+        ep['df2'],
         esums,
     )
 
@@ -356,7 +357,9 @@ def test_s2n_noise_image():
     assert np.abs(r['s2n'] / fres['s2n'] - 1) < 0.05
 
     # the white assumption misses the low-k power concentration
-    res_white = deblend(obs, objects, fwhm_smooth=FWHM_SMOOTH, rng=np.random.RandomState(1))
+    res_white = deblend(
+        obs, objects, fwhm_smooth=FWHM_SMOOTH, rng=np.random.RandomState(1),
+    )
     assert res_white['objects'][0]['s2n'] > 1.5 * r['s2n']
 
 
@@ -445,7 +448,9 @@ def test_fixed_models():
 
     # isolated reference
     obs = make_blend_obs([faint], 0.9)
-    ref = deblend(obs, objects, tol=1.0e-6, rng=np.random.RandomState(1))['objects'][0]
+    ref = deblend(
+        obs, objects, tol=1.0e-6, rng=np.random.RandomState(1),
+    )['objects'][0]
     assert ref['deblend_flags'] == 0
 
     # blended, with the neighbor as a fixed external model at truth
@@ -454,7 +459,10 @@ def test_fixed_models():
         'v': 0.0, 'u': 2.5, 'type': 'gauss',
         'e1': 0.0, 'e2': 0.0, 'T': 1.0, 'flux': [10000.0],
     }]
-    res = deblend(obs, objects, tol=1.0e-6, fixed_models=fixed, rng=np.random.RandomState(1))
+    res = deblend(
+        obs, objects, tol=1.0e-6, fixed_models=fixed,
+        rng=np.random.RandomState(1),
+    )
     obj = res['objects'][0]
 
     assert obj['deblend_flags'] == 0
@@ -472,7 +480,10 @@ def test_fixed_models():
         'e1': 0.0, 'e2': 0.0, 'T': np.nan, 'flux': [10000.0],
     }]
     with pytest.raises(ValueError):
-        deblend(obs, objects, tol=1.0e-6, fixed_models=bad, rng=np.random.RandomState(1))
+        deblend(
+            obs, objects, tol=1.0e-6, fixed_models=bad,
+            rng=np.random.RandomState(1),
+        )
 
 
 def test_dev_blends():

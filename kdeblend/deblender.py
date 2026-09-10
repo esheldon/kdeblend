@@ -2032,7 +2032,8 @@ class _Deblender(object):
 
     def _get_neighbor_sums(self, i, wt_cov=None):
         """
-        The per-band sums of the neighbor and fixed external models under a weight.
+        The per-band sums of the neighbor and fixed external models under a
+        weight.
 
         Under object i's weight (or the given weight), at detAtinv=1: the
         model sums scale exactly as 1/detAtinv, so the components are

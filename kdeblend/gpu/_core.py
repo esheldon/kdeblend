@@ -87,6 +87,7 @@ def _tier_for(dmax, fp32):
             return t
     raise AssertionError(dmax)
 
+
 _CUDA_DIR = os.path.join(os.path.dirname(__file__), 'cuda')
 
 # concatenation order: this IS the include graph (the #include

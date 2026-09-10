@@ -805,7 +805,8 @@ def ladder_neighbor_unit_sums(deb, idx):
     DV = cpos[None, :, 0] - pos_all[:, None, 0]
     DU = cpos[None, :, 1] - pos_all[:, None, 1]
     U = grid_sums(
-        S00, S01, S11, wt_cov_all[:, 0], wt_cov_all[:, 1], wt_cov_all[:, 2], DV, DU,
+        S00, S01, S11, wt_cov_all[:, 0], wt_cov_all[:, 1], wt_cov_all[:, 2],
+        DV, DU,
     ).reshape(nobj, nlad, K, 6)
     for jo, i in enumerate(idx):
         U[i, jo] = 0.0
