@@ -1,0 +1,63 @@
+name: tests
+
+on:
+  push:
+    branches:
+      - main
+  pull_request: null
+
+jobs:
+  tests:
+    name: tests
+    strategy:
+      fail-fast: false
+      matrix:
+        pyver: ["3.12", "3.13", "3.14"]
+
+    runs-on: "ubuntu-latest"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: conda-incubator/setup-miniconda@v3
+        with:
+          python-version: ${{ matrix.pyver }}
+          channels: conda-forge
+          channel-priority: strict
+          show-channel-urls: true
+          miniforge-version: latest
+
+      - name: install deps and code
+        shell: bash -l {0}
+        run: |
+          conda config --set always_yes yes
+          conda install --quiet \
+            pip \
+            setuptools \
+            ngmix \
+            matplotlib-base \
+            pytest \
+            pytest-cov \
+            ruff
+
+          # conda ngmix pulls in the full dependency tree from the
+          # feedstock; then swap in the kspace-admom branch, which
+          # has prepsfadmom (not yet in a release).  Drop this and
+          # use the conda ngmix alone when that PR is merged and
+          # released.  --no-deps so pip never pulls packages over
+          # the conda environment
+          conda remove --force ngmix ngmix-core
+          python -m pip install --no-deps \
+            git+https://github.com/esheldon/ngmix.git@kspace-admom
+
+          python -m pip install --no-deps -e .
+
+      - name: lint
+        shell: bash -l {0}
+        run: |
+          ruff check kdeblend tests
+
+      - name: test
+        shell: bash -l {0}
+        run: |
+          OMP_NUM_THREADS=1 pytest -v --cov=kdeblend --cov-report=term
