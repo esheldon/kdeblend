@@ -55,7 +55,8 @@ jobs:
       - name: lint
         shell: bash -l {0}
         run: |
-          ruff check kdeblend tests
+          ruff check kdeblend/
+          ruff check tests/
 
       - name: test
         shell: bash -l {0}
