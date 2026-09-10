@@ -629,7 +629,7 @@ def test_skip_limit_flags():
         {'v': 0.0, 'u': 0.0, 'type': 'gauss', 'Tguess': 0.6},
         {'v': 0.5, 'u': -0.3, 'type': 'gauss', 'Tguess': 0.4},
     ]
-    deb, _ = build_deblender(obs, objects)
+    deb, _ = build_deblender(obs, objects, rng=rng)
 
     # force the backstop: the counter at the limit, then one more
     # skip trips it
