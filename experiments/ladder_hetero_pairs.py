@@ -40,7 +40,7 @@ sys.path.insert(0, os.path.join(
 import ladder_contamination as lc  # noqa: E402
 import ladder_pair_stability as ps  # noqa: E402
 from _sims import make_blend_obs  # noqa: E402
-from ngmix.prepsfadmom.models import model_comps  # noqa: E402
+from ngmix.prepsfadmom.models import model_gauss_components  # noqa: E402
 from kdeblend.deblender import build_deblender, _prep_epochs  # noqa: E402
 from ngmix.observation import get_mb_obs  # noqa: E402
 
@@ -175,7 +175,7 @@ def run_cell(name, c1, c2, d, rng):
         mods, Fe, a0 = [], np.zeros(2), np.zeros(2 * K)
         M0, _, _ = build_joint(ep, us, rungs, aps, sig_rows)
         for i in (0, 1):
-            fr, S00, S01, S11 = model_comps(deb.models[i], Tsmooth)
+            fr, S00, S01, S11 = model_gauss_components(deb.models[i], Tsmooth)
             F = deb.models[i]['F'][0]
             mods.append((F * fr, S00, S01, S11))
             Fe[i] = F if (np.isfinite(F) and F > 0) else 1e-6

@@ -246,10 +246,12 @@ def _pack_host_impl(debs, with_modes=True):
             moff.append(moff[-1] + ep['kim'].size)
 
         # fixed models: pre-expanded comps under any weight
-        from ngmix.prepsfadmom.models import model_comps
+        from ngmix.prepsfadmom.models import model_gauss_components
         nf = 0
         for p, fm in zip(deb.fpositions, deb.fmodels):
-            fracs, cov_sm00, cov_sm01, cov_sm11 = model_comps(fm, deb.Tsmooth)
+            fracs, cov_sm00, cov_sm01, cov_sm11 = model_gauss_components(
+                fm, deb.Tsmooth,
+            )
             for c in range(fracs.size):
                 fixed.append([
                     fm['F'][0] * fracs[c], cov_sm00[c], cov_sm01[c],

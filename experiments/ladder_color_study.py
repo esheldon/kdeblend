@@ -46,7 +46,7 @@ sys.path.insert(0, os.path.join(
     os.path.dirname(os.path.abspath(__file__)), '..', 'tests'))
 import ladder_contamination as lc  # noqa: E402
 from _sims import make_blend_mbobs  # noqa: E402
-from ngmix.prepsfadmom.models import model_comps  # noqa: E402
+from ngmix.prepsfadmom.models import model_gauss_components  # noqa: E402
 from kdeblend.deblender import build_deblender  # noqa: E402
 
 T_FAINT = lc.T_FAINT
@@ -163,7 +163,7 @@ def run_config(name, comps_per_band, psfs):
     # per-band model components for every model
     models = {}
     for t in ('gauss', 'exp', 'bdf'):
-        fr, S00, S01, S11 = model_comps(fits[t].models[0], Tsmooth)
+        fr, S00, S01, S11 = model_gauss_components(fits[t].models[0], Tsmooth)
         Fb = fits[t].models[0]['F']
         models[t] = [(Fb[b] * fr, S00, S01, S11) for b in (0, 1)]
     models['ladder'] = [

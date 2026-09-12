@@ -58,7 +58,7 @@ full_errors, per group:
 import numpy as np
 from numba import njit
 
-from ngmix.prepsfadmom.models import get_profile_comps, model_comps
+from ngmix.prepsfadmom.models import get_profile_comps, model_gauss_components
 from ngmix.prepsfadmom.models_nb import DET_REL_TOL
 from ngmix.prepsfadmom import get_phase_angles
 from ngmix.prepsfadmom.prepsfadmom_nb import fill_phasors
@@ -355,7 +355,7 @@ def band_comps(model, Tsmooth):
     if model['type'] == 'ladder':
         S00, S01, S11 = model['rungs']
         return model['amps'], S00, S01, S11
-    fracs, S00, S01, S11 = model_comps(model, Tsmooth)
+    fracs, S00, S01, S11 = model_gauss_components(model, Tsmooth)
     return np.outer(model['F'], fracs), S00, S01, S11
 
 

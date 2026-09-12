@@ -32,7 +32,7 @@ from ngmix.fastexp_nb import FASTEXP_MAX_CHI2
 
 from ngmix.moments import cov_from_e, cov_from_mom
 from ngmix.prepsfadmom.models import (
-    det2, model_ksums, model_comps, mixture_model_valid,
+    det2, model_ksums, model_gauss_components, mixture_model_valid,
 )
 from ngmix.prepsfadmom.models_nb import gauss_comps_ksums
 
@@ -2090,7 +2090,9 @@ class _Deblender(object):
         wt_cov = self.wt_cov[i]
 
         base_psums = np.zeros((self.nband, 6))
-        fracs, cov_sm00, cov_sm01, cov_sm11 = model_comps(m, self.Tsmooth)
+        fracs, cov_sm00, cov_sm01, cov_sm11 = model_gauss_components(
+            m, self.Tsmooth,
+        )
         zeros = np.zeros(fracs.size)
         for band in range(self.nband):
             gauss_comps_ksums(
