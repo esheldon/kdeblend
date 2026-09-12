@@ -31,8 +31,9 @@ from ngmix.prepsfadmom.errors import (
 from ngmix.prepsfadmom.prepsfadmom_nb import admom_ksums, admom_finalize
 from ngmix.fastexp_nb import FASTEXP_MAX_CHI2
 
+from ngmix.moments import cov_from_e
 from ngmix.prepsfadmom.models import (
-    det2, cov_from_e, model_ksums, model_comps, mixture_model_valid,
+    det2, model_ksums, model_comps, mixture_model_valid,
 )
 from ngmix.prepsfadmom.models_nb import gauss_comps_ksums
 

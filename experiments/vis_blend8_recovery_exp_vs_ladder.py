@@ -10,7 +10,7 @@ from kdeblend.vis import make_color_image
 from kdeblend.deblender import build_deblender
 from ngmix.prepsfadmom import get_phase_angles
 from ngmix.prepsfadmom.prepsfadmom_nb import admom_ksums
-from ngmix.prepsfadmom.models import cov_from_e
+from ngmix.moments import cov_from_e
 from scipy.ndimage import gaussian_filter
 import matplotlib; matplotlib.use('Agg')
 import matplotlib.pyplot as plt

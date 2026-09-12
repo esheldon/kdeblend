@@ -5,7 +5,7 @@ import numpy as np
 import galsim
 import ngmix
 
-from ngmix.prepsfadmom.models import cov_from_e
+from ngmix.moments import cov_from_e
 
 GSPARAMS = galsim.GSParams(
     folding_threshold=1.0e-8,

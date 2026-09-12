@@ -10,9 +10,8 @@ import numpy as np
 import galsim
 import pytest
 
-from ngmix.prepsfadmom.models import (
-    cov_from_e, get_profile_comps,
-)
+from ngmix.moments import cov_from_e
+from ngmix.prepsfadmom.models import get_profile_comps
 from kdeblend import deblend, deblend_stamps
 
 from _sims import GSPARAMS, make_blend_obs
