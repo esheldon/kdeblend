@@ -61,7 +61,7 @@ from numba import njit
 from ngmix.prepsfadmom.models import get_profile_comps, model_comps
 from ngmix.prepsfadmom.models_nb import DET_REL_TOL
 from ngmix.prepsfadmom import get_phase_angles
-from ngmix.prepsfadmom.prepsfadmom_nb import _fill_phasors
+from ngmix.prepsfadmom.prepsfadmom_nb import fill_phasors
 
 # rung sizes as multiples of the pre-smoothing frame covariance,
 # geometric ratio 2.  Sub-smoothing rungs are omitted: after the
@@ -539,8 +539,8 @@ def ladder_apsums(kim, iy, ix, dim, alpha, beta, kv, ku,
     pyim = np.empty(dim)
     pxre = np.empty(dim)
     pxim = np.empty(dim)
-    _fill_phasors(dim, alpha, pyre, pyim)
-    _fill_phasors(dim, beta, pxre, pxim)
+    fill_phasors(dim, alpha, pyre, pyim)
+    fill_phasors(dim, beta, pxre, pxim)
 
     nap = 8
     for j in range(8):

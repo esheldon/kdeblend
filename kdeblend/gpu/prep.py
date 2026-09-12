@@ -9,7 +9,7 @@ and produces the deconvolved, smoothed, folded kim and the noise
 err_fac2 at the retained modes — the mode fields the deblend
 kernel consumes — without them ever visiting the host.  The
 retained-mode geometry (iy/ix/kv/ku/fold) is data-independent
-(ngmix _get_kspace_grids, built on the CPU for bitwise-identical
+(ngmix get_kspace_grids, built on the CPU for bitwise-identical
 selection and uploaded once per (dim, jacobian, Tsmooth)).
 
 Per-object measured flux sums for the flux initialization
@@ -121,7 +121,7 @@ class GeometryCache(object):
         self._maxsize = int(maxsize)
 
     def get(self, dim, jac4, Tsmooth):
-        from ngmix.prepsfadmom.prep import _get_kspace_grids
+        from ngmix.prepsfadmom.prep import get_kspace_grids
 
         key = (int(dim),) + tuple(float(v) for v in jac4) \
             + (float(Tsmooth),)
@@ -129,7 +129,7 @@ class GeometryCache(object):
             # refresh recency (dict preserves insertion order)
             self._entries[key] = self._entries.pop(key)
         else:
-            grids = _get_kspace_grids(*key)
+            grids = get_kspace_grids(*key)
             entry = _GeomEntry(grids)
             # flat rfft half-plane index for the gathers
             half = key[0] // 2 + 1
