@@ -26,13 +26,13 @@ from ngmix.prepsfadmom.prep import choose_fwhm_smooth, prep_epoch
 from ngmix.prepsfadmom import get_phase_angles, deweight
 from ngmix.prepsfadmom.errors import (
     model_sandwich, bdf_joint_sandwich, joint_flux_s2n,
-    _mbasis_cov,
 )
 from ngmix.prepsfadmom.prepsfadmom_nb import admom_ksums, admom_finalize
 from ngmix.fastexp_nb import FASTEXP_MAX_CHI2
 
+from ngmix.moments import cov_from_e, cov_from_mom
 from ngmix.prepsfadmom.models import (
-    det2, cov_from_e, model_ksums, model_comps, mixture_model_valid,
+    det2, model_ksums, model_gauss_components, mixture_model_valid,
 )
 from ngmix.prepsfadmom.models_nb import gauss_comps_ksums
 
@@ -1500,7 +1500,7 @@ class _Deblender(object):
         bmod = info['F2'] @ base0.T
 
         def split_at(famvec):
-            bp = base_at(_mbasis_cov(*famvec))
+            bp = base_at(cov_from_mom(*famvec))
             det = bp[0, 0] * bp[1, 1] - bp[0, 1] * bp[1, 0]
             if abs(det) < 1.0e-10 * abs(bp[0, 0] * bp[1, 1]):
                 return None
@@ -2090,7 +2090,9 @@ class _Deblender(object):
         wt_cov = self.wt_cov[i]
 
         base_psums = np.zeros((self.nband, 6))
-        fracs, cov_sm00, cov_sm01, cov_sm11 = model_comps(m, self.Tsmooth)
+        fracs, cov_sm00, cov_sm01, cov_sm11 = model_gauss_components(
+            m, self.Tsmooth,
+        )
         zeros = np.zeros(fracs.size)
         for band in range(self.nband):
             gauss_comps_ksums(

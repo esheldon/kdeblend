@@ -2,7 +2,8 @@ import numpy as np
 import galsim
 import ngmix
 
-from ngmix.prepsfadmom.models import cov_from_e, det2, get_profile_comps
+from ngmix.moments import cov_from_e
+from ngmix.prepsfadmom.models import det2, get_profile_comps
 from kdeblend.render import render_model
 
 from _sims import GSPARAMS, SCALE, DIM, make_blend_obs

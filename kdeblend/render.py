@@ -13,8 +13,9 @@ it is not imported by the package __init__.  Use
 import numpy as np
 import galsim
 
+from ngmix.moments import cov_from_e
 from ngmix.prepsfadmom.models import (
-    bdf_comps, cov_from_e, det2, get_profile_comps,
+    bdf_comps, det2, get_profile_comps,
 )
 
 from .ladder import LADDER_RUNGS, _frame_base

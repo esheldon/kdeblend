@@ -7,7 +7,8 @@ from ngmix.prepsfadmom import get_phase_angles
 from ngmix.prepsfadmom.prepsfadmom_nb import admom_ksums
 
 from kdeblend import deblend
-from ngmix.prepsfadmom.models import cov_from_e, model_ksums
+from ngmix.moments import cov_from_e
+from ngmix.prepsfadmom.models import model_ksums
 
 from _sims import make_blend_obs, make_blend_mbobs
 

@@ -58,7 +58,7 @@ sys.path.insert(0, os.path.join(
     os.path.dirname(os.path.abspath(__file__)), '..', 'tests'))
 import ladder_contamination as lc  # noqa: E402
 from _sims import make_blend_obs, SCALE, GSPARAMS  # noqa: E402
-from ngmix.prepsfadmom.models import model_comps  # noqa: E402
+from ngmix.prepsfadmom.models import model_gauss_components  # noqa: E402
 from kdeblend.deblender import build_deblender, _prep_epochs  # noqa: E402
 from ngmix.observation import get_mb_obs  # noqa: E402
 
@@ -167,7 +167,7 @@ def calibrate(n, rng):
     apertures = [af * Sw_ref for af in AP_FACS]
 
     # exp profile aperture sums at unit flux, for the prior
-    fracs, eS00, eS01, eS11 = model_comps(deb_e.models[0], Tsmooth)
+    fracs, eS00, eS01, eS11 = model_gauss_components(deb_e.models[0], Tsmooth)
     d0 = np.array([
         lc.comp_flux_sum(fracs, eS00, eS01, eS11, 0.0, 0.0, w)
         for w in apertures
@@ -229,10 +229,10 @@ def run_config(n, target_s2n, ref, rng):
 
         # models
         models = {}
-        gf, gS00, gS01, gS11 = model_comps(deb_g.models[0], Tsmooth)
+        gf, gS00, gS01, gS11 = model_gauss_components(deb_g.models[0], Tsmooth)
         models['gauss'] = (deb_g.models[0]['F'][0] * gf,
                           gS00, gS01, gS11)
-        ef, eS00, eS01, eS11 = model_comps(deb_e.models[0], Tsmooth)
+        ef, eS00, eS01, eS11 = model_gauss_components(deb_e.models[0], Tsmooth)
         Fhat = deb_e.models[0]['F'][0]
         models['exp'] = (Fhat * ef, eS00, eS01, eS11)
         models['none'] = (np.zeros(1), np.ones(1), np.zeros(1),

@@ -47,7 +47,7 @@ sys.path.insert(0, os.path.join(
     os.path.dirname(os.path.abspath(__file__)), '..', 'tests'))
 import ladder_contamination as lc  # noqa: E402
 from _sims import make_blend_obs  # noqa: E402
-from ngmix.prepsfadmom.models import model_comps  # noqa: E402
+from ngmix.prepsfadmom.models import model_gauss_components  # noqa: E402
 from kdeblend.deblender import build_deblender, _prep_epochs  # noqa: E402
 from ngmix.observation import get_mb_obs  # noqa: E402
 
@@ -196,7 +196,7 @@ def main():
         # prior centers: exp profile of each object on its rungs
         a0 = np.zeros(2 * K)
         for i in (0, 1):
-            fr, S00, S01, S11 = model_comps(
+            fr, S00, S01, S11 = model_gauss_components(
                 deb_e.models[i], Tsmooth)
             nap = len(aps[i])
             d0 = np.array([

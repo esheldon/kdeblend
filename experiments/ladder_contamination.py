@@ -56,7 +56,7 @@ from _sims import make_blend_obs, SCALE  # noqa: E402
 
 from ngmix.prepsfadmom import get_phase_angles  # noqa: E402
 from ngmix.prepsfadmom.prepsfadmom_nb import admom_ksums  # noqa: E402
-from ngmix.prepsfadmom.models import model_comps  # noqa: E402
+from ngmix.prepsfadmom.models import model_gauss_components  # noqa: E402
 from ngmix.prepsfadmom.models_nb import gauss_comps_ksums  # noqa: E402
 from kdeblend.deblender import build_deblender  # noqa: E402
 
@@ -180,7 +180,7 @@ def run_one(n):
             deb0 = deb  # gauss first: epochs, Tsmooth, Sw base
         o = res['objects'][0]
         conv = res['converged'] and o['deblend_flags'] == 0
-        fracs, So00, So01, So11 = model_comps(deb.models[0], deb.Tsmooth)
+        fracs, So00, So01, So11 = model_gauss_components(deb.models[0], deb.Tsmooth)
         F = deb.models[0]['F'][0]
         models[t] = (F * fracs, So00, So01, So11)
         notes[t] = (

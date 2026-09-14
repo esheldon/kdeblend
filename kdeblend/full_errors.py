@@ -50,7 +50,7 @@ from ngmix.prepsfadmom.full_errors import (
     moment_kernels, dsums_dtheta, influence_kernels, sums_cov,
     sym3_mat as _sym3_mat,
     dw_derivs as _dw_derivs,
-    _ingredients, WK_CHI2_MAX,
+    kernel_ingredients, WK_CHI2_MAX,
 )
 from ngmix.prepsfadmom.prepsfadmom import get_phase_angles
 from ngmix.prepsfadmom.prepsfadmom_nb import admom_ksums
@@ -471,7 +471,7 @@ def _flux_kernel_and_dtheta(ep, W, v0, u0):
     ladder group need only these rows, and the full routines cost 6x
     more.  The referee of _flux_kernels_and_dtheta_dyadic.
     """
-    Sv, Su, base, yf, xf, dim, _ = _ingredients(ep, W, v0, u0)
+    Sv, Su, base, yf, xf, dim, _ = kernel_ingredients(ep, W, v0, u0)
     kv, ku, kim = ep['kv'], ep['ku'], ep['kim']
     D = np.zeros(5)
     for w, dchi in enumerate((kv * kv, 2 * kv * ku, ku * ku)):

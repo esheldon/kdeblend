@@ -45,7 +45,7 @@ import ladder_contamination as lc  # noqa: E402
 import ladder_noise_study as ns  # noqa: E402
 import ladder_pair_stability as ps  # noqa: E402
 import ladder_hetero_pairs as hp  # noqa: E402
-from ngmix.prepsfadmom.models import model_comps  # noqa: E402
+from ngmix.prepsfadmom.models import model_gauss_components  # noqa: E402
 from kdeblend.deblender import build_deblender, _prep_epochs  # noqa: E402
 from ngmix.observation import get_mb_obs  # noqa: E402
 
@@ -183,7 +183,7 @@ def part_b(rng):
     Fe = np.zeros(2)
     a0 = np.zeros(2 * K)
     for i in (0, 1):
-        fr, S00, S01, S11 = model_comps(deb_e.models[i], Tsmooth)
+        fr, S00, S01, S11 = model_gauss_components(deb_e.models[i], Tsmooth)
         F = deb_e.models[i]['F'][0]
         Fe[i] = F if (np.isfinite(F) and F > 0) else 1e-6
         nap = len(aps[i])

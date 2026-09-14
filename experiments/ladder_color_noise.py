@@ -44,7 +44,7 @@ sys.path.insert(0, os.path.join(
 import ladder_contamination as lc  # noqa: E402
 import ladder_color_study as cs  # noqa: E402
 from _sims import make_blend_mbobs  # noqa: E402
-from ngmix.prepsfadmom.models import model_comps  # noqa: E402
+from ngmix.prepsfadmom.models import model_gauss_components  # noqa: E402
 from kdeblend.deblender import build_deblender, _prep_epochs  # noqa: E402
 from ngmix.observation import get_mb_obs  # noqa: E402
 
@@ -105,7 +105,7 @@ def calibrate(rng):
     Sw_ref = deb_g.Sw[0].copy()
     apertures = [af * Sw_ref for af in AP_FACS]
 
-    fr, S00, S01, S11 = model_comps(deb_e.models[0], Tsmooth)
+    fr, S00, S01, S11 = model_gauss_components(deb_e.models[0], Tsmooth)
     d0 = np.array([
         lc.comp_flux_sum(fr, S00, S01, S11, 0.0, 0.0, w)
         for w in apertures
@@ -167,7 +167,7 @@ def run_s2n(target_s2n, ref, rng):
         eps_b = deb_g.epochs_per_obj[0]
 
         models = {}
-        fr, S00, S01, S11 = model_comps(deb_e.models[0], Tsmooth)
+        fr, S00, S01, S11 = model_gauss_components(deb_e.models[0], Tsmooth)
         Fe = deb_e.models[0]['F']
         models['exp'] = [(Fe[b] * fr, S00, S01, S11) for b in (0, 1)]
         models['none'] = [(np.zeros(1), np.ones(1), np.zeros(1),
