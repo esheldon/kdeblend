@@ -8,8 +8,9 @@ import numpy as np
 
 from kdeblend import deblend, deblend_stamps
 
-from test_bdf_deblend import make_bdf_blend_obs, FWHM_SMOOTH
+from _sims import make_blend_obs
 
+FWHM_SMOOTH = 1.2
 TOL = 1.0e-8
 
 
@@ -22,29 +23,29 @@ def test_recenter_single():
     the truth, matching the exact-position fit
     """
     comp = dict(v=0.0, u=0.0, e1=0.08, e2=-0.04, T=0.5,
-                flux=150.0, fracdev=0.3, TdByTe=1.0)
-    obs = make_bdf_blend_obs([comp], 0.9)
+                flux=150.0, kind='expmix')
+    obs = make_blend_obs([comp], 0.9)
 
     def spec(v, u):
-        return dict(v=v, u=u, type='bdf', Tguess=0.4, TdByTe=1.0)
+        return dict(v=v, u=u, type='exp', Tguess=0.4)
 
     ref = deblend(
         obs, [spec(0.0, 0.0)], fwhm_smooth=FWHM_SMOOTH, tol=TOL,
-    rng=np.random.RandomState(1),
-)['objects'][0]
+        rng=np.random.RandomState(1),
+    )['objects'][0]
 
     r0 = deblend(
         obs, [spec(0.08, -0.06)], fwhm_smooth=FWHM_SMOOTH, tol=TOL,
-    rng=np.random.RandomState(1),
-)['objects'][0]
+        rng=np.random.RandomState(1),
+    )['objects'][0]
     assert np.allclose(r0['cen'], (0.08, -0.06))
     assert np.sqrt(np.sum(r0['cen_pull'] ** 2)) > 0.02
 
     r = deblend(
         obs, [spec(0.08, -0.06)], fwhm_smooth=FWHM_SMOOTH, tol=TOL,
         recenter=True,
-    rng=np.random.RandomState(1),
-)['objects'][0]
+        rng=np.random.RandomState(1),
+    )['objects'][0]
     assert np.sqrt(np.sum(np.array(r['cen']) ** 2)) < 1.0e-3
     assert abs(r['T'] / ref['T'] - 1) < 1.0e-3
     assert abs(r['e1'] - ref['e1']) < 1.0e-3
@@ -60,31 +61,31 @@ def test_recenter_pair():
     """
     comps = [
         dict(v=0.0, u=-1.0, e1=0.05, e2=0.02, T=0.5, flux=250.0,
-             fracdev=0.5, TdByTe=1.0),
+             kind='expmix'),
         dict(v=0.0, u=1.0, e1=-0.06, e2=0.04, T=0.4, flux=120.0,
-             fracdev=0.3, TdByTe=1.0),
+             kind='expmix'),
     ]
-    obs = make_bdf_blend_obs(comps, 0.9)
+    obs = make_blend_obs(comps, 0.9)
 
     def specs(offs):
         return [
-            dict(v=c['v'] + dv, u=c['u'] + du, type='bdf',
-                 Tguess=0.4, TdByTe=1.0)
+            dict(v=c['v'] + dv, u=c['u'] + du, type='exp',
+                 Tguess=0.4)
             for c, (dv, du) in zip(comps, offs)
         ]
 
     exact = deblend(
         obs, specs([(0, 0), (0, 0)]),
         fwhm_smooth=FWHM_SMOOTH, tol=TOL,
-    rng=np.random.RandomState(1),
-)['objects']
+        rng=np.random.RandomState(1),
+    )['objects']
 
     rec = deblend(
         obs, specs([(0.07, -0.02), (-0.05, 0.06)]),
         fwhm_smooth=FWHM_SMOOTH, tol=TOL,
         recenter=True, maxiter=3000,
-    rng=np.random.RandomState(1),
-)['objects']
+        rng=np.random.RandomState(1),
+    )['objects']
 
     for c, e, r in zip(comps, exact, rec):
         assert np.sqrt(
@@ -104,15 +105,15 @@ def test_recenter_stamps():
     up the offset
     """
     comp = dict(v=0.08, u=-0.06, e1=0.08, e2=-0.04, T=0.5,
-                flux=150.0, fracdev=0.4, TdByTe=1.5)
-    obs = make_bdf_blend_obs([comp], 0.9)
+                flux=150.0, kind='expmix')
+    obs = make_blend_obs([comp], 0.9)
 
     res = deblend_stamps(
         [obs],
-        [dict(v=0.0, u=0.0, type='bdf', Tguess=0.4, TdByTe=1.5)],
+        [dict(v=0.0, u=0.0, type='exp', Tguess=0.4)],
         fwhm_smooth=FWHM_SMOOTH, tol=TOL, recenter=True,
-    rng=np.random.RandomState(1),
-)
+        rng=np.random.RandomState(1),
+    )
     r = res['objects'][0]
     assert np.sqrt(
         (r['cen'][0] - comp['v']) ** 2
@@ -128,20 +129,19 @@ def test_recenter_freeze():
     identical to recenter=False
     """
     comp = dict(v=0.0, u=0.0, e1=0.08, e2=-0.04, T=0.5,
-                flux=150.0, fracdev=0.3, TdByTe=1.0)
-    obs = make_bdf_blend_obs([comp], 0.9)
-    spec = [dict(v=0.05, u=-0.04, type='bdf', Tguess=0.4,
-                 TdByTe=1.0)]
+                flux=150.0, kind='expmix')
+    obs = make_blend_obs([comp], 0.9)
+    spec = [dict(v=0.05, u=-0.04, type='exp', Tguess=0.4)]
 
     r0 = deblend(
         obs, spec, fwhm_smooth=FWHM_SMOOTH, tol=TOL,
-    rng=np.random.RandomState(1),
-)['objects'][0]
+        rng=np.random.RandomState(1),
+    )['objects'][0]
     r = deblend(
         obs, spec, fwhm_smooth=FWHM_SMOOTH, tol=TOL,
         recenter=True, cen_sigma0=0.0,
-    rng=np.random.RandomState(1),
-)['objects'][0]
+        rng=np.random.RandomState(1),
+    )['objects'][0]
     assert np.allclose(r['cen'], (0.05, -0.04))
     assert abs(r['T'] - r0['T']) < 1.0e-10
     assert abs(r['e1'] - r0['e1']) < 1.0e-10

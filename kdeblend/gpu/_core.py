@@ -10,7 +10,7 @@ validity rollback, regularized recentering with lazy pull noise) and
 returns the final state for state-level comparison with the class.
 
 Scope v1: gauss + star + exp, single band/epoch, e_sigma0=0, no
-bdf/dev.  fp64 throughout; the kernel mirrors diffrig.py's my_*
+dev.  fp64 throughout; the kernel mirrors diffrig.py's my_*
 functions (the bitwise-validated executable spec) line by line.
 Sum reduction order differs from the serial CPU kernels, so parity
 is expected at ~1e-13 state level with occasional threshold flips,

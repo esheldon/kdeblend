@@ -112,8 +112,8 @@ LADDER_PRIOR_FLOOR = 0.2
 # scene-wide amp solve cadence: first solve at sweep
 # LADDER_WARMUP (early sweeps subtract the exp-profile init),
 # then every LADDER_SOLVE_EVERY sweeps.  The carried last-change
-# keeps convergence honest between solves.  2 matches the bdf
-# split cadence: 4 defeats the projected-residual rho estimate
+# keeps convergence honest between solves.  The cadence
+# is 2: 4 defeats the projected-residual rho estimate
 # (long carried plateaus) and destabilizes the extrapolation,
 # while 1 lets the amps chase the weights into a limit cycle --
 # the one-sweep lag is load-bearing (measured on the

@@ -314,8 +314,7 @@ def test_full_errors_pair(recenter):
 def test_full_errors_star_member():
     """a group containing a star applies the full errors: the
     star row gets the flux entries (its structure entries stand)
-    and the galaxy row gets the full structure errors.  bdf
-    members still fall back"""
+    and the galaxy row gets the full structure errors"""
     rng = np.random.RandomState(31)
     offsets = [(-0.5, 0.0), (0.5, 0.0)]
     mbobs = make_mbobs(rng, offsets)

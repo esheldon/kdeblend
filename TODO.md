@@ -1,7 +1,7 @@
 # TODO
 
 - Integrate the 'ladder' model type: the free-amplitude
-  concentric gaussian ladder, to replace exp/dev/bdf once
+  concentric gaussian ladder, to replace exp/dev once
   validated at field scale (evidence in the DONE 2026-08-31
   entry and experiments/).  Locked design choices: per-band
   amplitude vectors in flux units with a cross-band prior
@@ -1143,9 +1143,8 @@
   Remaining slices, in priority order: Stage B/C of the wldb
   validation against exp (doshear differential m, then
   production scale, with the capped total; Stage A photometry
-  is done above; the gate for the exp/dev/bdf deletion
-  decision, which also makes the bdf items below moot -- decide,
-  do not do them); gpu support
+  is done above; the gate for the exp/dev deletion
+  decision); gpu support
   (the fused J-aperture admom_ksums kernel serves both the fit
   cost and the gpu port); the analytic state-column amp
   response.  (The tight-blend totals
@@ -1158,6 +1157,14 @@
   tau-dial total equals the adaptive flux times the fitted
   shape's aperture completion to 3 decimals in every case,
   see the LADDER_TAU_TOTAL comment.)
+
+DONE (2026-11-16): removed the 'bdf' model type (not found
+useful): the split solve, joint sandwich and fracdev state in
+deblender.py (~470 lines), its full_errors/render branches and
+tests.  The older entries that mention bdf are history.  Follow
+up: simcoadd-mdet still accepts model 'bdf' (config.py,
+deblending.py, fitting.py, scripts/wldb_cluster_cores.py
+defaults to it); ngmix.prepsfadmom keeps its own bdf support.
 
 DONE (2026-08-31): ladder experimental phase (branch ladder,
 experiments/*.py, seven studies).  Findings and decisions:
@@ -1231,9 +1238,6 @@ experiments/*.py, seven studies).  Findings and decisions:
   aperture, reconstructable from the full outputs, which keep
   the amps.
 
-- Consider bdf for the PAdmomFitter full errors (gauss/exp/dev
-  done).
-
 - Tight-blend (nn < 8 px) structure errors under recentering:
   the moving-anchor FD probe reads fam/gauss e and T 15-30
   percent low in the jumpy-anchor half of that bin (sep
@@ -1243,9 +1247,6 @@ experiments/*.py, seven studies).  Findings and decisions:
   Possible mitigations if it matters: inflate the anchor
   covariances for multi-peak segments, or flag unstable-anchor
   rows.
-
-- Extend `bdf_joint_sandwich` with the cross-band flux
-  covariance and lift the bdf/star guard in full_errors.
 
 
 - Remaining cost levers, all bounded (full errors now 21 ms
