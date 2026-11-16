@@ -7,7 +7,7 @@ adaptive frame -- the eigenvalue-floored pre-smoothing part of
 its adaptive weight -- and whose per-band amplitudes are free,
 fit by a scene-wide regularized linear solve.  The design and
 its experimental evidence are recorded in the TODO ledger
-(DONE 2026-08-31) and experiments/.
+(DONE 2026-08-31).
 
 Structural properties:
 
