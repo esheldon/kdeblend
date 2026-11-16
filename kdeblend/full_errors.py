@@ -33,15 +33,14 @@ across isolation bins where the per-object path misses by up to
 2x, and calibrated under model mismatch (dev truth fit with
 exp: per-object T_err low by 14 percent, full errors 0.95).
 
-Objects of type gauss/exp/dev/star/ladder are treated (bdf falls back
-to the per-object errors).  Star members take the per-object
-micro-FD fallback for their update derivatives (the analytic
-algebra covers the weight-adaptive types) and get the flux
-entries only: flux_err, flux_cov and s2n gain the cross-member
-response through shared pixels, the dominant blending term in
-crowded stellar fields, while the structure entries are not
-defined for a delta function.  Apodized preps are
-handled exactly: the mask enters the influence kernels as a
+Objects of type gauss/exp/dev/star/ladder are treated.  Star
+members take the per-object micro-FD fallback for their update
+derivatives (the analytic algebra covers the weight-adaptive
+types) and get the flux entries only: flux_err, flux_cov and
+s2n gain the cross-member response through shared pixels, the
+dominant blending term in crowded stellar fields, while the
+structure entries are not defined for a delta function.
+Apodized preps are handled exactly: the mask enters the influence kernels as a
 pixel-space factor (see ngmix influence_kernels).
 """
 import numpy as np
@@ -88,8 +87,8 @@ MUTABLE_ATTRS = (
     '_fscales', '_win_max', '_win_nfail', '_prev_win_max',
     '_prev_win_nfail', '_change_hist', 'hist', '_boost_pre',
     '_boost_unprod', 'nskip', 'nfail',
-    'nrestart', 'isweep', 'dbflags', 'bdf_info', 'bdf_last_dfd',
-    '_cen_sigma_sweep', '_bdf_noise_cache', 'ladder_last_da',
+    'nrestart', 'isweep', 'dbflags',
+    '_cen_sigma_sweep', 'ladder_last_da',
     '_ladder_sig_cache', '_ladder_last_x', '_ladder_next',
     '_ladder_prior_cache', '_ladder_row_cache',
 )
@@ -956,7 +955,7 @@ def _ladder_state_response(deb, snap, x0, L, caches, Ds, theta0s,
                 continue
         else:
             # a non-ladder member: only the subtracted rows move
-            if kind == 'sw' or kind == 'fracdev':
+            if kind == 'sw':
                 # its weight enters nothing of the ladder
                 dds = None
             elif kind == 'F':
@@ -1443,8 +1442,6 @@ def _object_layout(deb):
                 per += 3
             elif m['type'] in ('exp', 'dev'):
                 per += 3
-            elif m['type'] == 'bdf':
-                per += 4
             per += 3
         pers.append(per)
         k += per
@@ -1690,7 +1687,7 @@ def _make_patched(deb, caches, Ds, theta0s, deltas,
 
     def patched(i):
         m = deb.models[i]
-        is_mix = m['type'] in ('exp', 'dev', 'bdf')
+        is_mix = m['type'] in ('exp', 'dev')
         if nsums_cache is not None:
             base_nsums = nsums_cache[i]
         else:
@@ -1809,7 +1806,7 @@ def _column_map(deb):
     The (object, kind, sub) description of every packed column.
 
     kind is one of 'F' (sub = band), 'cen' (sub 0 = v, 1 = u), 'cov'
-    (sub = 00, 01, 11 component), 'fracdev', 'sw'.
+    (sub = 00, 01, 11 component), 'sw'.
     """
     from .deblender import _adaptive
 
@@ -1821,8 +1818,6 @@ def _column_map(deb):
         if not _adaptive(m):
             continue
         cols += [(k, 'cov', c) for c in range(3)]
-        if m['type'] == 'bdf':
-            cols += [(k, 'fracdev', 0)]
         cols += [(k, 'sw', c) for c in range(3)]
     return cols
 
@@ -1915,7 +1910,7 @@ def _model_sum_derivs(deb, cols):
                 dNS[(k, ic)] = (
                     ns(k, wt_cov=swp) - ns(k, wt_cov=swm)
                 ) / (2 * h_cov)
-            if m['type'] in ('exp', 'dev', 'bdf'):
+            if m['type'] in ('exp', 'dev'):
                 sw0 = deb.wt_cov[k]
                 deb.wt_cov[k] = swp
                 psp = deb._get_predicted_sums(k)
@@ -1954,7 +1949,7 @@ def _model_sum_derivs(deb, cols):
                 nsm = pair(i, k)
                 m['F'] = F0
                 dNS[(i, ic)] = (nsp - nsm) / 2.0
-            if m['type'] in ('exp', 'dev', 'bdf'):
+            if m['type'] in ('exp', 'dev'):
                 m['F'] = F0.copy()
                 m['F'][sub] += 1.0
                 psp = deb._get_predicted_sums(k)
@@ -1982,7 +1977,7 @@ def _model_sum_derivs(deb, cols):
                 nsm = pair(i, k)
                 m[key] = cov0
                 dNS[(i, ic)] = (nsp - nsm) / (2 * h_cov)
-            if m['type'] in ('exp', 'dev', 'bdf'):
+            if m['type'] in ('exp', 'dev'):
                 m[key] = covp
                 psp = deb._get_predicted_sums(k)
                 m[key] = covm
@@ -2044,7 +2039,7 @@ def _model_sum_derivs_full(deb, cols):
                 dNS[(k, ic)] = (
                     ns(k, wt_cov=swp) - ns(k, wt_cov=swm)
                 ) / (2 * h_cov)
-            if m['type'] in ('exp', 'dev', 'bdf'):
+            if m['type'] in ('exp', 'dev'):
                 sw0 = deb.wt_cov[k]
                 deb.wt_cov[k] = swp
                 psp = deb._get_predicted_sums(k)
@@ -2083,7 +2078,7 @@ def _model_sum_derivs_full(deb, cols):
                 nsm = ns(i)
                 m['F'] = F0
                 dNS[(i, ic)] = (nsp - nsm) / 2.0
-            if m['type'] in ('exp', 'dev', 'bdf'):
+            if m['type'] in ('exp', 'dev'):
                 m['F'] = F0.copy()
                 m['F'][sub] += 1.0
                 psp = deb._get_predicted_sums(k)
@@ -2111,14 +2106,13 @@ def _model_sum_derivs_full(deb, cols):
                 nsm = ns(i)
                 m[key] = cov0
                 dNS[(i, ic)] = (nsp - nsm) / (2 * h_cov)
-            if m['type'] in ('exp', 'dev', 'bdf'):
+            if m['type'] in ('exp', 'dev'):
                 m[key] = covp
                 psp = deb._get_predicted_sums(k)
                 m[key] = covm
                 psm = deb._get_predicted_sums(k)
                 m[key] = cov0
                 dPS[(k, ic)] = (psp - psm) / (2 * h_cov)
-        # 'fracdev' unused: bdf is excluded by the type guard
     return dNS, dPS
 
 
@@ -2242,7 +2236,7 @@ def _chain_pieces(deb, snap, x0, caches, Ds, theta0s, slices,
     ]
     psums_cache = [
         deb._get_predicted_sums(i)
-        if deb.models[i]['type'] in ('exp', 'dev', 'bdf')
+        if deb.models[i]['type'] in ('exp', 'dev')
         else None
         for i in range(nobj)
     ]
@@ -2734,7 +2728,7 @@ def _base_inputs(deb, i, caches, nsums_cache, psums_cache,
     _get_object_sums accumulation.
     """
     nband = deb.nband
-    is_mix = deb.models[i]['type'] in ('exp', 'dev', 'bdf')
+    is_mix = deb.models[i]['type'] in ('exp', 'dev')
     sums = np.zeros(6)
     fs = np.zeros(nband)
     ws = np.zeros(nband)

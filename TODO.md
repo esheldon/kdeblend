@@ -1,9 +1,9 @@
 # TODO
 
 - Integrate the 'ladder' model type: the free-amplitude
-  concentric gaussian ladder, to replace exp/dev/bdf once
+  concentric gaussian ladder, to replace exp/dev once
   validated at field scale (evidence in the DONE 2026-08-31
-  entry and experiments/).  Locked design choices: per-band
+  entry).  Locked design choices: per-band
   amplitude vectors in flux units with a cross-band prior
   (taux ~ 0.1-0.3 in fraction units) and a noise-scaled prior
   toward the exp profile (tau0 ~ 0.3-1); the frame from the
@@ -713,12 +713,13 @@
   bitwise repeatable (the driver seeds it).  DECIDED (Erin):
   rng is required whenever fwhm_smooth is not sent
   (_get_smoothing raises); the 70 test call sites pass one, the
-  driver already did; the experiments/ scripts (7) predate this
-  and would need an rng to rerun.  The sweep count's
+  driver already did; the experiments/ scripts (7, since removed) predate
+  this and would need an rng to rerun.  The sweep count's
   sensitivity to a 1e-6 change in the smoothing is itself a
   measure of how near-critical the exp iteration is on such
   blends.
-  Visual comparisons (2026-09-01, experiments/vis_*.py, figures
+  Visual comparisons (2026-09-01, experiments/vis_*.py, since
+  removed, figures
   in ~/data/simcoadd-mdet/runs/ladder-figures): a bulge (n=4,
   red) + disk (exp, blue) galaxy at s/n ~100, a five-galaxy
   blend, and a random eight-galaxy blend (s/n 9-120 after the
@@ -1143,9 +1144,8 @@
   Remaining slices, in priority order: Stage B/C of the wldb
   validation against exp (doshear differential m, then
   production scale, with the capped total; Stage A photometry
-  is done above; the gate for the exp/dev/bdf deletion
-  decision, which also makes the bdf items below moot -- decide,
-  do not do them); gpu support
+  is done above; the gate for the exp/dev deletion
+  decision); gpu support
   (the fused J-aperture admom_ksums kernel serves both the fit
   cost and the gpu port); the analytic state-column amp
   response.  (The tight-blend totals
@@ -1159,8 +1159,18 @@
   shape's aperture completion to 3 decimals in every case,
   see the LADDER_TAU_TOTAL comment.)
 
+DONE (2026-11-16): removed the 'bdf' model type (not found
+useful): the split solve, joint sandwich and fracdev state in
+deblender.py (~470 lines), its full_errors/render branches and
+tests.  The older entries that mention bdf are history.  Follow
+up: simcoadd-mdet still accepts model 'bdf' (config.py,
+deblending.py, fitting.py, scripts/wldb_cluster_cores.py
+defaults to it); ngmix.prepsfadmom keeps its own bdf support.
+
 DONE (2026-08-31): ladder experimental phase (branch ladder,
-experiments/*.py, seven studies).  Findings and decisions:
+experiments/*.py, seven studies; the directory was removed
+2026-11-16 in 6b73724, the scripts are in the git history before
+it).  Findings and decisions:
 
 - Contamination (sersic truths, noiseless): exp removes only
   30-55 percent of a bright neighbor's wing leakage at 1.5-2
@@ -1231,9 +1241,6 @@ experiments/*.py, seven studies).  Findings and decisions:
   aperture, reconstructable from the full outputs, which keep
   the amps.
 
-- Consider bdf for the PAdmomFitter full errors (gauss/exp/dev
-  done).
-
 - Tight-blend (nn < 8 px) structure errors under recentering:
   the moving-anchor FD probe reads fam/gauss e and T 15-30
   percent low in the jumpy-anchor half of that bin (sep
@@ -1243,9 +1250,6 @@ experiments/*.py, seven studies).  Findings and decisions:
   Possible mitigations if it matters: inflate the anchor
   covariances for multi-peak segments, or flag unstable-anchor
   rows.
-
-- Extend `bdf_joint_sandwich` with the cross-band flux
-  covariance and lift the bdf/star guard in full_errors.
 
 
 - Remaining cost levers, all bounded (full errors now 21 ms

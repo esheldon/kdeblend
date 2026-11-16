@@ -21,11 +21,12 @@ DIM = 64
 def make_profile(comp):
     """
     galsim pre-psf profile from a component dict with entries
-    kind ('gauss', 'star', 'exp', 'dev', 'sersic'), flux, v, u and
-    shape/size pars (e1, e2, T for gauss; e1, e2, hlr for exp; e1,
-    e2, T for dev, rendered as the exact ngmix 10-gaussian
-    expansion; e1, e2, hlr, n for sersic, the true galsim profile,
-    which no model type can represent exactly)
+    kind ('gauss', 'star', 'exp', 'expmix', 'dev', 'sersic'), flux,
+    v, u and shape/size pars (e1, e2, T for gauss; e1, e2, hlr for
+    exp, the true galsim profile; e1, e2, T for expmix and dev,
+    rendered as the exact ngmix 6- and 10-gaussian expansions the
+    'exp' and 'dev' model types fit; e1, e2, hlr, n for sersic, the
+    true galsim profile, which no model type can represent exactly)
     """
     if comp['kind'] == 'star':
         p = galsim.DeltaFunction(gsparams=GSPARAMS) * comp['flux']
@@ -38,10 +39,11 @@ def make_profile(comp):
         p = galsim.Exponential(
             half_light_radius=comp['hlr'], gsparams=GSPARAMS,
         ).shear(e1=comp['e1'], e2=comp['e2']) * comp['flux']
-    elif comp['kind'] == 'dev':
+    elif comp['kind'] in ('dev', 'expmix'):
         from ngmix.prepsfadmom.models import get_profile_comps
+        name = 'exp' if comp['kind'] == 'expmix' else 'dev'
         parts = []
-        for frac, cT in get_profile_comps('dev'):
+        for frac, cT in get_profile_comps(name):
             cov = cov_from_e(comp['e1'], comp['e2'], cT * comp['T'])
             parts.append(
                 galsim.Gaussian(

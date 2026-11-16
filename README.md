@@ -31,8 +31,6 @@ Model types:
   single-gaussian bright neighbor contaminate faint neighbors at the
   tens-of-percent level, while these models reduce this by 1-2
   orders of magnitude.
-- `'bdf'`: composite exp plus dev with shared center and ellipticity
-  and a per-band flux split fit by a two-aperture solve
 - `'ladder'`: the free-amplitude concentric gaussian ladder
   (see `kdeblend.ladder`)
 

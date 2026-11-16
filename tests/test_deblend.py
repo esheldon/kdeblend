@@ -487,6 +487,59 @@ def test_fixed_models():
         )
 
 
+def test_fixed_models_mixture():
+    """
+    exp and dev entries work as fixed external models: a brighter
+    neighbor rendered as the exact mixture is subtracted in closed
+    form and the target is recovered
+    """
+    target = dict(kind='gauss', e1=0.05, e2=0.0, T=0.4,
+                  flux=100.0, v=0.0, u=-1.0)
+    objects = [dict(v=target['v'], u=target['u'], type='gauss',
+                    Tguess=0.4)]
+
+    for kind, ftype in (('expmix', 'exp'), ('dev', 'dev')):
+        nbr = dict(kind=kind, v=0.0, u=1.8, e1=0.1, e2=-0.05, T=0.6,
+                   flux=300.0)
+        obs = make_blend_obs([target, nbr], 0.9)
+
+        res = deblend(
+            obs, objects, fwhm_smooth=FWHM_SMOOTH, tol=1.0e-8,
+            fixed_models=[dict(
+                v=nbr['v'], u=nbr['u'], type=ftype,
+                flux=np.array([nbr['flux']]),
+                e1=nbr['e1'], e2=nbr['e2'], T=nbr['T'],
+            )],
+            rng=np.random.RandomState(1),
+        )
+        r = res['objects'][0]
+        assert abs(r['flux'][0] / target['flux'] - 1) < 5.0e-3
+        assert abs(r['e1'] - target['e1']) < 5.0e-3
+        assert abs(r['T'] / target['T'] - 1) < 5.0e-3
+
+
+def test_bad_types():
+    """unknown object and fixed model types raise"""
+    comp = dict(kind='gauss', e1=0.0, e2=0.0, T=0.4, flux=100.0,
+                v=0.0, u=0.0)
+    obs = make_blend_obs([comp], 0.9)
+    good = [dict(v=0.0, u=0.0, type='gauss', Tguess=0.4)]
+
+    with pytest.raises(ValueError, match='bad object type'):
+        deblend(
+            obs, [dict(v=0.0, u=0.0, type='bdf', Tguess=0.4)],
+            fwhm_smooth=FWHM_SMOOTH,
+        )
+    with pytest.raises(ValueError, match='bad fixed model type'):
+        deblend(
+            obs, good, fwhm_smooth=FWHM_SMOOTH,
+            fixed_models=[dict(
+                v=0.0, u=1.5, type='bdf', flux=np.array([10.0]),
+                e1=0.0, e2=0.0, T=0.5,
+            )],
+        )
+
+
 def test_dev_blends():
     """
     per-object model types including 'dev': a dev + gauss pair

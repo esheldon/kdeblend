@@ -6,7 +6,7 @@ gaussian (ngmix.prepsfadmom), so all bands share a pre-seeing space.
 A Gauss-Seidel loop visits each object, measures its weighted moment
 sums from the k-plane data with the neighbors' models subtracted in
 closed form, and updates its model: a per-object type among gauss,
-exp, dev, bdf, ladder and star, with one structure across bands and
+exp, dev, ladder and star, with one structure across bands and
 per-band fluxes under a common aperture.  Centers stay at the
 detection positions unless recenter is on.
 
@@ -25,12 +25,11 @@ from ngmix.moments import fwhm_to_T
 from ngmix.prepsfadmom.prep import choose_fwhm_smooth, prep_epoch
 from ngmix.prepsfadmom import get_phase_angles, deweight
 from ngmix.prepsfadmom.errors import (
-    model_sandwich, bdf_joint_sandwich, joint_flux_s2n,
+    model_sandwich, joint_flux_s2n,
 )
 from ngmix.prepsfadmom.prepsfadmom_nb import admom_ksums, admom_finalize
-from ngmix.fastexp_nb import FASTEXP_MAX_CHI2
 
-from ngmix.moments import cov_from_e, cov_from_mom
+from ngmix.moments import cov_from_e
 from ngmix.prepsfadmom.models import (
     det2, model_ksums, model_gauss_components, mixture_model_valid,
 )
@@ -100,14 +99,6 @@ MAX_WEIGHT_SIGMA_FAC = 0.5
 # by a few times at most (low surface-brightness wings).  Rejected
 # updates are contained exactly like the stamp bound's
 WEIGHT_TMAX_FAC = 10.0
-
-# update the bdf flux split every this many sweeps: the split
-# varies slowly compared to the structure, so intermediate sweeps
-# can reuse it, saving the smoothing-aperture data pass.  The last
-# update's change is carried in the convergence metric on the
-# sweeps between updates, so a fit cannot converge with a stale
-# split.  1 updates every sweep
-BDF_SPLIT_EVERY = 2
 
 # recentering: the maximum displacement of a center from its
 # detection position, scaled by sqrt(Tsmooth), and the prior
@@ -253,19 +244,10 @@ def deblend(
                 center, as offsets from the image jacobian centers in
                 sky coordinates (the detection position with recenter)
             type: str, optional
-                'gauss' (default), 'star', 'exp', 'dev', 'bdf' or
-                'ladder'.  Stars are pre-psf delta functions with only
-                their fluxes fit; 'bdf' is the composite exp plus dev
-                model (shared center and ellipticity, dev size TdByTe
-                times the exp size) with a per-band flux split fit by a
-                two-aperture solve; 'ladder' is the free-amplitude
-                concentric gaussian ladder (see kdeblend.ladder)
-            TdByTe: float
-                the dev to exp size ratio; required for 'bdf'
-            fracdev0, fracdev_sigma0: float, optional
-                sent together, regularize the bdf flux split toward the
-                prior fracdev0 with width fracdev_sigma0 (0 freezes it);
-                the reported component fluxes stay the raw solutions
+                'gauss' (default), 'star', 'exp', 'dev' or 'ladder'.
+                Stars are pre-psf delta functions with only their
+                fluxes fit; 'ladder' is the free-amplitude concentric
+                gaussian ladder (see kdeblend.ladder)
             Tguess: float, optional
                 initial pre-psf T, default 0.5; ignored for stars
             Tdet: float, optional
@@ -314,10 +296,9 @@ def deblend(
         External sources whose light is subtracted in closed form but
         whose parameters are never updated.  Each entry has v, u (in
         the objects' frame), flux (array over bands), type ('gauss'
-        default, 'star', 'exp', 'dev', 'bdf' or 'ladder'), and for
-        non-star types the pre-psf e1, e2, T as reported by a previous
-        deblend; 'bdf' entries also carry fracdev and TdByTe, 'ladder'
-        entries amps.  Nonfinite parameters raise.
+        default, 'star', 'exp', 'dev' or 'ladder'), and for non-star
+        types the pre-psf e1, e2, T as reported by a previous deblend;
+        'ladder' entries also carry amps.  Nonfinite parameters raise.
     recenter: bool, optional
         If True, the centers join the per-sweep updates, moving by the
         measured centroid pull regularized toward the detection
@@ -336,7 +317,7 @@ def deblend(
         with recenter=False.
     e_sigma0: float, optional
         The prior width of an ellipticity regularization of the
-        exp/dev/bdf family updates: the proposed family covariance is
+        exp/dev family updates: the proposed family covariance is
         pulled toward round at fixed trace with weight
         k = e_sigma0^2/(e_sigma0^2 + sigma_e^2), sigma_e the object's
         one-time ellipticity noise.  Only the model state is pulled;
@@ -605,16 +586,6 @@ class _Deblender(object):
         self.cen_sigma0 = cen_sigma0
         self.e_sigma0 = float(e_sigma0)
 
-        # per bdf object: the latest two-aperture component fluxes
-        # (nband, 2), the raw split and its variance, and the
-        # one-time aperture noise variances for the shrinkage;
-        # the shrinkage parameters and the split init are read
-        # from the object entries in _init_models
-        self.bdf_info = {}
-        self._bdf_noise_cache = {}
-        self.fd_shrink = [None] * len(objects)
-        self.fd_init = [0.5] * len(objects)
-        self.bdf_last_dfd = np.zeros(len(objects))
         # per ladder object: the last scene-wide amp solve's
         # relative change, carried into the convergence metric
         # between solves (see _update_gauss)
@@ -738,33 +709,6 @@ class _Deblender(object):
                     np.diag([(Tguess + self.Tsmooth) / 2] * 2),
                 )
                 m['cov'] = cov_from_e(0.0, 0.0, Tguess)
-            elif otype == 'bdf':
-                if 'TdByTe' not in o:
-                    raise ValueError(
-                        "bdf objects require a 'TdByTe' entry"
-                    )
-                fd0 = o.get('fracdev0')
-                sigma0 = o.get('fracdev_sigma0')
-                if (fd0 is None) != (sigma0 is None):
-                    raise ValueError(
-                        'the fracdev shrinkage requires both '
-                        'fracdev0 and fracdev_sigma0 (or neither)'
-                    )
-                if sigma0 is not None and sigma0 < 0:
-                    raise ValueError(
-                        'fracdev_sigma0 must be non-negative, '
-                        f'got {sigma0}'
-                    )
-                i = len(self.models)
-                if fd0 is not None:
-                    self.fd_shrink[i] = (fd0, sigma0)
-                    self.fd_init[i] = fd0
-                self.wt_cov.append(
-                    np.diag([(Tguess + self.Tsmooth) / 2] * 2),
-                )
-                m['cov'] = cov_from_e(0.0, 0.0, Tguess)
-                m['fracdev'] = self.fd_init[i]
-                m['TdByTe'] = o['TdByTe']
             elif otype == 'ladder':
                 self.wt_cov.append(
                     np.diag([(Tguess + self.Tsmooth) / 2] * 2),
@@ -1305,350 +1249,8 @@ class _Deblender(object):
             m['cov'] = prop
             self.nfail[i] = 0
 
-        if m['type'] == 'bdf':
-            # the split update runs under the pre-update weight so
-            # the flux sums measured for the structure step can be
-            # reused as its first aperture row; the one-sweep lag
-            # vanishes at the fixed point like the other lags in
-            # the iteration.  Between updates the last change is
-            # carried so convergence waits for a settled split
-            if self.isweep % BDF_SPLIT_EVERY == 0:
-                self.bdf_last_dfd[i] = self._update_bdf_split(i, fs)
-            change = max(change, self._note_change(
-                'struct', self.bdf_last_dfd[i],
-            ))
-
         self.wt_cov[i] = new_wt_cov
         return change
-
-    def _update_bdf_split(self, i, fs1):
-        """
-        The per-sweep flux split update for a bdf object.
-
-        A two-aperture linear solve for the component fluxes: the
-        apertures are the object's adaptive weight (its sums reused from
-        the structure step, fs1) and the smoothing weight, whose
-        different scales separate the exp and dev templates.  The
-        band-combined split is optionally shrunk toward the prior before
-        it updates the model; the component fluxes and the raw split are
-        kept for the result.  Returns the absolute split change.
-        """
-        m = self.models[i]
-        fam_cov = m['cov']
-        vi, ui = self.positions[i]
-        weights = [self.wt_cov[i], self.smooth_cov]
-        parts = [
-            {'type': 'exp', 'cov': fam_cov,
-             'F': np.ones(self.nband)},
-            {'type': 'dev', 'cov': m['TdByTe'] * fam_cov,
-             'F': np.ones(self.nband)},
-        ]
-
-        ws = np.zeros(self.nband)
-        for ep in self.epochs_per_obj[i]:
-            ws[ep['band']] += ep['weight']
-
-        # unit-flux template sums per aperture at detAtinv=1; the
-        # per-band matrix is this times the band weight sum
-        base = np.zeros((2, 2))
-        for a, wt_cov in enumerate(weights):
-            for c, part in enumerate(parts):
-                base[a, c] = model_ksums(
-                    part, 0, 0.0, 0.0, wt_cov, 1.0, self.Tsmooth,
-                )[5]
-        det = base[0, 0] * base[1, 1] - base[0, 1] * base[1, 0]
-        if abs(det) < 1.0e-10 * abs(base[0, 0] * base[1, 1]):
-            return 0.0
-
-        # measured neighbor-corrected flux sums: the adaptive
-        # aperture row is the reused structure-step measurement,
-        # the smoothing aperture needs its own pass
-        fs2 = np.zeros((2, self.nband))
-        fs2[0] = fs1
-        wt_cov = self.smooth_cov
-        nsums = self._get_neighbor_sums(i, wt_cov=wt_cov)
-        for ep in self.epochs_per_obj[i]:
-            alpha, beta = get_phase_angles(
-                ep, vi - ep['vcen'], ui - ep['ucen'],
-            )
-            admom_ksums(
-                ep['kim'], ep['iy'], ep['ix'], ep['dim'],
-                alpha, beta, ep['kv'], ep['ku'],
-                wt_cov[0, 0], wt_cov[0, 1], wt_cov[1, 1], ep['df2'],
-                self.esums,
-            )
-            csums = (
-                self.esums - nsums[ep['band']] / ep['detAtinv']
-            )
-            fac = ep['weight'] * ep['detAtinv']
-            fs2[1, ep['band']] += fac * csums[5]
-
-        var2 = self._get_bdf_noise_vars(i, weights)
-
-        F2 = np.zeros((self.nband, 2))
-        fcovs = np.zeros((self.nband, 2, 2))
-        for band in range(self.nband):
-            Mb = base * ws[band]
-            F2[band] = np.linalg.solve(Mb, fs2[:, band])
-            Mbinv = np.linalg.inv(Mb)
-            fcovs[band] = (
-                Mbinv @ np.diag(var2[:, band]) @ Mbinv.T
-            )
-
-        E = F2[:, 0].sum()
-        D = F2[:, 1].sum()
-        S = E + D
-        if S == 0:
-            return 0.0
-        fd_gls = D / S
-        grad = np.array([-D, E]) / S ** 2
-        fd_var = 0.0
-        for band in range(self.nband):
-            fd_var += grad @ fcovs[band] @ grad
-
-        if self.fd_shrink[i] is None:
-            newfd = fd_gls
-        else:
-            fd0, sigma0 = self.fd_shrink[i]
-            if sigma0 == 0 or fd_var <= 0:
-                newfd = fd0 if sigma0 == 0 else fd_gls
-            else:
-                w = 1.0 / fd_var
-                w0 = 1.0 / sigma0 ** 2
-                newfd = (fd_gls * w + fd0 * w0) / (w + w0)
-        newfd = np.clip(newfd, -0.5, 1.5)
-
-        change = abs(newfd - m['fracdev'])
-        m['fracdev'] = newfd
-        self.bdf_info[i] = {
-            'F2': F2, 'fd_gls': fd_gls, 'fd_var': fd_var,
-        }
-        return change
-
-    def _get_bdf_noise_vars(self, i, weights):
-        """
-        One-time per-aperture per-band noise variances of the flux sums.
-
-        For the shrinkage weight (diagonal approximation: the cross
-        covariance between the apertures is neglected, which
-        underestimates their correlation but only affects the
-        regularization strength).
-        """
-        if i not in self._bdf_noise_cache:
-            vi, ui = self.positions[i]
-            var2 = np.zeros((2, self.nband))
-            fcov = np.zeros((6, 6))
-            for a, wt_cov in enumerate(weights):
-                for ep in self.epochs_per_obj[i]:
-                    alpha, beta = get_phase_angles(
-                        ep, vi - ep['vcen'], ui - ep['ucen'],
-                    )
-                    admom_finalize(
-                        ep['kim'], ep['iy'], ep['ix'], ep['dim'],
-                        alpha, beta, ep['kv'], ep['ku'],
-                        wt_cov[0, 0], wt_cov[0, 1], wt_cov[1, 1], ep['df2'],
-                        ep['err_fac2'],
-                        self.esums, fcov,
-                    )
-                    fac = ep['weight'] * ep['detAtinv']
-                    nfac = ep['df2'] ** 2
-                    var2[a, ep['band']] += (
-                        fac ** 2 * nfac * fcov[5, 5]
-                    )
-            self._bdf_noise_cache[i] = var2
-        return self._bdf_noise_cache[i]
-
-    def _bdf_split_response(self, i):
-        """
-        d fd_gls / d (M1, M2, T) of the family covariance.
-
-        At the model consistent point: the two-aperture solve of the
-        converged model itself (closed form template sums on both
-        sides), re-solved with the template matrix at perturbed
-        structure.  Central differences over the mbasis.  The band
-        weight sums cancel between the two sides, so they are omitted.
-        """
-        m = self.models[i]
-        info = self.bdf_info.get(i)
-        fam_cov = m['cov']
-        Td = m['TdByTe']
-
-        fam0 = np.array([
-            fam_cov[1, 1] - fam_cov[0, 0], 2 * fam_cov[0, 1],
-            fam_cov[0, 0] + fam_cov[1, 1],
-        ])
-        h = 1.0e-6 * max((1.0 + Td) * fam0[2], 1.0e-3)
-
-        def base_at(S):
-            parts = [
-                {'type': 'exp', 'cov': S,
-                 'F': np.ones(self.nband)},
-                {'type': 'dev', 'cov': Td * S,
-                 'F': np.ones(self.nband)},
-            ]
-            base = np.zeros((2, 2))
-            for a, wt_cov in enumerate((self.wt_cov[i], self.smooth_cov)):
-                for c, part in enumerate(parts):
-                    base[a, c] = model_ksums(
-                        part, 0, 0.0, 0.0, wt_cov, 1.0, self.Tsmooth,
-                    )[5]
-            return base
-
-        base0 = base_at(fam_cov)
-        # model-consistent measured side: the converged raw
-        # components through the unperturbed template sums
-        bmod = info['F2'] @ base0.T
-
-        def split_at(famvec):
-            bp = base_at(cov_from_mom(*famvec))
-            det = bp[0, 0] * bp[1, 1] - bp[0, 1] * bp[1, 0]
-            if abs(det) < 1.0e-10 * abs(bp[0, 0] * bp[1, 1]):
-                return None
-            E = 0.0
-            D = 0.0
-            for band in range(self.nband):
-                Fp = np.linalg.solve(bp, bmod[band])
-                E += Fp[0]
-                D += Fp[1]
-            S = E + D
-            return D / S if S != 0 else None
-
-        G = np.zeros(3)
-        for j in range(3):
-            famp = fam0.copy()
-            famm = fam0.copy()
-            famp[j] += h
-            famm[j] -= h
-            fp = split_at(famp)
-            fm = split_at(famm)
-            if fp is None or fm is None:
-                return None
-            G[j] = (fp - fm) / (2 * h)
-        return G
-
-    def _bdf_error_terms(self, i, fvar_raw, fmcov):
-        """
-        The joint-sandwich inputs for a bdf object at the converged state.
-
-        The split response G, the shrinkage factor k, the full noise
-        variance of the raw split and its cross covariance with the
-        object's moment and flux sums.  The split noise is a linear
-        functional of the same modes as the moment sums, so the
-        adaptive-aperture crosses come from the accumulated fvar_raw and
-        fmcov and the smoothing aperture needs one cross-aperture kernel
-        overlap pass.  Returns (G, k, fd_var, eta_scov, eta_fcovs) or
-        None when the terms cannot be evaluated.
-        """
-        info = self.bdf_info.get(i)
-        if info is None:
-            return None
-
-        F2 = info['F2']
-        E = F2[:, 0].sum()
-        D = F2[:, 1].sum()
-        S = E + D
-        if S == 0:
-            return None
-        grad = np.array([-D, E]) / S ** 2
-
-        G = self._bdf_split_response(i)
-        if G is None:
-            return None
-
-        wt_cov = self.wt_cov[i]
-        smooth_cov = self.smooth_cov
-
-        # cross-aperture kernel overlaps: the smoothing-aperture
-        # flux kernel against the adaptive-weight (M1, M2, T, flux)
-        # kernels, and its own square, times the noise power
-        X2 = np.zeros((self.nband, 4))
-        var22 = np.zeros(self.nband)
-        for ep in self.epochs_per_obj[i]:
-            kv = ep['kv']
-            ku = ep['ku']
-            Sv = wt_cov[0, 0] * kv + wt_cov[0, 1] * ku
-            Su = wt_cov[0, 1] * kv + wt_cov[1, 1] * ku
-            chi2 = kv * Sv + ku * Su
-            wk1 = np.exp(-0.5 * np.clip(chi2, 0, FASTEXP_MAX_CHI2))
-            wk1[(chi2 > FASTEXP_MAX_CHI2) | (chi2 < 0)] = 0.0
-            vvk = (wt_cov[0, 0] - Sv * Sv) * wk1
-            vuk = (wt_cov[0, 1] - Sv * Su) * wk1
-            uuk = (wt_cov[1, 1] - Su * Su) * wk1
-            kern = (uuk - vvk, 2 * vuk, uuk + vvk, wk1)
-
-            Sv2 = smooth_cov[0, 0] * kv + smooth_cov[0, 1] * ku
-            Su2 = smooth_cov[0, 1] * kv + smooth_cov[1, 1] * ku
-            chi22 = kv * Sv2 + ku * Su2
-            wk2 = np.exp(
-                -0.5 * np.clip(chi22, 0, FASTEXP_MAX_CHI2)
-            )
-            wk2[(chi22 > FASTEXP_MAX_CHI2) | (chi22 < 0)] = 0.0
-            w2ef = wk2 * ep['err_fac2']
-
-            fac2 = (
-                (ep['weight'] * ep['detAtinv']) ** 2
-                * ep['df2'] ** 2
-            )
-            band = ep['band']
-            for c in range(4):
-                X2[band, c] += fac2 * np.sum(w2ef * kern[c])
-            var22[band] += fac2 * np.sum(w2ef * wk2)
-
-        # the converged template matrix per band
-        m = self.models[i]
-        base = np.zeros((2, 2))
-        parts = [
-            {'type': 'exp', 'cov': m['cov'],
-             'F': np.ones(self.nband)},
-            {'type': 'dev', 'cov': m['TdByTe'] * m['cov'],
-             'F': np.ones(self.nband)},
-        ]
-        for a, wt_cov_a in enumerate((wt_cov, smooth_cov)):
-            for c, part in enumerate(parts):
-                base[a, c] = model_ksums(
-                    part, 0, 0.0, 0.0, wt_cov_a, 1.0, self.Tsmooth,
-                )[5]
-
-        ws = np.zeros(self.nband)
-        for ep in self.epochs_per_obj[i]:
-            ws[ep['band']] += ep['weight']
-
-        eta_scov = np.zeros(3)
-        eta_fcovs = np.zeros(self.nband)
-        fd_var = 0.0
-        for band in range(self.nband):
-            Mb = base * ws[band]
-            try:
-                wb = np.linalg.inv(Mb).T @ grad
-            except np.linalg.LinAlgError:
-                return None
-            C2 = np.array([
-                [fvar_raw[band], X2[band, 3]],
-                [X2[band, 3], var22[band]],
-            ])
-            fd_var += wb @ C2 @ wb
-            eta_scov += wb[0] * fmcov[band] + wb[1] * X2[band, :3]
-            eta_fcovs[band] = (
-                wb[0] * fvar_raw[band] + wb[1] * X2[band, 3]
-            )
-        if not fd_var > 0:
-            return None
-        info['fd_var_full'] = fd_var
-
-        # the shrinkage factor the estimator actually applied,
-        # from the same variance the update used
-        shrink = self.fd_shrink[i]
-        if shrink is None:
-            k = 1.0
-        else:
-            _, sigma0 = shrink
-            if sigma0 == 0:
-                k = 0.0
-            elif info['fd_var'] > 0:
-                k = sigma0 ** 2 / (sigma0 ** 2 + info['fd_var'])
-            else:
-                k = 1.0
-        return G, k, fd_var, eta_scov, eta_fcovs
 
     def _mixture_shift(self, i, new_wt_cov, sums, pred):
         """
@@ -1741,11 +1343,8 @@ class _Deblender(object):
         if self.nrestart[i] == 0:
             self.nrestart[i] = 1
             self.dbflags[i] |= RESTARTED
-            if m['type'] in ('exp', 'dev', 'bdf'):
+            if m['type'] in ('exp', 'dev'):
                 m['cov'] = np.zeros((2, 2))
-                if m['type'] == 'bdf':
-                    m['fracdev'] = self.fd_init[i]
-                    self.bdf_last_dfd[i] = 1.0
             else:
                 m['cov_sm'] = self.smooth_cov.copy()
                 if m['type'] == 'ladder':
@@ -1892,13 +1491,6 @@ class _Deblender(object):
                 x.extend([
                     m['cov'][0, 0], m['cov'][0, 1], m['cov'][1, 1],
                 ])
-            elif m['type'] == 'bdf':
-                # the split is packed with an offset so its scale
-                # is O(1) even when it converges near zero
-                x.extend([
-                    m['cov'][0, 0], m['cov'][0, 1], m['cov'][1, 1],
-                    m['fracdev'] + 2.0,
-                ])
             if m['type'] != 'star':
                 x.extend([sw[0, 0], sw[0, 1], sw[1, 1]])
         x = np.array(x)
@@ -1936,12 +1528,6 @@ class _Deblender(object):
                     [x[k], x[k + 1]], [x[k + 1], x[k + 2]],
                 ])
                 k += 3
-            elif m['type'] == 'bdf':
-                m['cov'] = np.array([
-                    [x[k], x[k + 1]], [x[k + 1], x[k + 2]],
-                ])
-                m['fracdev'] = x[k + 3] - 2.0
-                k += 4
             if m['type'] != 'star':
                 self.wt_cov[i] = np.array([
                     [x[k], x[k + 1]], [x[k + 1], x[k + 2]],
@@ -1962,7 +1548,7 @@ class _Deblender(object):
         for i, (m, sw) in enumerate(zip(self.models, self.wt_cov)):
             if sw[0, 0] <= 0 or sw[1, 1] <= 0 or det2(sw) <= 0:
                 return False
-            if m['type'] in ('exp', 'dev', 'bdf'):
+            if m['type'] in ('exp', 'dev'):
                 if not mixture_model_valid(
                         m, m['cov'], ZERO_WEIGHT,
                         self.Tsmooth):
@@ -1992,7 +1578,7 @@ class _Deblender(object):
         pred, fs_pred) with fs, ws, fs_pred per band.
         """
         vi, ui = self.positions[i]
-        is_mix = self.models[i]['type'] in ('exp', 'dev', 'bdf')
+        is_mix = self.models[i]['type'] in ('exp', 'dev')
         wt_cov = self.wt_cov[i]
 
         base_nsums = self._get_neighbor_sums(i)
@@ -2113,8 +1699,8 @@ class _Deblender(object):
 
         sums_i, fs, ws, _, _ = self._get_object_sums(i)
         fvar_raw, fmcov, covj = self._accumulate_error_sums(i)
-        (fvar, fam_err_cov, fcov_raw, gfvar, gfam_err_cov, gfcov_raw,
-         fd_var_tot) = self._run_sandwiches(
+        (fvar, fam_err_cov, fcov_raw, gfvar, gfam_err_cov,
+         gfcov_raw) = self._run_sandwiches(
             i, sums_i, covj, fs, fvar_raw, fmcov,
         )
         flux_err, s2n = _flux_errors(m['F'], fs, fvar, fcov=fcov_raw)
@@ -2133,32 +1719,6 @@ class _Deblender(object):
         self._set_gauss_entries(
             res, i, fs, ws, gfvar, gfam_err_cov, gfcov_raw,
         )
-
-        if m['type'] == 'bdf':
-            res['fracdev'] = m['fracdev']
-            res['TdByTe'] = m['TdByTe']
-            res['fracdev_err'] = (
-                np.sqrt(fd_var_tot)
-                if fd_var_tot is not None and fd_var_tot > 0
-                else np.nan
-            )
-            info = self.bdf_info.get(i)
-            if info is not None:
-                # the full split noise variance from the error
-                # pass when available, else the diagonal
-                # approximation used for the regularization
-                fdv = info.get('fd_var_full', info['fd_var'])
-                res['fracdev_gls'] = info['fd_gls']
-                res['fracdev_gls_err'] = (
-                    np.sqrt(fdv) if fdv > 0 else np.nan
-                )
-                res['flux_exp'] = info['F2'][:, 0].copy()
-                res['flux_dev'] = info['F2'][:, 1].copy()
-            else:
-                res['fracdev_gls'] = np.nan
-                res['fracdev_gls_err'] = np.nan
-                res['flux_exp'] = np.full(self.nband, np.nan)
-                res['flux_dev'] = np.full(self.nband, np.nan)
 
         if m['type'] == 'ladder':
             # the per-band amplitude matrix (nband, K), in flux
@@ -2228,15 +1788,13 @@ class _Deblender(object):
         family covariance for the structure errors; for a gauss object
         it is the analytic delta method, and star weights are frozen so
         their flux variance is exact.  The gauss-estimator analogs under
-        the same weight are returned too.  A bdf object uses the joint
-        sandwich over the coupled (structure, split) equations, with the
-        conditional sandwich as the fallback.
+        the same weight are returned too.
 
         Returns
         -------
-        fvar, fam_err_cov, fcov_raw, gfvar, gfam_err_cov, gfcov_raw, fd_var_tot
+        fvar, fam_err_cov, fcov_raw, gfvar, gfam_err_cov, gfcov_raw
             fcov_raw is the full cross-band covariance of the flux sums
-            (None on the star, bdf-joint and fallback paths) and gfcov_raw
+            (None on the star and fallback paths) and gfcov_raw
             the gauss-estimator analog
         """
         m = self.models[i]
@@ -2247,7 +1805,6 @@ class _Deblender(object):
         gfvar = None
         gfam_err_cov = None
         gfcov_raw = None
-        fd_var_tot = None
         if m['type'] != 'star' and sums_i[5] > 0:
             if m['type'] in ('gauss', 'ladder'):
                 # ladder: the per-object errors use the gauss
@@ -2256,31 +1813,13 @@ class _Deblender(object):
                 # fixed-point errors are the follow-on
                 mtype = 'gauss'
                 fam_cov = m['cov_sm'] - self.smooth_cov
-            elif m['type'] == 'bdf':
-                # the spec dict carries the split state
-                mtype = m
-                fam_cov = m['cov']
             else:
                 mtype = m['type']
                 fam_cov = m['cov']
-            fvar = None
-            if m['type'] == 'bdf':
-                terms = self._bdf_error_terms(i, fvar_raw, fmcov)
-                if terms is not None:
-                    G, k, fdv, eta_scov, eta_fcovs = terms
-                    fvar, fam_err_cov, fd_var_tot = bdf_joint_sandwich(
-                        m, self.wt_cov[i], self.Tsmooth,
-                        sums_i, covj, fs, fvar_raw, fmcov,
-                        split_grad=G, shrink_k=k,
-                        fd_var_data=fdv,
-                        eta_scov=eta_scov, eta_fcovs=eta_fcovs,
-                    )
-            if fvar is None:
-                fd_var_tot = None
-                fvar, fam_err_cov, fcov_raw = model_sandwich(
-                    mtype, fam_cov, self.wt_cov[i], self.Tsmooth,
-                    sums_i, covj, fs, fvar_raw, fmcov,
-                )
+            fvar, fam_err_cov, fcov_raw = model_sandwich(
+                mtype, fam_cov, self.wt_cov[i], self.Tsmooth,
+                sums_i, covj, fs, fvar_raw, fmcov,
+            )
             if fvar is None:
                 # the sandwich could not be evaluated; fall back
                 # to the fixed weight variances, with the
@@ -2307,7 +1846,7 @@ class _Deblender(object):
                     gfam_err_cov = None
                     gfcov_raw = None
         return (fvar, fam_err_cov, fcov_raw, gfvar, gfam_err_cov,
-                gfcov_raw, fd_var_tot)
+                gfcov_raw)
 
     def _set_shape(self, res, i, fam_err_cov):
         """
@@ -2476,10 +2015,8 @@ def _convert_fixed_models(fixed_models, nband, Tsmooth):
                 'rungs': ladder_rung_covs(wt_cov, Tsmooth),
                 'amps': amps.copy(),
             }
-        elif ftype in ('gauss', 'exp', 'dev', 'bdf'):
+        elif ftype in ('gauss', 'exp', 'dev'):
             pars = [f['e1'], f['e2'], f['T']]
-            if ftype == 'bdf':
-                pars = pars + [f['fracdev'], f['TdByTe']]
             if not np.all(np.isfinite(pars)):
                 raise ValueError(
                     f'nonfinite fixed model parameters: {f}'
@@ -2490,12 +2027,6 @@ def _convert_fixed_models(fixed_models, nband, Tsmooth):
                     'type': 'gauss',
                     'cov_sm': cov + smooth_cov,
                     'F': F,
-                }
-            elif ftype == 'bdf':
-                m = {
-                    'type': 'bdf', 'cov': cov, 'F': F,
-                    'fracdev': f['fracdev'],
-                    'TdByTe': f['TdByTe'],
                 }
             else:
                 m = {'type': ftype, 'cov': cov, 'F': F}
