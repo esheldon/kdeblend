@@ -26,6 +26,11 @@ singles included.  With recentering, the anchor (detection)
 positions are a noisy input whose linear response is priced when
 anchor_sigma is set.
 
+The noise covariance Cov(S) is built from the weight maps with
+the pixels treated as independent.  A noise image attached to
+the observations (use_noise_image) is not used, so correlated
+pixel noise is not accounted for in these errors.
+
 Validated against finite-difference sandwiches, empirical refit
 ensembles and field-scale FD probes (2026-07-29): fluxes,
 colors (via flux_cov) and T/e1/e2 all calibrated at 0.95-1.06

@@ -287,7 +287,9 @@ def deblend(
         If True, the per-mode noise power for the flux errors is
         measured from the noise realization attached to each
         observation (obs.noise) rather than assumed white; use for
-        correlated noise such as with metacal.  Default False.
+        correlated noise such as with metacal.  Not used by the
+        full_errors=True errors, which replace these.  Default
+        False.
     rng: np.random.RandomState
         Used for the psf fits when choosing the smoothing
         automatically; required unless fwhm_smooth is sent, so
@@ -328,7 +330,11 @@ def deblend(
         If True and the deblend converged with every member of a
         supported type (gauss, exp, dev, star, ladder), replace the
         per-object flux and structure errors with the fixed-point
-        values and fill flux_cov; see full_errors.  Default False.
+        values and fill flux_cov; see full_errors.  The full errors
+        take the noise from the weight maps, treating the pixels as
+        independent, and do not use the noise image: with
+        use_noise_image=True they replace the noise image based
+        errors.  Default False.
     anchor_sigma: float or array, optional
         With full_errors and recentering, the noise of the detection
         positions: a scalar sigma in arcsec, an (nobj,) array of
