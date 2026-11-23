@@ -43,9 +43,9 @@ Model types:
   observations; use under correlated noise, e.g. with metacal
 - `full_errors=True`: the full fixed-point covariance, accounting
   for neighbor noise cross-talk and model mismatch and providing
-  cross-band flux covariances for colors.  These errors take the
-  noise from the weight maps and do not use the noise image, so
-  they replace the `use_noise_image` errors
+  cross-band flux covariances for colors.  With
+  `use_noise_image=True` these errors also take the noise from
+  the noise images
 - `fixed_models`: external sources subtracted in closed form
   without being fit
 - `kdeblend.gpu`: CUDA batch fitter for many groups at once
