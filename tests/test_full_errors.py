@@ -635,6 +635,105 @@ def test_full_errors_noise_image_pair_mc():
         assert 0.8 < rT < 1.2, (i, rT)
 
 
+def boxcar_autocov(sigma):
+    """the autocovariance of boxcar_noise at lags -2..2"""
+    tri = np.array([1.0, 2.0, 3.0, 2.0, 1.0]) / 3.0
+    return np.outer(tri, tri) * sigma ** 2
+
+
+def test_full_errors_noise_autocov_pair_mc():
+    """monte carlo calibration under correlated noise with the
+    autocovariance sent in, for the close pair of the noise image
+    test: calibrated without a noise image, at the level of the
+    noise image errors, and with less scatter from pair to pair"""
+    from ngmix.prepsfadmom.full_errors import noise_autocov
+
+    noise_fac = 1 / 3
+    exact = [boxcar_autocov(SIGMAS[b] * noise_fac) for b in range(NBAND)]
+    # as measured from a large field of the same noise
+    mrng = np.random.RandomState(3)
+    measured = [
+        noise_autocov(
+            boxcar_noise(mrng, (250, 250), SIGMAS[b] * noise_fac),
+            max_lag=8,
+        )
+        for b in range(NBAND)
+    ]
+
+    offsets = [(-0.625, 0.0), (0.625, 0.0)]
+    ntrial = 150
+    F = np.zeros((ntrial, 2))
+    Fe = np.zeros((ntrial, 2))
+    Fe_im = np.zeros((ntrial, 2))
+    Fe_meas = np.zeros((ntrial, 2))
+    T = np.zeros((ntrial, 2))
+    Te = np.zeros((ntrial, 2))
+    ngood = 0
+    for k in range(ntrial):
+        rng = np.random.RandomState(7000 + k * 13)
+        mbobs = make_mbobs(
+            rng, offsets, correlated=True, noise_fac=noise_fac,
+        )
+        kw = dict(full_errors=True, ap_rad=1.5)
+        res = run_deblend(mbobs, offsets, noise_autocov=exact, **kw)
+        res_meas = run_deblend(
+            mbobs, offsets, noise_autocov=measured, **kw,
+        )
+        res_im = run_deblend(mbobs, offsets, use_noise_image=True, **kw)
+        if not all(
+            r['converged'] and r['full_errors']
+            for r in (res, res_meas, res_im)
+        ):
+            continue
+        ok = True
+        for i in range(2):
+            robj = res['objects'][i]
+            if (
+                robj['deblend_flags'] != 0
+                or not np.isfinite(robj['T_err'])
+                or not np.all(np.isfinite(robj['flux_err']))
+            ):
+                ok = False
+        if not ok:
+            continue
+        for i in range(2):
+            robj = res['objects'][i]
+            assert robj['flux'][0] == res_im['objects'][i]['flux'][0]
+            F[ngood, i] = robj['flux'][0]
+            Fe[ngood, i] = robj['flux_err'][0]
+            Fe_im[ngood, i] = res_im['objects'][i]['flux_err'][0]
+            Fe_meas[ngood, i] = res_meas['objects'][i]['flux_err'][0]
+            T[ngood, i] = robj['T']
+            Te[ngood, i] = robj['T_err']
+        ngood += 1
+    assert ngood > 0.9 * ntrial
+    F, Fe, Fe_im = F[:ngood], Fe[:ngood], Fe_im[:ngood]
+    Fe_meas = Fe_meas[:ngood]
+    T, Te = T[:ngood], Te[:ngood]
+    for i in range(2):
+        rF = F[:, i].std() / np.sqrt(np.mean(Fe[:, i] ** 2))
+        rT = T[:, i].std() / np.sqrt(np.mean(Te[:, i] ** 2))
+        assert 0.8 < rF < 1.2, (i, rF)
+        assert 0.8 < rT < 1.2, (i, rT)
+        # the level of the noise image errors, less scattered
+        assert abs(Fe[:, i].mean() / Fe_im[:, i].mean() - 1) < 0.05
+        assert Fe[:, i].std() < 0.75 * Fe_im[:, i].std()
+        # the measured autocovariance is as good as the exact one
+        assert np.all(np.abs(Fe_meas[:, i] / Fe[:, i] - 1) < 0.03)
+
+    # one array for every band, and the wrong number of bands
+    res1 = run_deblend(
+        mbobs, offsets, noise_autocov=exact[0], full_errors=True,
+        ap_rad=1.5,
+    )
+    assert res1['full_errors']
+    with pytest.raises(ValueError):
+        run_deblend(
+            mbobs, offsets, noise_autocov=exact[:1] * (NBAND + 1),
+            full_errors=True, ap_rad=1.5,
+        )
+
+
 def test_full_errors_noise_image_bad_pixels():
     """bad pixels with use_noise_image.  A band with no good
     pixels under the kernels reports flux_err = nan while the

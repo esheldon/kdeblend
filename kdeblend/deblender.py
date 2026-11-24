@@ -228,6 +228,7 @@ def deblend(
     flux_tol=None,
     cen_tol=None,
     full_errors=False,
+    noise_autocov=None,
     anchor_sigma=0.0,
 ):
     """
@@ -334,6 +335,16 @@ def deblend(
         images, as stationary correlated noise; the weight maps
         then only mark the good pixels (weight > 0).  Default
         False.
+    noise_autocov: array or sequence of arrays, optional
+        With full_errors, the noise autocovariance of each band
+        as a lag array (ngmix.prepsfadmom.full_errors
+        noise_autocov): one array for every band or a sequence
+        with one per band.  Used by the full errors in place of
+        the weight maps or the autocovariance measured from the
+        noise images; the noise image of a small cutout gives a
+        noisy estimate, so measure this on a larger region with
+        the same noise.  The per-object errors left in place when
+        the full errors cannot be evaluated are not changed.
     anchor_sigma: float or array, optional
         With full_errors and recentering, the noise of the detection
         positions: a scalar sigma in arcsec, an (nobj,) array of
@@ -390,6 +401,7 @@ def deblend(
         res['full_errors'] = apply_full_errors(
             deb, mbobs, res, anchor_sigma=anchor_sigma,
             use_noise_image=use_noise_image,
+            noise_autocov=noise_autocov,
         )
     return res
 
