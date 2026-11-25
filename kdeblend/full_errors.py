@@ -27,9 +27,13 @@ positions are a noisy input whose linear response is priced when
 anchor_sigma is set.
 
 The noise covariance Cov(S) is built from the weight maps with
-the pixels treated as independent.  A noise image attached to
-the observations (use_noise_image) is not used, so correlated
-pixel noise is not accounted for in these errors.
+the pixels treated as independent, or with use_noise_image from
+the noise images attached to the observations, as stationary
+correlated noise (ngmix sums_cov_noise); the weight maps then
+only mark the good pixels.  The autocovariance measured from the
+noise image of a small group cutout is noisy; with noise_autocov
+it is instead sent in, measured on a larger region with the same
+noise.
 
 Validated against finite-difference sandwiches, empirical refit
 ensembles and field-scale FD probes (2026-07-29): fluxes,
@@ -52,6 +56,7 @@ import numpy as np
 
 from ngmix.prepsfadmom.full_errors import (
     moment_kernels, dsums_dtheta, influence_kernels, sums_cov,
+    sums_cov_noise,
     sym3_mat as _sym3_mat,
     dw_derivs as _dw_derivs,
     kernel_ingredients, WK_CHI2_MAX,
@@ -99,7 +104,17 @@ MUTABLE_ATTRS = (
 )
 
 
-def apply_full_errors(deb, mbobs, res, anchor_sigma=0.0):
+class NoiseCovarianceError(Exception):
+    """
+    The noise covariance from a noise image is not usable.
+    """
+    pass
+
+
+def apply_full_errors(
+    deb, mbobs, res, anchor_sigma=0.0, use_noise_image=False,
+    noise_autocov=None,
+):
     """
     Replace a converged deblend's per-object errors with the full values.
 
@@ -112,7 +127,7 @@ def apply_full_errors(deb, mbobs, res, anchor_sigma=0.0):
         The converged deblender instance
     mbobs: ngmix.MultiBandObsList
         The observations the deblender was built from, for the
-        weight maps
+        weight maps and, with use_noise_image, the noise images
     res: dict
         The deblend result, modified in place: each object gains
         flux_cov (nband, nband) and has flux_err, s2n, T_err,
@@ -140,6 +155,13 @@ def apply_full_errors(deb, mbobs, res, anchor_sigma=0.0):
         errors are low on all real galaxies (PAdmomFitter MC:
         T_err 13 percent low on exp truth, 32 on dev; full
         errors 1.00-1.02)
+        A band in which the object has an epoch with no good
+        pixels (weight > 0) under its kernels has no valid
+        error: the data of that epoch would enter as noiseless.
+        Its flux errors are set to nan (flux_err,
+        gauss_flux_err and the ladder flux errors), the band is
+        left out of the s2n values, and the object's structure
+        errors are left at the per-object values.
     anchor_sigma: float or array, optional
         With recentering, the noise of the anchor (detection)
         positions: a scalar sigma in arcsec (isotropic, shared),
@@ -149,12 +171,31 @@ def apply_full_errors(deb, mbobs, res, anchor_sigma=0.0):
         error moments).  The linear anchor response is added to
         the covariance.  0 (default) leaves the errors
         conditional on the anchors
+    use_noise_image: bool, optional
+        If True, take the noise from the noise images attached
+        to the observations, as stationary correlated noise,
+        with the weight maps only marking the good pixels;
+        otherwise from the weight maps, with the pixels
+        independent.  Should match the setting the deblender's
+        epochs were prepared with.  Default False
+    noise_autocov: array or sequence of arrays, optional
+        The noise autocovariance of each band as a lag array
+        (ngmix.prepsfadmom.full_errors noise_autocov): one array
+        for every band or a sequence with one per band.  Used in
+        place of the weight maps or the autocovariance measured
+        from the noise images, whatever use_noise_image; the
+        weight maps only mark the good pixels.  The noise image
+        of a small group cutout gives a noisy autocovariance (20
+        percent scatter in the errors of an isolated faint
+        object); measure this on a larger region with the same
+        noise
 
     Returns
     -------
     True when the full errors were applied, False when the
     deblend is not eligible (unconverged, unsupported member
-    types) and the per-object errors were left in place
+    types, or an unusable noise image covariance) and the
+    per-object errors were left in place
     """
     if not res.get('converged', False):
         return False
@@ -165,8 +206,10 @@ def apply_full_errors(deb, mbobs, res, anchor_sigma=0.0):
     try:
         cov, slices, extras = full_covariance(
             deb, mbobs, anchor_sigma=anchor_sigma,
+            use_noise_image=use_noise_image,
+            noise_autocov=noise_autocov,
         )
-    except LadderResolveError:
+    except (LadderResolveError, NoiseCovarianceError):
         return False
 
     from .deblender import _joint_s2n, _adaptive
@@ -187,10 +230,14 @@ def apply_full_errors(deb, mbobs, res, anchor_sigma=0.0):
         idx = [i0 + b for b in range(nband)]
         fcov = cov[np.ix_(idx, idx)]
         var = np.diag(fcov)
-        flux_err = np.where(var > 0, np.sqrt(var), np.nan)
+        # bands with an epoch that carries no noise for this
+        # object have no valid error; the variance there holds
+        # only the response to the other bands
+        dead = extras['dead_bands'][i]
+        wgood = (var > 0) & ~dead
+        flux_err = np.where(wgood, np.sqrt(var), np.nan)
         robj['flux_cov'] = fcov
         robj['flux_err'] = flux_err
-        wgood = var > 0
         if np.any(wgood):
             # covariance-aware total s/n; the quadrature sum is
             # the fallback for a non positive definite block
@@ -210,7 +257,7 @@ def apply_full_errors(deb, mbobs, res, anchor_sigma=0.0):
                 v = np.diag(c)
                 robj[which + '_flux_cov'] = c
                 robj[which + '_flux_err'] = np.where(
-                    v > 0, np.sqrt(v), np.nan,
+                    (v > 0) & ~dead, np.sqrt(v), np.nan,
                 )
             gv = lad['gradient_var']
             robj['gradient_err'] = np.where(gv > 0, np.sqrt(gv), np.nan)
@@ -223,7 +270,7 @@ def apply_full_errors(deb, mbobs, res, anchor_sigma=0.0):
             # entries (T = 0, flagged shapes) stand
             continue
 
-        if _adaptive(deb.models[i]):
+        if _adaptive(deb.models[i]) and not np.any(dead):
             _apply_structure_errors(robj, cov, i0 + nband + ncen, L)
 
         gF = extras['gauss_flux'][i]
@@ -232,10 +279,10 @@ def apply_full_errors(deb, mbobs, res, anchor_sigma=0.0):
             gvar = np.diag(gfc)
             robj['gauss_flux'] = gF
             robj['gauss_flux_cov'] = gfc
+            wg = (gvar > 0) & ~dead
             robj['gauss_flux_err'] = np.where(
-                gvar > 0, np.sqrt(gvar), np.nan,
+                wg, np.sqrt(gvar), np.nan,
             )
-            wg = gvar > 0
             if np.any(wg):
                 gs2n = _joint_s2n(
                     gF[wg], gfc[np.ix_(wg, wg)],
@@ -303,7 +350,8 @@ def _apply_structure_errors(robj, cov, ic, L):
 
 
 def full_covariance(deb, mbobs, anchor_sigma=0.0,
-                    use_chain=None):
+                    use_chain=None, use_noise_image=False,
+                    noise_autocov=None):
     """
     The full covariance of the packed deblend state at the fixed point.
 
@@ -324,6 +372,16 @@ def full_covariance(deb, mbobs, anchor_sigma=0.0,
     evaluations, retained as the reference for the equivalence
     tests
 
+    With use_noise_image=True the noise covariance of the data
+    sums comes from the noise images attached to the
+    observations, as stationary correlated noise, with the
+    weight maps only marking the good pixels; otherwise from the
+    weight maps, with the pixels independent.  With noise_autocov
+    (one lag array for every band or one per band, see
+    apply_full_errors) the autocovariance is the one sent.  Raises
+    NoiseCovarianceError when a variance from a noise image or a
+    sent autocovariance is negative
+
     The dense products run under single_core_blas: the stack is
     single core by design (parallelism is process level), and
     the covariance/Jacobian products are large enough for a
@@ -335,11 +393,15 @@ def full_covariance(deb, mbobs, anchor_sigma=0.0,
     with single_core_blas():
         return _full_covariance(
             deb=deb, mbobs=mbobs, anchor_sigma=anchor_sigma,
-            use_chain=use_chain,
+            use_chain=use_chain, use_noise_image=use_noise_image,
+            noise_autocov=noise_autocov,
         )
 
 
-def _full_covariance(deb, mbobs, anchor_sigma, use_chain):
+def _full_covariance(
+    deb, mbobs, anchor_sigma, use_chain, use_noise_image=False,
+    noise_autocov=None,
+):
     if use_chain is None:
         use_chain = True
     nobj = deb.nobj
@@ -382,7 +444,10 @@ def _full_covariance(deb, mbobs, anchor_sigma, use_chain):
     npars = x0.size
     slices, pers = _object_layout(deb)
 
-    covS = _cov_sums(deb, obs_flat, epochs, L)
+    covS = _cov_sums(
+        deb, obs_flat, epochs, L, use_noise_image=use_noise_image,
+        noise_autocov=noise_autocov,
+    )
 
     cols = _column_map(deb)
     dNSm = None
@@ -458,9 +523,33 @@ def _full_covariance(deb, mbobs, anchor_sigma, use_chain):
             epochs, Tx, Ra, anchor_cov, slices, lstate, W2, s_star,
         )
 
+    extras['dead_bands'] = _dead_bands(deb, covS, epochs)
+
     D = np.diag(deb.scales)
     _restore_state(deb, snap)
     return D @ cov_norm @ D, slices, extras
+
+
+def _dead_bands(deb, covS, epochs):
+    """
+    The bands in which each object has an epoch without noise.
+
+    An epoch whose flux sum for the object has zero variance has
+    no good pixels (weight > 0) under the object's kernels; its
+    data would enter the errors as noiseless.
+
+    Returns
+    -------
+    dead: (nobj, nband) bool array
+    """
+    nep = len(epochs)
+    dead = np.zeros((deb.nobj, deb.nband), dtype=bool)
+    for i in range(deb.nobj):
+        for iep, ep in enumerate(epochs):
+            col = (i * nep + iep) * 6 + 5
+            if not covS[col, col] > 0:
+                dead[i, ep['band']] = True
+    return dead
 
 
 def _flux_kernel_and_dtheta(ep, W, v0, u0):
@@ -1578,7 +1667,27 @@ def _influence_kernels_chunked(ep, G, shape, extents=None):
     return out
 
 
-def _cov_sums(deb, obs_flat, epochs, L=None, subsample=True):
+def _band_autocovs(noise_autocov, nband):
+    """
+    The noise autocovariance of each band, None when not sent.
+
+    One 2d array is used for every band; otherwise a sequence
+    with one array per band.
+    """
+    if noise_autocov is None:
+        return None
+    if isinstance(noise_autocov, np.ndarray) and noise_autocov.ndim == 2:
+        return [noise_autocov] * nband
+    if len(noise_autocov) != nband:
+        raise ValueError(
+            f'got {len(noise_autocov)} noise_autocov arrays for '
+            f'{nband} bands'
+        )
+    return list(noise_autocov)
+
+
+def _cov_sums(deb, obs_flat, epochs, L=None, subsample=True,
+              use_noise_image=False, noise_autocov=None):
     """
     The covariance of the stacked data sums.
 
@@ -1590,7 +1699,23 @@ def _cov_sums(deb, obs_flat, epochs, L=None, subsample=True):
     extra kernel rows of the same construction.  subsample=False
     builds every kernel on the full padded grid (the referee of the
     coarser exact grids).
+
+    The noise is that of the weight maps, with independent pixels
+    (ngmix sums_cov).  With use_noise_image=True it is instead the
+    stationary correlated noise measured from the noise image of
+    each observation (ngmix sums_cov_noise), with the weight map
+    only marking the good pixels.  In both cases bad pixels
+    (weight <= 0) carry no noise, and a sum with no good pixels
+    under its kernel has exactly zero rows and columns.  The
+    noise image estimate is not guaranteed positive;
+    NoiseCovarianceError is raised if a variance comes out
+    negative.
+
+    With noise_autocov the autocovariance of each band is the
+    one sent (see apply_full_errors) instead of the weight map
+    variance or the estimate from the noise image.
     """
+    autocovs = _band_autocovs(noise_autocov, deb.nband)
     nobj = deb.nobj
     nep = len(epochs)
     nS0 = 6 * nobj * nep
@@ -1658,7 +1783,26 @@ def _cov_sums(deb, obs_flat, epochs, L=None, subsample=True):
             flush()
         hs = np.concatenate(parts, axis=0)
         parts.clear()
-        cb = sums_cov(hs, obs.weight)
+        if autocovs is not None:
+            cb = sums_cov_noise(
+                hs, weight=obs.weight, autocov=autocovs[ep['band']],
+            )
+            if np.any(np.diag(cb) < 0):
+                raise NoiseCovarianceError(
+                    'negative variance from the noise autocovariance'
+                )
+        elif use_noise_image:
+            if not obs.has_noise():
+                raise ValueError(
+                    'obs.noise must be set when use_noise_image=True'
+                )
+            cb = sums_cov_noise(hs, obs.noise, weight=obs.weight)
+            if np.any(np.diag(cb) < 0):
+                raise NoiseCovarianceError(
+                    'negative variance from the noise image'
+                )
+        else:
+            cb = sums_cov(hs, obs.weight)
         del hs
         rows = []
         for i in range(nobj):
