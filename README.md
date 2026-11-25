@@ -83,8 +83,8 @@ The GPU tests skip automatically without `cupy` and a CUDA device.
 
 ## Requirements
 
-- `ngmix` with the `ngmix.prepsfadmom` package (currently the
-  `kspace-admom` branch)
+- `ngmix` with the `ngmix.prepsfadmom` package (currently
+  `master`, not yet in a release)
 - `numpy`, `numba` (via ngmix)
 - `galsim` (tests only)
 - `cupy` (optional, for the GPU fitter)
